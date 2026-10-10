@@ -46,6 +46,9 @@ void XeHost::processKernel(KernelPatcher &patcher) {
    auto v=reinterpret_cast<vc_info *>(patcher.solveSymbol(KernelPatcher::KernelID,"_vinfo"));
    if(v){consoleVinfo=*v;gotConsoleVinfo=true;}else patcher.clearError();
   }
+ } else if(published && profile.family==XELP::Family::RaptorLakeP && checkKernelArgument("-wex-rplp-observe")) {
+  // Catalogued without a backend: read-only evidence, no hooks or admission.
+  xe.observeRaptorLakeP(gpu);
  }
  if(!active || resetFramebuffer==FB_DETECT){resetFramebuffer=FB_NONE;graphics.switchOff();}
  DeviceInfo::deleter(info);

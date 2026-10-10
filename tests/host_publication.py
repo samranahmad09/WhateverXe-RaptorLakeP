@@ -12,8 +12,10 @@ code=r'''
 #include <cassert>
 #include <cstdio>
 #include <vector>
+#include <algorithm>
 #include "kern_xelp_platform.hpp"
-std::vector<int> events;bool publish=true,published=false;uint32_t identity=0x9a498086;
+std::vector<int> events;bool publish=true,published=false,observeArgument=false;uint32_t identity=0x9a498086;
+bool checkKernelArgument(const char *name){return observeArgument && !strcmp(name,"-wex-rplp-observe");}
 struct Object {virtual ~Object()=default;};
 struct OSData:Object {uint32_t value=0;void *getBytesNoCopy(){return &value;}size_t getLength(){return 4;}};
 OSData fake;Object customModel;bool hasModel=false;unsigned modelWrites=0;Object *deviceProperty=nullptr;
@@ -37,21 +39,23 @@ struct Graphics {bool off=false;void switchOff(){off=true;}} graphics;
 struct XeHost {
  bool active=false;enum {FB_DETECT,FB_RESET,FB_COPY,FB_ZEROFILL,FB_NONE,FB_TOTAL};uint32_t resetFramebuffer=FB_NONE;
  struct vc_info{};vc_info consoleVinfo;bool gotConsoleVinfo=false;
- struct XE {void processKernel(KernelPatcher &,DeviceInfo *){events.push_back(8);}} xe;
+ struct XE {void processKernel(KernelPatcher &,DeviceInfo *){events.push_back(8);}void observeRaptorLakeP(IOPCIDevice *){events.push_back(7);}} xe;
  void processKernel(KernelPatcher &);
 };
 '''.replace('// DEVICE_ADAPTER',adapter)+body+r'''
 int main(){KernelPatcher patcher;IOPCIDevice gpu;
-for(unsigned test=0;test<6;++test){
- events.clear();published=false;publish=test!=1;identity=(test==2 || test>=4)?0x12348086:0x9a498086;deviceProperty=test>=4?&fake:nullptr;fake.value=test==4?0x46D2:0xFFFF;graphics.off=false;
- hasModel=test==3;modelWrites=0;
+for(unsigned test=0;test<8;++test){
+ const bool rpl=test>=6;
+ events.clear();published=false;publish=test!=1;identity=rpl?0xa7a88086:(test==2 || test>=4)?0x12348086:0x9a498086;deviceProperty=test==4 || test==5?&fake:nullptr;fake.value=test==4?0x46D2:0xFFFF;graphics.off=false;
+ hasModel=test==3;modelWrites=0;observeArgument=test==7;
  DeviceInfo::value.videoBuiltin=test==0?nullptr:&gpu;XeHost host;host.processKernel(patcher);
- assert(events.back()==9);assert(modelWrites==(test==4?1U:0U));
+ assert(events.back()==9);assert(modelWrites==(test==4 || rpl?1U:0U));
  if(test<2){assert(!host.active&&graphics.off);assert(events.size()==(test==0?1:2));}
  else if(test==2 || test==5){assert(!host.active&&graphics.off);assert(events.size()==4);}
+ else if(rpl){assert(!host.active&&graphics.off&&!std::count(events.begin(),events.end(),8));assert(events.size()==(test==7?5U:4U));assert((events[3]==7)==(test==7));}
  else {assert(host.active&&!graphics.off);assert(events.front()==1);assert(events[events.size()-2]==8);}
 }
-puts("PASS actual host admission: absent/unpublished/unsupported GPUs never enter Xe; published PCI reads precede selected-driver dispatch");}
+puts("PASS actual host admission: absent/unpublished/unsupported GPUs never enter Xe; published PCI reads precede selected-driver dispatch; RPL-P observation is opt-in and inactive");}
 '''
 with tempfile.TemporaryDirectory(prefix='wxe-host-') as d:
  p=Path(d);(p/'test.cpp').write_text(code)

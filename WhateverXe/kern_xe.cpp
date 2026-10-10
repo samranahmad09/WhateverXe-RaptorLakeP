@@ -9,6 +9,7 @@
 
 #include "kern_xe.hpp"
 #include "kern_alderlake_n.hpp"
+#include "kern_raptorlake_p.hpp"
 #include "kern_xelp_device.hpp"
 #include "kern_xelp_memory_layout.hpp"
 #include "kern_xelp_forcewake_irq.hpp"
@@ -2887,6 +2888,57 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 			gpu.status,gpu.stage,gpu.engineWrites,gpu.head,gpu.tail,gpu.result,gpu.token,gpu.retained);
 	}
 
+	map->release();
+}
+
+// Not an admission path: no revision is qualified, so unknown steppings are
+// published without a name. The only MMIO writes are readGT's balanced
+// forcewake request/release; display, PPS, backlight and AUX are read only.
+void XE::observeRaptorLakeP(IOPCIDevice *pci) {
+	const auto identity = pci->configRead32(0);
+	const auto revision = pci->configRead8(8);
+	const auto step = RaptorLakeP::stepping(revision);
+	pci->setProperty("RPLPObserveVersion", 1ULL, 32);
+	pci->setProperty("RPLPPhysicalIdentity", identity, 32);
+	pci->setProperty("RPLPPhysicalRevision", revision, 32);
+	if (step.gt) {
+		pci->setProperty("RPLPGTStep", step.gt);
+		pci->setProperty("RPLPDisplayStep", step.display);
+	}
+	const auto memory = xelpPhysicalMemory(pci);
+	const auto aperture = pci->getDeviceMemoryWithRegister(0x18);
+	uint64_t layout[] {1, pci->configRead16(0x50), pci->configRead32(0xC0), pci->configRead32(0xC4),
+		aperture ? aperture->getLength() : 0, memory.valid, memory.base, memory.bytes, memory.gttBytes};
+	pci->setProperty("RPLPPhysicalMemoryLayout", layout, sizeof(layout));
+	if (!RaptorLakeP::family(identity) || !(pci->configRead16(4) & 2)) return;
+	auto map = pci->mapDeviceMemoryWithRegister(0x10, kIOMapInhibitCache);
+	if (!map) return;
+	struct ReadIO {
+		volatile uint8_t *base;
+		uint64_t length;
+		bool readable(uint32_t offset) const { return base && length >= 4 && offset <= length - 4; }
+		uint32_t read(uint32_t offset) const { return *reinterpret_cast<volatile uint32_t *>(base + offset); }
+		void write(uint32_t offset,uint32_t value) { *reinterpret_cast<volatile uint32_t *>(base + offset)=value; }
+		void delay() { IODelay(100); }
+	} io {reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress()), map->getLength()};
+	const bool barReady = io.base && io.length == 0x1000000;
+	const auto reservedHigh = barReady ? io.read(0x1082C4) : UINT32_MAX;
+	const auto reservedLow = barReady ? io.read(0x1082C0) : UINT32_MAX;
+	const auto reserved = barReady && reservedHigh == io.read(0x1082C4) ?
+		(uint64_t(reservedHigh) << 32) | reservedLow : UINT64_MAX;
+	auto bounded = memory;
+	uint64_t reservation[] {1, XELPMemory::reservation(bounded, reserved), reserved, bounded.usable()};
+	pci->setProperty("RPLPStolenReservation", reservation, sizeof(reservation));
+	auto gt = RaptorLakeP::readGT(io, barReady);
+	pci->setProperty("RPLPGTReadout", &gt, sizeof(gt));
+	auto display = AlderLakeN::readDisplay(io, barReady);
+	pci->setProperty("RPLPDisplay13Boot", &display, sizeof(display));
+	auto edp = RaptorLakeP::readEDP(io, display);
+	pci->setProperty("RPLPEDPBoot", &edp, sizeof(edp));
+	SYSLOG("igfx", "RaptorLakeP observe rev=%u GT status=%u EU=%u DSS=%u L3 pairs=%x media=%x display=%u powered=%x active=%x eDP=%u dp=%x ddiA=%x; no backend",
+		revision, static_cast<uint32_t>(gt.forcewake.status), gt.resources.eus, gt.resources.dss,
+		gt.resources.l3BankPairs, gt.forcewake.fuses[4], static_cast<uint32_t>(display.status),
+		display.poweredPipes, display.activePipes, static_cast<uint32_t>(edp.status), edp.dpPipes, edp.ddiAPipes);
 	map->release();
 }
 

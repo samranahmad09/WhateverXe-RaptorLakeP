@@ -1,0 +1,125 @@
+// RPL-P/RPL-U identity and read-only GT/eDP evidence. Observation only:
+// RaptorLakeP stays catalogued without a GT backend, so XELP admission, DVMT,
+// donor start and every Display 13 write path remain off. The only MMIO
+// writes are AlderLakeN::readGT's balanced forcewake request/release.
+// Linux intel_step.c adlp_rplp_revids and intel_display_device.c
+// adl_p_rpl_pu_steppings cover both RPL-P and RPL-U: revision 4 is GT C0 /
+// display E0. Other revisions have no stepping and no WA review.
+#ifndef kern_raptorlake_p_hpp
+#define kern_raptorlake_p_hpp
+#include <stdint.h>
+#include "kern_xelp_platform.hpp"
+#include "kern_alderlake_n.hpp"
+
+namespace RaptorLakeP {
+constexpr uint32_t DisplayVersion = 13;
+
+inline bool family(uint32_t identity) {
+    return XELP::identify(identity,0).family==XELP::Family::RaptorLakeP;
+}
+struct Stepping { const char *gt {}, *display {}; };
+inline Stepping stepping(uint32_t revision) {
+    return revision==4 ? Stepping {"C0","E0"} : Stepping {};
+}
+
+// Gen12 SSEU (Linux gen12_sseu_info_init): one slice, up to six DSS, one
+// disable bit per EU pair. Native subslices are twice the DSS population, as
+// for AlderLakeN. 0x9118 bits3:0 disable L3 bank pairs (Linux l3bank_mask);
+// the donor's bank count for a four-DSS GT is not inferred here. 0x9140
+// disables VDBOX (bits7:0) and VEBOX (bits19:16) instances.
+struct Resources {
+    uint32_t slices {}, dss {}, nativeSubslices {}, eus {}, l3BankPairs {}, vdbox {}, vebox {};
+};
+inline bool resources(uint32_t slice, uint32_t dss, uint32_t euDisable,
+                      uint32_t l3Disable, uint32_t media, Resources &out) {
+    out = {};
+    if (slice != 1 || !dss || (dss&~0x3FU) || (euDisable&~0xFFU) || euDisable==0xFF ||
+        !(~l3Disable&0xFU))
+        return false;
+    const auto count=static_cast<uint32_t>(__builtin_popcount(dss));
+    const auto eus=2*count*(8-static_cast<uint32_t>(__builtin_popcount(euDisable)));
+    out = {1, count, 2*count, eus, ~l3Disable&0xFU, ~media&0xFFU, (~media>>16)&0xFU};
+    return true;
+}
+
+// The Gen12 forcewake/fuse/engine protocol is AlderLakeN::readGT's. Its final
+// Complete or ProfileMismatch status means every read succeeded and both
+// domains were released; only the profile verdict is re-evaluated here.
+struct GTReadout {
+    AlderLakeN::GTReadout forcewake;
+    Resources resources;
+};
+static_assert(sizeof(GTReadout)==67*4,"RaptorLakeP GT readout layout");
+
+template<class IO> GTReadout readGT(IO &io, bool admitted) {
+    GTReadout out;
+    out.forcewake=AlderLakeN::readGT(io,admitted);
+    auto &gt=out.forcewake;
+    if (gt.status==AlderLakeN::GTStatus::Complete || gt.status==AlderLakeN::GTStatus::ProfileMismatch) {
+        gt.resources={};
+        gt.status=resources(gt.fuses[0],gt.fuses[1],gt.fuses[2],gt.fuses[3],gt.fuses[4],out.resources) ?
+            AlderLakeN::GTStatus::Complete : AlderLakeN::GTStatus::ProfileMismatch;
+    }
+    return out;
+}
+
+enum class EDPStatus : uint32_t { NotAdmitted, Complete, Unavailable, PowerChanged };
+struct EDPReadout {
+    uint32_t version {1};
+    EDPStatus status {EDPStatus::NotAdmitted};
+    uint32_t count {}, dpPipes {}, ddiAPipes {};
+    AlderLakeN::Register registers[64] {};
+};
+
+// Read only, after AlderLakeN::readDisplay. South PPS/backlight and the PW0/PW1
+// clock, DC-state and AUX registers are always present. Transcoder DP/PSR and
+// pipe scaler registers are read only for DP SST pipes on combo A/B that the
+// display readout found powered and active. Linux intel_pps_regs.h,
+// intel_backlight_regs.h, intel_psr_regs.h, intel_dp_aux_regs.h and
+// intel_display_regs.h; scalers use a 0x800 pipe stride. No AUX transaction,
+// panel power, backlight, PSR or link write.
+template<class IO> EDPReadout readEDP(IO &io, const AlderLakeN::DisplayReadout &display) {
+    EDPReadout r;
+    if (display.status==AlderLakeN::ReadoutStatus::NotAdmitted) return r;
+    r.status = EDPStatus::Unavailable;
+    uint32_t power {};
+    if (display.status!=AlderLakeN::ReadoutStatus::Complete || !AlderLakeN::value(display,0x45404,power))
+        return r;
+    const auto add = [&](uint32_t offset) {
+        if (r.count >= sizeof(r.registers) / sizeof(r.registers[0]) || !io.readable(offset)) {
+            r.status = EDPStatus::Unavailable;
+            return UINT32_MAX;
+        }
+        const uint32_t value = io.read(offset);
+        r.registers[r.count++] = {offset, value};
+        if (value == UINT32_MAX) r.status = EDPStatus::Unavailable;
+        return value;
+    };
+    r.status = EDPStatus::Complete;
+    // PCH PPS 0/1, BXT_BLC_PWM 1/2, DC_STATE_EN, PWR_WELL_CTL_AUX1/2,
+    // DP_AUX_CH_CTL A/B, DPLL0/1_ENABLE and TGL_DPLL1_CFGCR1.
+    const uint32_t global[] {0xC7200, 0xC7204, 0xC7208, 0xC720C, 0xC7300, 0xC7304, 0xC7308, 0xC730C,
+        0xC8250, 0xC8254, 0xC8258, 0xC8350, 0xC8354, 0xC8358, 0x45504, 0x45440, 0x45444,
+        0x64010, 0x64110, 0x46010, 0x46014, 0x164290};
+    for (auto offset : global) add(offset);
+    for (unsigned pipe = 0; pipe < 3; ++pipe) {
+        uint32_t func {};
+        if (!(display.activePipes & (1U << pipe)) || !AlderLakeN::value(display, 0x60400 + 0x1000 * pipe, func))
+            continue;
+        // TGL+ encodes port + 1 in bits30:27; mode 2 is DP SST.
+        const auto port = (func >> 27) & 15;
+        if (((func >> 24) & 7) != 2 || (port != 1 && port != 2)) continue;
+        r.dpPipes |= 1U << pipe;
+        if (port == 1) r.ddiAPipes |= 1U << pipe;
+        // DP_TP_CTL/STATUS, DATA_M1/N1, LINK_M1/N1, MSA_MISC, PSR and PSR2 CTL/STATUS.
+        const uint32_t transcoder[] {0x60540, 0x60544, 0x60030, 0x60034, 0x60040, 0x60044,
+            0x60410, 0x60800, 0x60840, 0x60900, 0x60940};
+        for (auto offset : transcoder) add(offset + 0x1000 * pipe);
+        add(0x68180 + 0x800 * pipe); add(0x68280 + 0x800 * pipe);
+    }
+    const auto after = add(0x45404);
+    if (r.status == EDPStatus::Complete && after != power) r.status = EDPStatus::PowerChanged;
+    return r;
+}
+}
+#endif
