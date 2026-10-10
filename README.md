@@ -1,14 +1,118 @@
-# WhateverXe
+# WhateverXe-RaptorLakeP
 
 [日本語](README_ja.md)
 
-WhateverXe is a Lilu plugin that adapts Apple graphics drivers for selected
-Intel Xe-LP integrated GPUs. It is derived from WhateverGreen.
+A fork of [WhateverXe](https://github.com/b00t0x/WhateverXe) working toward macOS support for Intel
+**Raptor Lake-P** integrated graphics: the UHD and Iris Xe GPUs in 13th-generation Core H, P and U laptop
+processors, including the laptop's internal (eDP) panel.
 
-This project is experimental and requires the Xe root patch provided by the
+> **Status: not a working driver yet.**
+> - Today this fork only adds an opt-in, read-only diagnostic (`-wex-rplp-observe`). It reports the GPU's
+>   configuration and the firmware's display state.
+> - Raptor Lake-P GPUs remain unsupported.
+> - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.
+
+This is an independent hobby fork, not affiliated with the upstream author. Work that holds up on real
+hardware will be offered upstream, so the `rplp-*` branches carry no fork-only changes. `main` adds this
+README on top.
+
+## Target hardware
+
+| | |
+| --- | --- |
+| GPU family | Raptor Lake-P (Linux i915 `RAPTORLAKE_P` / `RAPTORLAKE_U`). Device IDs `A7A0`, `A7A1`, `A7A8`, `A7A9`, `A7AA`–`A7AD` |
+| Processors | 13th-generation Intel Core **H**, **P** and **U** laptop CPUs, e.g. i7-13620H, i7-1360P, i5-1335U |
+| GPU core | Xe-LP (Gen12), the same architecture as Tiger Lake's Iris Xe. Up to 96 EU depending on the SKU |
+| Display engine | Display version 13 (XE_LPD), the same generation as Alder Lake-N, which upstream already drives |
+| Not targeted | Raptor Lake-S desktop and **HX** laptop CPUs (`A780`–`A78B`). They use display version 12 and need a different path |
+| Reference machine | ASUS TUF Gaming F15 FX507VI: i7-13620H, UHD Graphics `A7A8` rev 04 (64 EU), 1920×1080 144 Hz eDP panel. Its NVIDIA RTX 4070 sits behind a MUX and is not used by this fork |
+
+## Why a `device-id` override is not enough
+
+- **GT profile.** Upstream's Alder Lake-N profile accepts at most 2 DSS / 32 EU. The reference GPU has
+  4 DSS / 64 EU and needs its own L3 and URB values.
+- **Stepping.** Revision 04 (GT C0 / display E0 in Linux's tables) needs its own workaround review.
+- **Internal panel.** WhateverXe drives fixed HDMI and DisplayPort outputs. eDP (panel power sequencing,
+  backlight, link training) is not implemented for any platform yet.
+- **Platform.** Big Sur 11.7.11 has to boot on a 13th-generation hybrid CPU first. That is not yet proven on
+  the reference machine.
+
+## Plan
+
+Each stage follows upstream's approach: observe first, then qualify, then enable, with CPU tests for
+every hardware rule.
+
+| Stage | Goal | Done when | Status |
+| --- | --- | --- | --- |
+| R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Code complete, CI-tested; hardware run pending |
+| R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | Not started |
+| R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Not started |
+| R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
+| R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | Not started |
+
+## Trying the R1 diagnostic
+
+**What it does.** The diagnostic runs only with `-wex-rplp-observe`, and only on a physical Raptor Lake-P
+GPU.
+- It reads the GPU fuses (slice, DSS, EU, L3, media), the Display 13 boot state, and the eDP-related
+  registers (panel power, backlight, DP link, PSR).
+- It publishes them in the IORegistry.
+- The only register writes are a balanced forcewake request and release, the same handshake upstream uses
+  on Alder Lake-N. It does not run if anything already holds forcewake.
+- The GPU stays unsupported.
+
+**Requirements.** Lilu and a DEBUG WhateverXe from this fork. The OCLP root patch and AMFIPass are not
+needed for this step.
+
+**macOS.** Big Sur 11.7.11 (20G1443) is the only version WhateverXe declares. On any other version, add
+`-wexbeta` for this read-only step only, and remove it afterwards.
+
+**Builds.**
+- Go to [Actions](https://github.com/samranahmad09/WhateverXe-RaptorLakeP/actions/workflows/ci.yml), open
+  the latest successful run on `main`, and download **Artifacts**. It contains `WhateverXe-…-DEBUG.zip`.
+- These builds share upstream's version number, so keep them apart from upstream releases.
+
+**Collecting.**
+
+```sh
+ioreg -lw0 -r -k RPLPObserveVersion > ~/Desktop/rplp-ioreg.txt
+sudo dmesg | grep -E 'RaptorLakeP|WhateverXe' > ~/Desktop/rplp-dmesg.txt
+```
+
+**Published properties.**
+- `RPLPGTReadout`, `RPLPDisplay13Boot`, `RPLPEDPBoot`
+- `RPLPPhysicalMemoryLayout`, `RPLPStolenReservation`
+- Physical identity, revision, and the GT and display stepping names
+
+## Related work (outside this repository)
+
+This fork is the main route of a hobby effort to get graphics working on the reference laptop. There are
+two other tracks, and neither is part of this repository.
+
+- **NVIDIA dGPU, an optional experiment.**
+  - In the laptop's MUX "dGPU only" mode, the RTX 4070 drives the panel directly.
+  - [null-moth's NVIDIA driver](https://github.com/nullmoth/nvidia-macos-driver) (macOS Sequoia, PolyForm
+    Noncommercial) lists this GPU. Laptop pieces such as backlight control are still stubs there.
+- **An Intel stack without Apple binaries, long-term research.**
+  - The idea: Mesa's ANV Vulkan driver, a new Intel kernel driver, and an existing Metal-on-Vulkan layer.
+  - It would follow the pattern of [Navi48-MacOS](https://github.com/Almosst-DEV/Navi48-MacOS) for AMD and
+    null-moth's Metal plugin.
+  - Exploratory only; there is no code yet.
+
+---
+
+## Upstream WhateverXe documentation
+
+WhateverXe is a Lilu plugin that adapts Apple graphics drivers for selected Intel Xe-LP integrated GPUs. It
+is derived from WhateverGreen.
+
+It is experimental and requires the Xe root patch provided by the
 [OpenCore Legacy Patcher fork](https://github.com/b00t0x/OpenCore-Legacy-Patcher).
 
-## Compatibility
+The sections below are upstream's, changed only where this fork differs. They apply to the stages that
+load Apple's drivers (R2 onward).
+
+### Compatibility
 
 The current target is **macOS Big Sur build 20G1443**.
 
@@ -17,19 +121,25 @@ The current target is **macOS Big Sur build 20G1443**.
 | Tiger Lake | `9A40`, `9A49`, `9A78` |
 | Alder Lake-N / Twin Lake | `46D0`–`46D4` |
 
-Support varies by system and connector layout. The table includes implemented
-backends, not a guarantee for every machine. See [device selection](docs/device-selection.md)
-for detailed selection conditions and overrides.
+Raptor Lake-P has no backend in this fork yet; see the [plan](#plan) above.
 
-Dual external 1920×1080 at 60 Hz output, Metal/OpenGL, hardware HEVC and display
-sleep/wake have been tested on Tiger Lake and Alder Lake-N. Hardware H.264
-encode/decode has also been tested on Tiger Lake. Three simultaneous displays,
-system sleep, higher resolutions and other connector layouts require further
-validation. USB-C and internal display support are planned below.
+Support varies by system and connector layout. The table includes implemented backends, not a guarantee
+for every machine. See [device selection](docs/device-selection.md) for detailed selection conditions and
+overrides.
 
-Download the **RELEASE** ZIP from [Releases](https://github.com/b00t0x/WhateverXe/releases). The DEBUG ZIP is for troubleshooting.
+**What has been tested upstream.**
+- On Tiger Lake and Alder Lake-N: dual external 1920×1080 at 60 Hz output, Metal/OpenGL, hardware HEVC, and
+  display sleep/wake.
+- On Tiger Lake: hardware H.264 encode/decode as well.
+- Still needing validation: three simultaneous displays, system sleep, higher resolutions and other
+  connector layouts.
+- USB-C and internal display support are on upstream's roadmap.
 
-## Required components
+Upstream releases are on
+[b00t0x/WhateverXe Releases](https://github.com/b00t0x/WhateverXe/releases). This fork publishes CI builds
+only, as described above.
+
+### Required components
 
 | Component | Role |
 | --- | --- |
@@ -41,39 +151,37 @@ Download the **RELEASE** ZIP from [Releases](https://github.com/b00t0x/WhateverX
 Download the OCLP fork from its [Releases page](https://github.com/b00t0x/OpenCore-Legacy-Patcher/releases).
 OCLP installs its root components and updates the kernel collection.
 
-Extract `AMFIPass.kext` from the linked **Mod** archive, place it in
-`EFI/OC/Kexts`, and enable it in `Kernel > Add`. Replace an existing AMFIPass
-with this Mod build; do not load both copies.
+Extract `AMFIPass.kext` from the linked **Mod** archive, place it in `EFI/OC/Kexts`, and enable it in
+`Kernel > Add`. Replace an existing AMFIPass with this Mod build; do not load both copies.
 
-WhateverGreen and WhateverXe must not be enabled together, including in
-mixed-GPU configurations.
+WhateverGreen and WhateverXe must not be enabled together, including in mixed-GPU configurations.
 
-## Configuration
+### Configuration
 
-GPU selection is automatic from the PCI device ID. Connector routing is read
-from firmware VBT where supported; fixed HDMI and fixed DisplayPort layouts
-normally need no manual wiring properties. Advanced `device-id` overrides are
-described in [device selection](docs/device-selection.md).
+GPU selection is automatic from the PCI device ID.
+- Where supported, connector routing is read from the firmware's VBT.
+- Fixed HDMI and fixed DisplayPort layouts normally need no manual wiring properties.
+- Advanced `device-id` overrides are described in [device selection](docs/device-selection.md).
 
-### DVMT
+#### DVMT
 
 Set **DVMT Pre-Allocated to 96MB** in the BIOS/UEFI settings where possible.
 
-If it is fixed at **60MB**, add `-igfxdvmt` to `boot-args` and set both properties
-below on the iGPU under OpenCore's `DeviceProperties > Add`
-(usually `PciRoot(0x0)/Pci(0x2,0x0)`).
+If it is fixed at **60MB**, add `-igfxdvmt` to `boot-args`. Also set both properties below on the iGPU under
+OpenCore's `DeviceProperties > Add` (usually `PciRoot(0x0)/Pci(0x2,0x0)`).
 
 | Property | Type | Value (hex) |
 | --- | --- | --- |
 | `framebuffer-patch-enable` | Data | `01000000` |
 | `framebuffer-stolenmem` | Data | `0000C003` |
 
-These Data values use little-endian byte order. `-igfxdvmt` corrects the capacity
-calculation, while the properties limit the display memory pool to fit within
-60MB. Neither setting increases the memory allocated by the firmware.
-With 96MB, these DVMT-specific settings are unnecessary.
+- These Data values use little-endian byte order.
+- `-igfxdvmt` corrects the capacity calculation, and the properties limit the display memory pool to fit
+  within 60MB.
+- Neither setting increases the memory allocated by the firmware.
+- With 96MB, these DVMT-specific settings are unnecessary.
 
-### Required boot arguments
+#### Required boot arguments
 
 Add the following to OpenCore's `boot-args`:
 
@@ -87,10 +195,9 @@ Add the following to OpenCore's `boot-args`:
 | `-disablegfxfirmware` | Disable the Apple driver's graphics-firmware loading path for the current backend. |
 | `-wex-nopanel` | Additionally required on Tiger Lake systems without an internal display. Alder Lake-N / Twin Lake currently builds an external-display topology automatically and does not use this flag. |
 
-No family-selection or per-feature enable arguments are required for
-Alder Lake-N / Twin Lake.
+No family-selection or per-feature enable arguments are required for Alder Lake-N / Twin Lake.
 
-### Optional boot arguments
+#### Optional boot arguments
 
 | Argument | Purpose |
 | --- | --- |
@@ -99,39 +206,42 @@ Alder Lake-N / Twin Lake.
 | `-wexoff` | Disable WhateverXe. |
 | `-wexbeta` | Bypass the plugin's OS-version check. Exact kernel/driver checks still apply. |
 | `-wex-tgl-off` | Disable the Tiger Lake path. |
+| `-wex-rplp-observe` | Raptor Lake-P only: publish the read-only R1 diagnostic described above. The GPU stays unsupported. |
 
-## Roadmap
+### Upstream roadmap
 
-### Planned
+#### Planned
 
 - macOS Monterey through Tahoe support using OCLP's capabilities
 - Alder Lake and Raptor Lake S/H/P/U support
 - USB-C display output
 - Internal displays
 
-### Not Planned
+#### Not Planned
 
 - Xe-LPG support
 - Xe2 and later architectures
 
-## Build and test
+### Build and test
 
-Use macOS with Xcode command-line tools, Python 3.9 or newer, MacKernelSDK and
-Lilu's development headers/library. Place `MacKernelSDK/` and `Lilu.kext/` in the
-repository root, or pass their paths with `--sdk` and `--lilu`.
+You need macOS with the Xcode command-line tools, Python 3.9 or newer, MacKernelSDK, and Lilu's development
+headers and library. Place `MacKernelSDK/` and `Lilu.kext/` in the repository root, or pass their paths with
+`--sdk` and `--lilu`.
 
 ```sh
 python3 tools/build.py --release
 python3 tools/test.py
 ```
 
-Kexts and a source manifest are written to `build/`. Optional donor replay tests
-accept `--donor /path/to/AppleIntelTGLGraphicsFramebuffer` and
-`--accelerator /path/to/AppleIntelTGLGraphics`, using the exact binaries accepted
-by each test. CPU tests do not establish physical GPU compatibility.
-WhateverGreen source is not a build dependency.
+- Kexts and a source manifest are written to `build/`.
+- Optional donor replay tests accept `--donor /path/to/AppleIntelTGLGraphicsFramebuffer` and
+  `--accelerator /path/to/AppleIntelTGLGraphics`, using the exact binaries each test accepts.
+- CPU tests do not establish physical GPU compatibility.
+- WhateverGreen source is not a build dependency.
+- This fork's CI runs the same commands on every push to `main` and uploads the packaged builds.
 
-## License and credits
+### License and credits
 
-WhateverXe retains WhateverGreen's copyright notices and BSD-3-Clause license.
-See [LICENSE.txt](LICENSE.txt). Lilu and MacKernelSDK are separate dependencies.
+WhateverXe retains WhateverGreen's copyright notices and BSD-3-Clause license; see
+[LICENSE.txt](LICENSE.txt). This fork's additions use the same license. Lilu and MacKernelSDK are separate
+dependencies.
