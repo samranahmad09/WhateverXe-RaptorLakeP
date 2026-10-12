@@ -15,6 +15,8 @@ void IORecursiveLockUnlock(IORecursiveLock*p){p->unlock();}
 #include "kern_tgl_port_map.hpp"
 #include "kern_tgl_fia.hpp"
 constexpr uint32_t kIOReturnNotReady=0xe00002d8;
+uintptr_t testCaller=0;
+#define __builtin_return_address(n) reinterpret_cast<void *>(testCaller)
 #define FunctionCast(name, address) reinterpret_cast<decltype(&name)>(address)
 struct IORegistryEntry {
  static IORegistryEntry *getRegistryRoot(){static IORegistryEntry s;return &s;}
@@ -35,13 +37,16 @@ struct XE {
  static uint32_t wrapTGLSetPortMode(void*,uint32_t);
  uintptr_t orgTGLSetPortMode {};
  bool automatic=false,registered=false;
- bool tglTCModeAllowed(uint32_t ddi,uint32_t mode)const{return !automatic || ddi!=4 || mode==0 || (mode==4&&registered);}
+ uint32_t tglTCAutoRegistered=0,tglTCAutoCandidates=0x10,tglAUXParentMask=0x18;
+ // LEGACY_HPD_POLICY
+ bool tglTCModeAllowed(uint32_t ddi,uint32_t mode)const{return !automatic || ddi!=4 || mode==0 || (mode==4&&(registered || (tglTCAutoRegistered&0x10)));}
  IORecursiveLock *tglModeTransitionLock {};uint32_t tglModeSerializedCalls {};
  bool tglModeResultReady {true}; uint32_t tglModeResultCorrections {};
 };
 XE instance,*callbackXE=&instance;
 bool tglQuietTraining(){return true;}
 // PRODUCTION_WRAPPER
+#undef __builtin_return_address
 // FIA_WRAPPERS
 alignas(8) uint8_t port[0x600],controller[0x1000];
 uint32_t config[8];
@@ -111,6 +116,15 @@ int main(int argc,char **argv){
  instance.registered=true;assert(XE::wrapTGLSetPortMode(port,4)==0&&mode()==4);
  assert(XE::wrapTGLSetPortMode(port,3)==kIOReturnNotReady&&mode()==4);
  assert(XE::wrapTGLSetPortMode(port,0)==0&&powerGets==powerPuts);
+ // First runtime HPD reaches the native setter without a startup probe.
+ instance.registered=false;instance.tglNativeLegacyHPDCaller=0x100;
+ reset(4,2);testCaller=0x101;
+ assert(XE::wrapTGLSetPortMode(port,4)==kIOReturnNotReady&&!powerGets);
+ testCaller=0x100;
+ assert(XE::wrapTGLSetPortMode(port,4)==0&&mode()==4&&instance.tglTCAutoRegistered==0x10);
+ assert(powerGets==1&&powerPuts==0);
+ assert(XE::wrapTGLSetPortMode(port,0)==0&&powerGets==powerPuts);
+ assert(instance.tglTCAutoRegistered==0x10);testCaller=0;
  instance.automatic=false;
  // Native HAL does not treat repeated mode4 as a no-op. This is why boot
  // handoff and subsequent setters must share the durable mode slot.

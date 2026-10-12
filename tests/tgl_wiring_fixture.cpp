@@ -37,14 +37,25 @@ int main(){
  reset();IOService absent;
  assert(XE::tglLoadTCWiring(&absent)&&!object.tglTCWiringExplicit&&object.tglTCWiring.legacy==0);
  // A firmware candidate is not a registered backend, even with USB-C/TBT
- // capability. Only the actual powered provider probe can register it.
+ // capability. A provider probe or exact native legacy-HPD caller is needed.
  reset();object.firmwarePorts.status=XELP::VBT::Status::Valid;
  object.firmwarePorts.present=0x18;object.firmwarePorts.port[3]={0x68c6,9,0,0x30,0xc0,3};
  object.firmwarePorts.port[4]={0x60d6,11,5,0x50,0xc0,3};
  assert(XE::tglLoadTCWiring(&absent)&&object.tglTCAutoCandidates==0x10);
  assert(object.tglTCProbeMask()==0x10&&!object.tglLegacyTCEligible(4));
  assert(object.tglTCModeAllowed(4,0)&&!object.tglTCModeAllowed(4,4));
- object.tglTCAutoRegistered=0x10;
+ assert(!object.tglRegisterLegacyHPD(4,4,0));
+ object.tglNativeLegacyHPDCaller=0x1234;
+ for(unsigned ddi=0;ddi<=9;++ddi)for(unsigned mode=0;mode<=4;++mode)
+  for(uintptr_t caller:{uintptr_t(0),uintptr_t(0x1233),uintptr_t(0x1234)}){
+   object.tglTCAutoRegistered=0;
+   const bool selected=ddi==4&&mode==4&&caller==0x1234;
+   assert(object.tglRegisterLegacyHPD(ddi,mode,caller)==selected);
+   assert(object.tglTCAutoRegistered==(selected?0x10u:0u));
+  }
+ object.tglAUXParentMask=0;object.tglTCAutoRegistered=0;
+ assert(!object.tglRegisterLegacyHPD(4,4,0x1234));object.tglAUXParentMask=0x18;
+ assert(object.tglRegisterLegacyHPD(4,4,0x1234));
  assert(object.tglLegacyTCEligible(4)&&object.tglTCModeAllowed(4,4));
  assert(!object.tglTCModeAllowed(4,2)&&!object.tglTCModeAllowed(4,3));
  // Present-invalid must never fall back to the known machine's preset.

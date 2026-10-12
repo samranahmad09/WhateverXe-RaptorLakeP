@@ -9317,6 +9317,14 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
    // This donor resets the software mode to zero on FIA-ready timeout,
    // but returns the earlier successful base setter's result. Qualify that
    // exact failure and return path before repairing its API contract.
+   const auto hotplug=patcher.solveSymbol<mach_vm_address_t>(index,
+    "__ZN31AppleIntelFramebufferController20invokeHotplugHandlerEjN14AppleIntelPort8PortModeE",address,size);
+   const uint8_t hotplugModeCall[] {0x49,0x8b,0x07,0x4c,0x89,0xff,0x89,0xde,0xff,0x90,0x38,0x01,0x00,0x00};
+   if(hotplug==address+0x748D4 && size>0x74A59 &&
+      !memcmp(reinterpret_cast<const void *>(hotplug+0x177),hotplugModeCall,sizeof(hotplugModeCall)))
+    tglNativeLegacyHPDCaller=hotplug+0x185;
+   IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeNativeLegacyHPDReady",tglNativeLegacyHPDCaller!=0);
+   patcher.clearError();
    static const uint8_t modeEntry[] {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x41,0x89,0xf7,0x48,0x89,0xfb,0x48};
    static const uint8_t modeFailure[] {0x48,0x89,0xdf,0x31,0xf6,0xff,0x55,0xc8,0x44,0x8b,0x65,0xd4,0xe9,0xd8,0,0,0};
    static const uint8_t modeReturn[] {0x44,0x89,0xe0,0x48,0x83,0xc4,0x18,0x5b,0x41,0x5c,0x41,0x5d,0x41,0x5e,0x41,0x5f,0x5d,0xc3};
@@ -11660,6 +11668,13 @@ uint32_t XE::wrapTGLSetPortMode(void *port, uint32_t mode) {
  // and software-result check; locking only our later readback loses updates.
  // This is not a port-use admission/drain gate or a hardware-idle proof.
  auto self=callbackXE;
+ auto caller = __builtin_return_address(0);
+ if(!self->tglTCModeAllowed(traceDDI,mode) &&
+    self->tglRegisterLegacyHPD(traceDDI,mode,reinterpret_cast<uintptr_t>(caller))) {
+  IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeTCDPRegistered",
+   __atomic_load_n(&self->tglTCAutoRegistered,__ATOMIC_ACQUIRE),32);
+  IORegistryEntry::getRegistryRoot()->setProperty("WhateverXeTCDPHotplugRegistered",traceDDI,32);
+ }
  if(!self->tglTCModeAllowed(traceDDI,mode))return kIOReturnNotReady;
  auto transitionLock=self->tglModeResultReady && traceDDI>=3 && traceDDI<=8 ? self->tglModeTransitionLock : nullptr;
  if(transitionLock) {
@@ -11670,7 +11685,6 @@ uint32_t XE::wrapTGLSetPortMode(void *port, uint32_t mode) {
  }
  tglRecordStartOrder(10,port,traceDDI,mode,*reinterpret_cast<uint32_t *>(traceBytes+0x550));
 
-	auto caller = __builtin_return_address(0);
 	tglConnectionRecord(port, 2, false, 0, mode, caller);
 	tglAUXRecord(port, 1, false, 0, mode, 0);
  const bool fiaEligible=(mode==0 || mode==4) && traceDDI<9 &&
@@ -12528,6 +12542,11 @@ uint32_t XE::wrapTGLSetEDID(void *controller, void *request) {
 bool XE::wrapTGLComputeLanes(void *port, const void *timing, uint32_t bpp, uint32_t available, uint32_t *lanes) {
  const auto result = FunctionCast(wrapTGLComputeLanes, callbackXE->orgTGLComputeLanes)(port, timing, bpp, available, lanes);
  const auto caller = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+ // The donor does not consume its first argument. setupOptimalLaneCount
+ // passes port+0x124 there, whereas the guarded validator passes the port.
+ // Establish that caller contract before interpreting any object fields.
+ if (!callbackXE->tglHDMILaneCaller || caller != callbackXE->tglHDMILaneCaller)
+  return result;
  auto config = *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(port)+0x548);
  // r316: this exact validator incorrectly asks a TMDS connector for DP link lanes.
  // Leave lane count zero and continue the remaining native HDMI/scaler checks.

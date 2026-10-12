@@ -5,6 +5,8 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <sys/mman.h>
+#include <unistd.h>
 #include "kern_tgl_hdmi_wiring.hpp"
 #include "kern_vbt.hpp"
 #include "kern_xelp_donor.hpp"
@@ -58,6 +60,21 @@ void expectUnchangedExcept(const uint8_t *after,std::initializer_list<unsigned> 
  assert(!memcmp(after,expected.data(),sizeof(original)));
 }
 int main(){
+ // The native setup caller supplies an interior output pointer as arg0.
+ // Any object/config dereference on an unqualified caller must fault here.
+ setup();
+ const auto page=static_cast<size_t>(sysconf(_SC_PAGESIZE));
+ void *inaccessible=mmap(nullptr,page,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+ assert(inaccessible!=MAP_FAILED);
+ testCaller=0x101;
+ for(bool native:{false,true}){
+  nativeLanesResult=native;uint32_t lanes=4;
+  assert(XE::wrapTGLComputeLanes(inaccessible,nullptr,24,20,&lanes)==native);
+  assert(lanes==4);
+ }
+ object.tglHDMILaneCaller=0;testCaller=0;
+ assert(XE::wrapTGLComputeLanes(inaccessible,nullptr,24,20,nullptr));
+ assert(nativeLanesCalls==3);assert(munmap(inaccessible,page)==0);
  setup();auto current=property(2,0,2,0);IOService absent{&current};assert(XE::tglLoadHDMIWiring(&absent));assert(XE::wrapTGLGetOSInformation(controller));
  const auto p=platform();assert(p!=original&&object.tglHDMIWiringApplied&&object.tglHDMIWiring.ddc[1]==2);
  expectUnchangedExcept(p,{0x30,0x34,0x40,0x48,0x4C}); // panel type/flags, HDMI protocol/type/flags

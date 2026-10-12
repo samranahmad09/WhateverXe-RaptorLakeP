@@ -24,6 +24,8 @@ struct IORegistryEntry {static IORegistryEntry *getRegistryRoot(){static IORegis
 void tglConnectionRecord(void*,unsigned,bool,uint32_t,uint32_t,void*){}
 void tglAUXRecord(void*,unsigned,bool,uint32_t,uint32_t,uint32_t){}
 struct XE {
+ uint32_t tglTCAutoRegistered=0,tglTCAutoCandidates=0x10,tglAUXParentMask=0x18;
+ // LEGACY_HPD_POLICY
  bool tglTCModeAllowed(uint32_t,uint32_t)const{return true;}
  static void tglRecordStartOrder(unsigned,void*,unsigned=9,uint64_t=0,uint64_t=0,uint64_t=0){}
  static void tglRecordNativeModeBinding(void *,uint32_t,uint32_t) {}

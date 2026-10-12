@@ -380,6 +380,16 @@ private:
  // Native mode setter owns FIA1 bits 0/1 correctly on modular TGL. Later
  // instances need the new mode backend, regardless of available PHY math.
  uint32_t tglTCAutoCandidates {},tglTCAutoRegistered {};
+ uintptr_t tglNativeLegacyHPDCaller {};
+ bool tglRegisterLegacyHPD(uint32_t ddi,uint32_t mode,uintptr_t caller) {
+  // The qualified native HPD-high branch supplies its decoded transport.
+  // This admits the same firmware/backend pair as the boot probe, without
+  // reading FIA before the native mode setter acquires its power references.
+  if(!tglNativeLegacyHPDCaller || caller!=tglNativeLegacyHPDCaller || mode!=4 ||
+     ddi<3 || ddi>=9 || !(tglTCAutoCandidates&tglAUXParentMask&(1U<<ddi)))return false;
+  __atomic_or_fetch(&tglTCAutoRegistered,1U<<ddi,__ATOMIC_RELEASE);
+  return true;
+ }
  uint32_t tglTCProbeMask() const {return tglTCWiring.valid ?
   (tglTCWiring.legacy|tglTCAutoCandidates)&tglAUXParentMask : 0;}
  bool tglTCModeAllowed(uint32_t ddi,uint32_t mode) const {
