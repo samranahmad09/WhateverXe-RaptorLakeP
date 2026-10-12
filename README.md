@@ -11,6 +11,7 @@ processors, including the laptop's internal (eDP) panel.
 >   configuration and the firmware's display state.
 > - Raptor Lake-P GPUs remain unsupported.
 > - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.
+> - Hardware findings so far: [docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md).
 
 This is an independent hobby fork, not affiliated with the upstream author. Work that holds up on real
 hardware will be offered upstream, so the `rplp-*` branches carry no fork-only changes. `main` adds this
@@ -34,8 +35,11 @@ README on top.
 - **Stepping.** Revision 04 (GT C0 / display E0 in Linux's tables) needs its own workaround review.
 - **Internal panel.** WhateverXe drives fixed HDMI and DisplayPort outputs. eDP (panel power sequencing,
   backlight, link training) is not implemented for any platform yet.
-- **Platform.** Big Sur 11.7.11 has to boot on a 13th-generation hybrid CPU first. That is not yet proven on
-  the reference machine.
+- **Outputs.** On the reference machine, as on many Raptor Lake-H laptops, the Intel GPU's only outputs are
+  the eDP panel and USB-C DisplayPort; HDMI is wired to the NVIDIA GPU. Upstream drives neither on display
+  version 13 yet, so the internal panel (R3) is the first possible picture.
+- **Platform.** Big Sur 11.7.11 has to boot on a 13th-generation hybrid CPU first. OpenCore documents the
+  required CPUID spoof and `ProvideCurrentCpuInfo`; a boot test on the reference machine is in progress.
 
 ## Plan
 
@@ -49,6 +53,13 @@ every hardware rule.
 | R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Not started |
 | R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
 | R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | Not started |
+
+The hardware inputs for R2-R4 are measured on the reference machine and listed in
+[docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md):
+- the GT profile values (64 EU, 6 L3 banks, 384 KB URB, Alder Lake-N media fuse);
+- the eDP link the firmware leaves running (1920x1080 at 144 Hz, HBR x4, PSR off);
+- the outputs;
+- the fact that the embedded controller owns the backlight.
 
 ## Trying the R1 diagnostic
 
@@ -78,6 +89,11 @@ needed for this step.
 ioreg -lw0 -r -k RPLPObserveVersion > ~/Desktop/rplp-ioreg.txt
 sudo dmesg | grep -E 'RaptorLakeP|WhateverXe' > ~/Desktop/rplp-dmesg.txt
 ```
+
+**Decoding.**
+- `python3 tools/rplp-decode.py rplp-ioreg.txt` turns the readout into named values.
+- Add `--linux <capture>` to compare it with a Linux reference capture of the same machine, made with the
+  read-only [`tools/rplp-capture.sh`](tools/rplp-capture.sh) from a Ubuntu live session.
 
 **Published properties.**
 - `RPLPGTReadout`, `RPLPDisplay13Boot`, `RPLPEDPBoot`

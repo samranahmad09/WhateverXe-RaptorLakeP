@@ -9,6 +9,7 @@
 > - このforkが現在追加しているのは、任意かつ読み取り専用の診断機能（`-wex-rplp-observe`）のみです。GPUの構成とファームウェアの画面状態を報告します。
 > - Raptor Lake-PのGPUは引き続き非対応です。
 > - upstreamが対応する機種（Tiger Lake、Alder Lake-N / Twin Lake）の動作はupstreamと変わりません。
+> - これまでのハードウェア調査結果：[docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md)（英語）。
 
 本forkは個人が趣味で運営する独立したforkであり、upstreamの作者とは関係ありません。実機で検証できた成果はupstreamへ提案する予定です。そのため`rplp-*`ブランチにはfork固有の変更を含めず、`main`ではこのREADMEを追加しています。
 
@@ -28,7 +29,8 @@
 - **GTプロファイル。** upstreamのAlder Lake-N用プロファイルは最大2 DSS／32 EUまでです。検証機のGPUは4 DSS／64 EUのため、専用のL3／URB値が必要です。
 - **ステッピング。** revision 04（Linuxの表ではGT C0／display E0）は、ワークアラウンドを個別に確認する必要があります。
 - **内蔵ディスプレイ。** WhateverXeが駆動するのは固定HDMI／DisplayPort出力です。eDP（パネル電源シーケンス、バックライト、リンクトレーニング）はどのプラットフォームでも未実装です。
-- **プラットフォーム。** まず第13世代のハイブリッドCPUでBig Sur 11.7.11が起動する必要があります。検証機ではまだ確認できていません。
+- **出力。** 検証機を含む多くのRaptor Lake-Hノートでは、Intel GPUの出力はeDPパネルとUSB-CのDisplayPortのみで、HDMIはNVIDIA GPUに接続されています。upstreamはDisplay version 13でどちらもまだ駆動しないため、最初に表示できる可能性があるのは内蔵パネル（R3）です。
+- **プラットフォーム。** まず第13世代のハイブリッドCPUでBig Sur 11.7.11が起動する必要があります。必要なCPUIDの偽装と`ProvideCurrentCpuInfo`はOpenCoreに記載されており、検証機での起動テストを進めています。
 
 ## 計画
 
@@ -41,6 +43,12 @@
 | R3 | 内蔵ディスプレイの初表示：donorの内蔵パネル用コネクタを残し、ファームウェアが確立したリンクを引き継ぐ | ファームウェアのモードで内蔵パネルにデスクトップが表示される | 未着手 |
 | R4 | 内蔵ディスプレイの本対応：パネル電源シーケンス、バックライト、消灯／点灯、ADL-Pのテーブルによるリンク再トレーニング、144Hz | 輝度調整、スリープ／復帰、ネイティブのリフレッシュレートが動作する | 未着手 |
 | R5 | 内蔵ディスプレイでのMetalと安定化。その後USB-C出力 | 内蔵パネルでWindowServerがアクセラレーションされる | 未着手 |
+
+R2〜R4に必要なハードウェア情報は検証機で測定済みで、[docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md)にまとめています。
+- GTプロファイルの値（64 EU、L3 6バンク、URB 384 KB、Alder Lake-Nと同じmediaのfuse）
+- ファームウェアが動作させたままにするeDPリンク（1920×1080・144Hz、HBR×4、PSRオフ）
+- 出力構成
+- バックライトをエンベデッドコントローラが制御していること
 
 ## R1診断の試し方
 
@@ -64,6 +72,10 @@
 ioreg -lw0 -r -k RPLPObserveVersion > ~/Desktop/rplp-ioreg.txt
 sudo dmesg | grep -E 'RaptorLakeP|WhateverXe' > ~/Desktop/rplp-dmesg.txt
 ```
+
+**解析。**
+- `python3 tools/rplp-decode.py rplp-ioreg.txt`で読み出し結果を名前付きの値に変換できます。
+- `--linux <キャプチャ>`を付けると、同じ機種のLinux参照キャプチャと比較します。キャプチャはUbuntuのライブ環境で、読み取り専用の[`tools/rplp-capture.sh`](tools/rplp-capture.sh)を使って作成します。
 
 **公開されるproperty。**
 - `RPLPGTReadout`、`RPLPDisplay13Boot`、`RPLPEDPBoot`
