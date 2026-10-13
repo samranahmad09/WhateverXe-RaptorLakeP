@@ -21,8 +21,9 @@ struct GPUResult {
 };
 static_assert(sizeof(GPUResult)==44*8,"AlderLakeN BCS property layout");
 
-inline bool gpuImage(uint8_t *memory,const uint64_t *dma) {
-    if(!memory || !dma)return false;
+// base is the GGTT address the 16 pages are leased at; AlderLakeN uses GPUBase.
+inline bool gpuImage(uint8_t *memory,const uint64_t *dma,uint32_t base=GPUBase) {
+    if(!memory || !dma || (base&4095) || base>UINT32_MAX-GPUBytes)return false;
     for(unsigned p=0;p<GPUPages;++p)
         if(!dma[p] || (dma[p]&4095) || dma[p]>0x7FFFFFF000ULL)return false;
     for(unsigned i=0;i<GPUBytes;++i)memory[i]=0;
@@ -41,7 +42,7 @@ inline bool gpuImage(uint8_t *memory,const uint64_t *dma) {
     for(unsigned i=0;i<9;++i)regs[34+2*i]=0x22000+second[i];
     regs[52]=(0x0AU<<23)|1; // End initial restore batch.
     regs[3]=0x00090009; // inhibit synchronous switch + first restore inhibit.
-    regs[5]=0;regs[7]=GPUTail;regs[9]=GPUBase+3*4096;regs[11]=1; // 4KiB valid ring.
+    regs[5]=0;regs[7]=GPUTail;regs[9]=base+3*4096;regs[11]=1; // 4KiB valid ring.
     regs[0x31]=uint32_t(dma[4]>>32);regs[0x33]=uint32_t(dma[4]); // owned PML4.
     regs[0x61]=0x01000000; // Context-saved MI_MODE: clear STOP_RING mask.
     // Owned scratch page table tree. Commands below select GGTT explicitly;
@@ -51,9 +52,9 @@ inline bool gpuImage(uint8_t *memory,const uint64_t *dma) {
     for(unsigned i=0;i<512;++i)reinterpret_cast<uint64_t *>(memory+7*4096)[i]=dma[9]|3;
     auto ring=reinterpret_cast<uint32_t *>(memory+3*4096);
     ring[0]=(0x20U<<23)|(1U<<22)|2; // MI_STORE_DWORD_IMM, GGTT.
-    ring[1]=GPUBase+GPUResultOffset;ring[2]=0;ring[3]=GPUValue;
+    ring[1]=base+GPUResultOffset;ring[2]=0;ring[3]=GPUValue;
     ring[4]=(0x26U<<23)|(1U<<14)|2; // MI_FLUSH_DW: ordered post-sync write.
-    ring[5]=(GPUBase+GPUResultOffset+8)|4; // GGTT, qword aligned.
+    ring[5]=(base+GPUResultOffset+8)|4; // GGTT, qword aligned.
     ring[6]=0;ring[7]=GPUToken;
     return true;
 }
@@ -62,13 +63,13 @@ inline bool gpuImage(uint8_t *memory,const uint64_t *dma) {
 // exact kernel/PCI/GGC and wired MapperNone memory. On any engine write, all
 // mapped pages stay pinned until reboot even if the token completes.
 template<class IO> GPUResult testGPU(IO &io,uint8_t *memory,const uint64_t *dma,
-                                     const uint64_t *predecessor,bool admitted) {
+                                     const uint64_t *predecessor,bool admitted,uint32_t base=GPUBase) {
     GPUResult out;
     if(!admitted)return out;
     out.status=uint64_t(GPUStatus::BadMemory);
-    if(!predecessor || !gpuImage(memory,dma))return out;
+    if(!predecessor || !gpuImage(memory,dma,base))return out;
     out.dmaFirst=dma[0];out.dmaLast=dma[GPUPages-1];
-    const uint32_t pte=0x800000+(GPUBase>>9);
+    const uint32_t pte=0x800000+(base>>9);
     for(unsigned p=0;p<GPUPages;++p)if(io.readPTE(pte+8*p)!=predecessor[p]) {
         out.status=uint64_t(GPUStatus::BusyGGTT);return out;
     }
@@ -119,11 +120,11 @@ template<class IO> GPUResult testGPU(IO &io,uint8_t *memory,const uint64_t *dma,
         write(0x22098,UINT32_MAX); // HWSTAM, no ISR-copy writes.
         write(0x2229c,0x00080008); // Gen11+ disable legacy / enable execlists.
         write(0x2209c,0x01000000); // clear STOP_RING, preserve idle indication.
-        write(0x22080,GPUBase);io.read(0x22080); // global HWSP.
+        write(0x22080,base);io.read(0x22080); // global HWSP.
         write(0x223a0,0xFFFF0B0B);io.read(0x223a0); // 12-entry CSB.
         // ELSQ slots persist across LOAD. Clear all 8, then publish one context.
         for(unsigned p=0;p<8;++p) {write(0x22510+8*p,0);write(0x22514+8*p,0);}
-        out.descriptor=uint64_t(GPUBase+4096+0x319)|(1ULL<<37)|(1ULL<<61); // BCS class1, ID1.
+        out.descriptor=uint64_t(base+4096+0x319)|(1ULL<<37)|(1ULL<<61); // BCS class1, ID1.
         write(0x22510,uint32_t(out.descriptor));write(0x22514,uint32_t(out.descriptor>>32));
         io.fence();write(0x22550,1);io.read(0x22550);
         out.stage=5;out.status=uint64_t(GPUStatus::TimedOut);

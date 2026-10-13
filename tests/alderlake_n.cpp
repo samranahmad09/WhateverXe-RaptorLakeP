@@ -101,6 +101,7 @@ static ScanIO scanFirmware() {
 }
 struct GPUIO : ScanIO {
     uint8_t *memory=nullptr;
+    uint32_t base=AlderLakeN::GPUBase;
     bool execute=true;
     unsigned loads=0, flushes=0;
     void flushMemory(void *,uint32_t) {++flushes;}
@@ -124,20 +125,23 @@ struct GPUIO : ScanIO {
             // Interpret the two actual packets, including opcode/address space
             // and ordered completion location; never use cpu-created results.
             assert(ring[0]==0x10400002 && ring[4]==0x13004002);
-            assert(ring[1]==AlderLakeN::GPUBase+AlderLakeN::GPUResultOffset && ring[2]==0);
+            assert(ring[1]==base+AlderLakeN::GPUResultOffset && ring[2]==0);
             assert(ring[5]==((ring[1]+8)|4) && ring[6]==0);
-            *reinterpret_cast<uint32_t *>(memory+ring[1]-AlderLakeN::GPUBase)=ring[3];
-            *reinterpret_cast<uint32_t *>(memory+(ring[5]&~7U)-AlderLakeN::GPUBase)=ring[7];
+            // The status page and context descriptor follow the leased GGTT base.
+            assert(regs[0x22080]==base && regs[0x22510]==base+4096+0x319 &&
+                   regs[0x22514]==uint32_t(((1ULL<<37)|(1ULL<<61))>>32));
+            *reinterpret_cast<uint32_t *>(memory+ring[1]-base)=ring[3];
+            *reinterpret_cast<uint32_t *>(memory+(ring[5]&~7U)-base)=ring[7];
             regs[0x22034]=regs[0x22030]=32;regs[0x2209c]=0x200;
             reinterpret_cast<uint32_t *>(memory)[0x2f]=1;
             reinterpret_cast<uint64_t *>(memory+0x40)[0]=1;
         }
     }
 };
-static GPUIO gpuFirmware(uint8_t *memory) {
-    GPUIO io;io.memory=memory;io.regs[0x2209c]=0x200;io.regs[0x22234]=1;
+static GPUIO gpuFirmware(uint8_t *memory,uint32_t base=AlderLakeN::GPUBase) {
+    GPUIO io;io.memory=memory;io.base=base;io.regs[0x2209c]=0x200;io.regs[0x22234]=1;
     for(unsigned p=0;p<AlderLakeN::GPUPages;++p)
-        io.ptes[0x800000+(AlderLakeN::GPUBase>>9)+p*8]=(0x7A800000ULL+AlderLakeN::GPUBase+p*4096)|1;
+        io.ptes[0x800000+(base>>9)+p*8]=(0x7A800000ULL+base+p*4096)|1;
     return io;
 }
 int main() {
@@ -164,6 +168,24 @@ int main() {
     auto noGPU=gpuFirmware(gpuMemory.data());
     assert(AlderLakeN::testGPU(noGPU,gpuMemory.data(),gpuDMA,gpuPrevious,false).status==0 && noGPU.reads.empty());
     std::puts("AlderLakeN BCS context/packet encoding, CPU-only timeout, ownership refusal and retained memory fixtures passed");
+    // Another leased base moves every GGTT address; the default slot's PTEs are never touched.
+    constexpr uint32_t moved=0x02000000;
+    uint64_t movedPrevious[AlderLakeN::GPUPages];
+    for(unsigned p=0;p<AlderLakeN::GPUPages;++p)movedPrevious[p]=(0x7A800000ULL+moved+p*4096)|1;
+    auto movedGPU=gpuFirmware(gpuMemory.data(),moved);
+    auto movedRun=AlderLakeN::testGPU(movedGPU,gpuMemory.data(),gpuDMA,movedPrevious,true,moved);
+    assert(movedRun.status==uint64_t(AlderLakeN::GPUStatus::Complete) && movedRun.retained && movedRun.fwReleased);
+    assert(movedRun.result==AlderLakeN::GPUValue && movedRun.token==AlderLakeN::GPUToken && movedGPU.loads==1);
+    assert((movedRun.descriptor&0xFFFFFFFFULL)==moved+4096+0x319 && movedRun.pteWrites==AlderLakeN::GPUPages);
+    for(unsigned p=0;p<AlderLakeN::GPUPages;++p) {
+        assert(movedGPU.ptes[0x800000+(moved>>9)+p*8]==(gpuDMA[p]|1));
+        assert(!movedGPU.ptes.count(0x800000+(AlderLakeN::GPUBase>>9)+p*8));
+    }
+    for(uint32_t bad:{moved+1,uint32_t(UINT32_MAX-AlderLakeN::GPUBytes+4096)}) {
+        auto rejected=gpuFirmware(gpuMemory.data(),moved);
+        assert(AlderLakeN::testGPU(rejected,gpuMemory.data(),gpuDMA,movedPrevious,true,bad).status==uint64_t(AlderLakeN::GPUStatus::BadMemory) && rejected.reads.empty());
+    }
+    std::puts("AlderLakeN BCS self-test at a non-default leased GGTT base passed");
     auto gt=firmwareGT();gt.regs[0xA188]=8;gt.regs[0x130044]=8;
     auto ready=AlderLakeN::readGT(gt,true);
     assert(ready.status==AlderLakeN::GTStatus::Complete && ready.writes==4 && ready.requestedMask==3 && ready.releasedMask==3);
