@@ -48,6 +48,10 @@ inline const char *model(const Profile &p) {
     auto entry=deviceEntry(p.identity);if(!entry)entry=deviceEntry(p.effectiveIdentity);
     return entry ? entry->model : nullptr;
 }
+// The donor's URB/L3 topology site (getGPUInfo, one-slice branch) takes the
+// measured native subslice and L3 bank counts on the Display 13 Xe-LP parts.
+// TGL keeps its fixed GT2 replacements.
+inline bool measuredURBTopology(GT gt) {return gt==GT::ADLNSmall || gt==GT::RPLPMedium;}
 constexpr uint32_t PortCount=9,PortMask=(1U<<PortCount)-1,PipeCount=3;
 // A validated native association. The adapter validates transport-specific
 // record contents before construction; the core does not infer HDMI or DP.

@@ -8067,11 +8067,12 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// G4 (9A78) is GT2 with 3 DSS / 6 native subslices and 6 L3 banks
 			// (TGL PRM Vol4 p3/p9). Keep the 80/96-EU patch byte-for-byte.
 			static const uint8_t urbReplaceG4[] {0x83,0xFE,0x01,0x75,0x59,0x83,0xFA,0x06,0x75,0x54,0x41,0xC7,0x87,0x64,0x11,0x00,0x00,0x06,0x00,0x00,0x00};
-			// ADL-N/Twin Lake keep LP silicon selector2. Validate the actual
-			// native subslice count and publish the separately admitted L3 capacity.
+			// ADL-N/Twin Lake and the qualified RPL-P part keep LP silicon selector2.
+			// Validate the actual native subslice count and publish the separately
+			// admitted L3 capacity (RPL-P: 8 subslices, 6 banks).
 			uint8_t urbReplaceAlderLakeN[] {0x83,0xFE,0x01,0x75,0x59,0x83,0xFA,0x04,0x75,0x54,0x41,0xC7,0x87,0x64,0x11,0x00,0x00,0x04,0x00,0x00,0x00};
 			if (adlnDetected) { urbReplaceAlderLakeN[7]=adlnNativeSubslices;urbReplaceAlderLakeN[17]=adlnL3Banks; }
-			const auto urbReplacement = xeProfile.gt==XELP::GT::ADLNSmall ? urbReplaceAlderLakeN :
+			const auto urbReplacement = XELP::measuredURBTopology(xeProfile.gt) ? urbReplaceAlderLakeN :
 				(xeProfile.gt==XELP::GT::TGLG4 ? urbReplaceG4 : urbReplace);
 			auto gpuInfo=patcher.solveSymbol<mach_vm_address_t>(index,
 				"__ZN16IntelAccelerator10getGPUInfoEv",address,size);

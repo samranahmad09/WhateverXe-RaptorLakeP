@@ -17,6 +17,8 @@ int main() {
   const bool tgl=id==0x9A40 || id==0x9A49 || id==0x9A78,adln=id>=0x46D0 && id<=0x46D4,rplp=id==0xA7A8;
   assert(p.admitted()==(tgl || (adln && rev==0) || (rplp && rev==4)));
   assert(!adln || p.display==Display::XeLPD);
+  // The donor URB/L3 site takes measured counts on ADL-N and the RPL-P part only.
+  assert(measuredURBTopology(p.gt)==(adln || rplp));
   assert(!identify((id<<16)|0x1234,rev).admitted());
  }
  alignas(8) uint8_t platform[0x1C0] {};
