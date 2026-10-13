@@ -50,7 +50,7 @@ every hardware rule.
 | Stage | Goal | Done when | Status |
 | --- | --- | --- | --- |
 | R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Done: on the reference machine the macOS readout matches the Linux capture (all five fuses, 64 EU, 4 DSS) |
-| R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | In progress: the BCS self-test (`-wex-rplp-gpu`) is written and CI-tested; hardware run pending. The accelerator start depends on R3, because the donor's accelerator registers only after a Display 13 framebuffer controller starts |
+| R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | In progress: the BCS self-test (`-wex-rplp-gpu`) passes on the reference machine. The accelerator start depends on R3, because the donor's accelerator registers only after a Display 13 framebuffer controller starts |
 | R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Not started |
 | R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
 | R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | Not started |

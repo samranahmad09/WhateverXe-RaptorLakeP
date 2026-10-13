@@ -38,6 +38,12 @@ rev 04. Other Raptor Lake-P SKUs differ in EU count and board wiring.
 - **Values for the GT profile (stage R2):** 8 native subslices, 64 EU, 6 L3 banks, 384 KB URB.
 - **Media.** The media fuse equals the value upstream's Alder Lake-N profile requires, so that media handling
   applies unchanged.
+- **Execution.** The R2 BCS self-test (`-wex-rplp-gpu`) passes on the reference machine.
+  - One `MI_STORE_DWORD_IMM` + `MI_FLUSH_DW` batch submitted through the BCS execlist port completes: both
+    values land, head and tail meet at the ring's end, and the CSB records the context's switch-in and
+    completion.
+  - At handover the firmware leaves bus mastering on (PCI command `0x0007`) and maps all 64 MB of stolen
+    memory 1:1 in the GGTT, which is what the self-test's lease requires.
 
 ## Stolen memory (DVMT)
 
