@@ -25,7 +25,8 @@ void XeHost::processKernel(KernelPatcher &patcher) {
  // Match WEG ordering: PCI config reads require a published IOPCIDevice.
  const bool published=gpu && WIOKit::awaitPublishing(gpu);
  const auto profile=published ? XELP::deviceProfile(gpu) : XELP::Profile {};
- active=profile.admitted();
+ // The Raptor Lake-P backend is under development: admitted only on request.
+ active=profile.admitted() && (profile.family!=XELP::Family::RaptorLakeP || checkKernelArgument("-wex-rplp-gt"));
  if(published) {
   uint32_t selection[] {1,profile.identity,profile.revision,profile.effectiveIdentity,
    static_cast<uint32_t>(profile.family),static_cast<uint32_t>(profile.display),

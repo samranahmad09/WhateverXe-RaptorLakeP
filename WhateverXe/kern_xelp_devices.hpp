@@ -8,7 +8,7 @@
 namespace XELP {
 enum class Family : uint32_t { Unknown, TigerLake, AlderLakeN, RocketLake, AlderLakeS, AlderLakeP, RaptorLakeS, RaptorLakeP };
 enum class Display : uint32_t { Unknown, XeD = 12, XeLPD = 13 };
-enum class GT : uint32_t { Unknown, TGLGT2, TGLG4, ADLNSmall };
+enum class GT : uint32_t { Unknown, TGLGT2, TGLG4, ADLNSmall, RPLPMedium };
 enum class Donor : uint32_t { Unknown, C004FC1A = 1 };
 struct DeviceEntry {
     uint16_t device; Family family; Display display; GT backend;
@@ -46,7 +46,7 @@ constexpr DeviceEntry DeviceTable[] {
     {0xA78B, Family::RaptorLakeS, Display::XeD, GT::Unknown, "Intel UHD Graphics"},
     {0xA7A0, Family::RaptorLakeP, Display::XeLPD, GT::Unknown, "Intel Iris Xe Graphics"},
     {0xA7A1, Family::RaptorLakeP, Display::XeLPD, GT::Unknown, "Intel Iris Xe Graphics"},
-    {0xA7A8, Family::RaptorLakeP, Display::XeLPD, GT::Unknown, "Intel UHD Graphics"},
+    {0xA7A8, Family::RaptorLakeP, Display::XeLPD, GT::RPLPMedium, "Intel UHD Graphics"},
     {0xA7A9, Family::RaptorLakeP, Display::XeLPD, GT::Unknown, "Intel UHD Graphics"},
     {0xA7AA, Family::RaptorLakeP, Display::XeLPD, GT::Unknown, "Intel Graphics"},
     {0xA7AB, Family::RaptorLakeP, Display::XeLPD, GT::Unknown, "Intel Graphics"},

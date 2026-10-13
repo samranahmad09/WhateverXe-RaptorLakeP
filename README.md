@@ -243,6 +243,7 @@ No family-selection or per-feature enable arguments are required for Alder Lake-
 | `-wex-tgl-off` | Disable the Tiger Lake path. |
 | `-wex-rplp-observe` | Raptor Lake-P only: publish the read-only R1 diagnostic described above. The GPU stays unsupported. |
 | `-wex-rplp-gpu` | Raptor Lake-P only, with `-wex-rplp-observe`: run the one-shot R2 BCS self-test described above. The GPU stays unsupported. |
+| `-wex-rplp-gt` | Raptor Lake-P A7A8 revision 4 only: admit the device to the in-development backend. Development only; it does not drive the GPU yet. |
 
 ### Upstream roadmap
 

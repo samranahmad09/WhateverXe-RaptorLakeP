@@ -8,22 +8,25 @@ int main() {
  unsigned implemented=0;
  for(const auto &entry:DeviceTable) {
   const uint32_t pci=uint32_t(entry.device)<<16|0x8086;
-  auto p=identify(pci,0);
+  // Each backend is qualified for one physical stepping: RPL-P revision 4, the others revision 0.
+  const uint32_t rev=entry.family==Family::RaptorLakeP ? 4 : 0;
+  auto p=identify(pci,rev);
   assert(p.identity==pci && p.effectiveIdentity==pci && !p.overridden());
   assert(p.family==entry.family && p.display==entry.display && p.gt==entry.backend);
   assert(!strcmp(model(p),entry.model));
   assert(p.admitted()==(entry.backend!=GT::Unknown));
   implemented+=p.admitted();
   const uint32_t value=entry.device;
-  assert(same(p,select(pci,0,true,&value,4)));
+  assert(same(p,select(pci,rev,true,&value,4)));
   // Every catalogued backend can be selected for an unknown physical ID.
-  auto f=select(0x12348086,0,true,&value,4);
+  auto f=select(0x12348086,rev,true,&value,4);
   assert(f.overridden() && f.identity==0x12348086 && f.effectiveIdentity==pci);
   assert(f.admitted()==p.admitted());
   assert(!strcmp(model(f),entry.model));
-  auto nonIntel=select(0x123410DE,0,true,&value,4);assert(!nonIntel.admitted());
+  auto nonIntel=select(0x123410DE,rev,true,&value,4);assert(!nonIntel.admitted());
+  if(entry.family==Family::RaptorLakeP)for(uint32_t other:{0U,1U,3U,5U,255U})assert(!identify(pci,other).admitted());
  }
- assert(implemented==8); // Recognition of other table rows adds no native backend.
+ assert(implemented==9); // Recognition of other table rows adds no native backend.
  uint32_t id=0x46D2;
  assert(select(0x12348086,0,true,&id,4).admitted());
  assert(!select(0x12348086,1,true,&id,4).admitted()); // Keep physical stepping guard.

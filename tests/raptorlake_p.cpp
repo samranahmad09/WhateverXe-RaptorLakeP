@@ -87,12 +87,15 @@ int main() {
         assert(RaptorLakeP::family(pci)==rpl);
         if(!rpl)continue;
         ++catalogued;
-        // Recognition only: no GT backend, donor, admission or probe ABI.
-        for(uint32_t revision:{0U,4U,8U,12U}) {
+        // Only the measured A7A8 has a backend, admitted at revision 4 (GT C0 / display E0) alone.
+        // The rest stay recognition only: no GT backend, donor, admission or probe ABI.
+        const bool measured=entry.device==0xA7A8;
+        for(uint32_t revision:{0U,3U,4U,5U,8U,12U}) {
             const auto p=XELP::identify(pci,revision);
-            assert(p.display==XELP::Display::XeLPD && p.gt==XELP::GT::Unknown);
-            assert(p.donor==XELP::Donor::Unknown && !p.admitted() && !AlderLakeN::matches(pci,revision));
-            XELP::ProbeConfig c;c.profile=p;c.combo=c.comboBackend=1;assert(!c.valid());
+            assert(p.display==XELP::Display::XeLPD && p.gt==(measured ? XELP::GT::RPLPMedium : XELP::GT::Unknown));
+            assert(p.donor==(measured ? XELP::Donor::C004FC1A : XELP::Donor::Unknown));
+            assert(p.admitted()==(measured && revision==4) && !AlderLakeN::matches(pci,revision));
+            XELP::ProbeConfig c;c.profile=p;c.combo=c.comboBackend=1;assert(c.valid()==p.admitted());
         }
         assert(!RaptorLakeP::family((pci&0xFFFF0000U)|0x10DE));
     }
@@ -103,7 +106,7 @@ int main() {
     for(uint32_t revision:{0U,1U,3U,5U,8U,12U,255U}) {
         step=RaptorLakeP::stepping(revision);assert(!step.gt && !step.display);
     }
-    std::puts("RaptorLakeP catalogue recognition, no admission and Linux revision-4 steppings passed");
+    std::puts("RaptorLakeP catalogue: A7A8 rev 4 admitted alone, others recognition only, Linux revision-4 steppings passed");
 
     RaptorLakeP::Resources res;
     assert(RaptorLakeP::resources(1,0xf,0,0,0xe00fa,res));

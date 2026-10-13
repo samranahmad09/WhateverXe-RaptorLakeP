@@ -130,6 +130,7 @@
   ],
   "-wex-rplp-observe": [],
   "-wex-rplp-gpu": [],
+  "-wex-rplp-gt": [],
   "-wexoff": [
     "-wxeoff"
   ],
