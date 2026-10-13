@@ -38,8 +38,9 @@ README on top.
 - **Outputs.** On the reference machine, as on many Raptor Lake-H laptops, the Intel GPU's only outputs are
   the eDP panel and USB-C DisplayPort; HDMI is wired to the NVIDIA GPU. Upstream drives neither on display
   version 13 yet, so the internal panel (R3) is the first possible picture.
-- **Platform.** Big Sur 11.7.11 has to boot on a 13th-generation hybrid CPU first. OpenCore documents the
-  required CPUID spoof and `ProvideCurrentCpuInfo`; a boot test on the reference machine is in progress.
+- **Platform.** Big Sur boots on the reference machine with OpenCore's CPUID spoof, `ProvideCurrentCpuInfo`
+  and Booter `SetupVirtualMap` enabled. Without `SetupVirtualMap`, this firmware hangs during the hand-off to
+  macOS, at `EXITBS:START`.
 
 ## Plan
 
@@ -48,7 +49,7 @@ every hardware rule.
 
 | Stage | Goal | Done when | Status |
 | --- | --- | --- | --- |
-| R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Code complete, CI-tested; hardware run pending |
+| R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Done: on the reference machine the macOS readout matches the Linux capture (all five fuses, 64 EU, 4 DSS) |
 | R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | Not started |
 | R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Not started |
 | R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
@@ -59,7 +60,7 @@ The hardware inputs for R2-R4 are measured on the reference machine and listed i
 - the GT profile values (64 EU, 6 L3 banks, 384 KB URB, Alder Lake-N media fuse);
 - the eDP link the firmware leaves running (1920x1080 at 144 Hz, HBR x4, PSR off);
 - the outputs;
-- the fact that the embedded controller owns the backlight.
+- the backlight: the embedded controller owns it, although the firmware leaves the Intel PWM running.
 
 ## Trying the R1 diagnostic
 
@@ -75,8 +76,10 @@ GPU.
 **Requirements.** Lilu and a DEBUG WhateverXe from this fork. The OCLP root patch and AMFIPass are not
 needed for this step.
 
-**macOS.** Big Sur 11.7.11 (20G1443) is the only version WhateverXe declares. On any other version, add
-`-wexbeta` for this read-only step only, and remove it afterwards.
+**macOS.** WhateverXe declares Big Sur, so R1 runs on any Big Sur build; acceleration later needs 11.7.11
+(20G1443). On any other macOS version, add `-wexbeta` for this read-only step only, and remove it afterwards.
+R1 also runs from the Big Sur recovery when OpenCore injects Lilu and WhateverXe. The recovery's Terminal has
+`ioreg` and `dmesg`; run them without `sudo`.
 
 **Builds.**
 - Go to [Actions](https://github.com/samranahmad09/WhateverXe-RaptorLakeP/actions/workflows/ci.yml), open

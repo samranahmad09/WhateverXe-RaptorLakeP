@@ -30,7 +30,7 @@
 - **ステッピング。** revision 04（Linuxの表ではGT C0／display E0）は、ワークアラウンドを個別に確認する必要があります。
 - **内蔵ディスプレイ。** WhateverXeが駆動するのは固定HDMI／DisplayPort出力です。eDP（パネル電源シーケンス、バックライト、リンクトレーニング）はどのプラットフォームでも未実装です。
 - **出力。** 検証機を含む多くのRaptor Lake-Hノートでは、Intel GPUの出力はeDPパネルとUSB-CのDisplayPortのみで、HDMIはNVIDIA GPUに接続されています。upstreamはDisplay version 13でどちらもまだ駆動しないため、最初に表示できる可能性があるのは内蔵パネル（R3）です。
-- **プラットフォーム。** まず第13世代のハイブリッドCPUでBig Sur 11.7.11が起動する必要があります。必要なCPUIDの偽装と`ProvideCurrentCpuInfo`はOpenCoreに記載されており、検証機での起動テストを進めています。
+- **プラットフォーム。** 検証機では、OpenCoreのCPUID偽装と`ProvideCurrentCpuInfo`に加えて、Booterの`SetupVirtualMap`を有効にするとBig Surが起動します。`SetupVirtualMap`がないと、この機種のファームウェアはmacOSへの引き渡し中（`EXITBS:START`）に停止します。
 
 ## 計画
 
@@ -38,7 +38,7 @@
 
 | 段階 | 目標 | 完了条件 | 状況 |
 | --- | --- | --- | --- |
-| R1 | 読み取り専用のRaptor Lake-Pプロファイル：fuse、EU構成、ファームウェアの画面状態。forcewakeの取得／解放以外の書き込みなし | macOSでの読み出し結果が、同じ機種のLinux i915キャプチャと一致する | コード完成・CIテスト済み。実機での実行待ち |
+| R1 | 読み取り専用のRaptor Lake-Pプロファイル：fuse、EU構成、ファームウェアの画面状態。forcewakeの取得／解放以外の書き込みなし | macOSでの読み出し結果が、同じ機種のLinux i915キャプチャと一致する | 完了：検証機でのmacOSの読み出し結果がLinuxキャプチャと一致（fuse 5つすべて、64 EU、4 DSS） |
 | R2 | GTバックエンド：既存のBCSセルフテスト、次にこのGPUのURB／L3値でアクセラレータ修正を適用 | セルフテストが通り、ファームウェアのframebuffer上でアクセラレータが起動する | 未着手 |
 | R3 | 内蔵ディスプレイの初表示：donorの内蔵パネル用コネクタを残し、ファームウェアが確立したリンクを引き継ぐ | ファームウェアのモードで内蔵パネルにデスクトップが表示される | 未着手 |
 | R4 | 内蔵ディスプレイの本対応：パネル電源シーケンス、バックライト、消灯／点灯、ADL-Pのテーブルによるリンク再トレーニング、144Hz | 輝度調整、スリープ／復帰、ネイティブのリフレッシュレートが動作する | 未着手 |
@@ -48,7 +48,7 @@ R2〜R4に必要なハードウェア情報は検証機で測定済みで、[doc
 - GTプロファイルの値（64 EU、L3 6バンク、URB 384 KB、Alder Lake-Nと同じmediaのfuse）
 - ファームウェアが動作させたままにするeDPリンク（1920×1080・144Hz、HBR×4、PSRオフ）
 - 出力構成
-- バックライトをエンベデッドコントローラが制御していること
+- バックライト：エンベデッドコントローラが制御しているが、ファームウェアはIntelのPWMを動作させたままにする
 
 ## R1診断の試し方
 
@@ -60,7 +60,7 @@ R2〜R4に必要なハードウェア情報は検証機で測定済みで、[doc
 
 **必要なもの。** Liluと、このforkのDEBUG版WhateverXe。この段階ではOCLPのroot patchとAMFIPassは不要です。
 
-**macOS。** WhateverXeが対象とするのはBig Sur 11.7.11（20G1443）のみです。他のバージョンでは、この読み取り専用の段階に限り`-wexbeta`を追加し、終わったら削除してください。
+**macOS。** WhateverXeはBig Surを対象としているため、R1はBig Surのどのビルドでも動作します。後のアクセラレーションには11.7.11（20G1443）が必要です。Big Sur以外のmacOSでは、この読み取り専用の段階に限り`-wexbeta`を追加し、終わったら削除してください。OpenCoreでLiluとWhateverXeを注入すれば、Big Surのリカバリーからも実行できます。リカバリーのターミナルには`ioreg`と`dmesg`があり、`sudo`なしで実行します。
 
 **ビルド。**
 - [Actions](https://github.com/samranahmad09/WhateverXe-RaptorLakeP/actions/workflows/ci.yml)で、`main`で成功した最新の実行を開き、**Artifacts**をダウンロードしてください。`WhateverXe-…-DEBUG.zip`が含まれています。

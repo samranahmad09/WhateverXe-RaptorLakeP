@@ -8,6 +8,7 @@ rev 04. Other Raptor Lake-P SKUs differ in EU count and board wiring.
 **Sources, October 2026:**
 - a read-only Linux i915 capture: Ubuntu 26.04, kernel 7.0, `i915.enable_guc=0 drm.debug=0x1e`, with
   registers read through `intel_reg` and the boot journal;
+- the macOS R1 readout (`-wex-rplp-observe`), taken from the Big Sur 11.5.2 recovery booted by OpenCore 1.0.8;
 - the firmware's VBT and ACPI tables;
 - Linux, Mesa and the TGL PRM, cited where used.
 
@@ -23,6 +24,8 @@ rev 04. Other Raptor Lake-P SKUs differ in EU count and board wiring.
 
 - **Linux agrees.** Its SSEU report gives 1 slice, 4 DSS, 64 EU, 16 per DSS. The engines are
   `rcs0 bcs0 vcs0 vecs0`.
+- **macOS agrees.** The R1 readout reads the same five fuses and resolves 64 EU in 4 DSS, with forcewake
+  requested and released three times each and no failures.
 - **Stepping.** Graphics and media C0, matching Linux's `adlp_rplp_revids` for PCI revision 4; display is E0.
 - **Frequency.** RPn 100 MHz, RP1 300 MHz, RP0 and maximum 1500 MHz.
 - **L3 banks.** Read `0x9118` bits 7:0 as one disable bit per bank. That fits every known data point:
@@ -61,13 +64,18 @@ This is i915's first hardware readout, before Linux changed anything. It is the 
 - **Link.**
   - DP SST, 4 lanes at **HBR (2.7 Gb/s)**, enhanced framing on, FEC off.
   - **PSR off.**
-  - DPLL0 `cfgcr0 0xE001A5`, `cfgcr1 0x88`.
+  - PLL configuration `cfgcr0 0xE001A5`, `cfgcr1 0x88`.
+  - **The firmware's PLL choice varies.** At Linux's handover it used DPLL0; under OpenCore (GOP mode set to
+    1920x1080) it used DPLL1 with the same configuration, and `DPCLKA_CFGCR0` (`0x01E07801`) selected DPLL1
+    for DDI A. Code that adopts the link must read the clock select, not assume a PLL.
 - **Panel power.** On at handover (`PP_STATUS 0x80000008`).
 - **Plane and scaler.** Only the primary plane is enabled.
   - When the boot loader leaves the firmware in a lower GOP mode, the plane keeps that size and pipe
     scaler 0 upscales it. 800x600 was observed.
   - Set the boot loader to the native mode, e.g. OpenCore `UEFI > Output > Resolution` `1920x1080@32`.
     WhateverXe's handoff checks expect a native, unscaled plane.
+  - With that setting the macOS readout shows plane 1A at 1920x1080, linear XRGB8888, stride 7680 bytes,
+    surface at GGTT offset 0 of the 256 MB aperture, and both pipe A scalers off.
 - **DMC.** Linux loads `i915/adlp_dmc.bin` 2.20; the firmware uses DC5.
 
 ## Outputs
@@ -97,7 +105,9 @@ show a picture through WhateverXe until eDP (R3) or Type-C support exists.**
   - Linux registers only `nvidia_wmi_ec_backlight` and skips `intel_backlight`.
   - The firmware carries an NVIDIA Dynamic Display Switching table with `_BCM`/`_BCL`.
   - So the Intel PWM registers may not reach the panel, and brightness under macOS may need an ACPI/EC route.
-    The R1 readout of `BLC_PWM_CTL1` on macOS will tell.
+- **The firmware leaves the Intel PWM running anyway.** The macOS readout shows `BLC_PWM_CTL1 0x80000000`
+  (enabled), `BLC_PWM_FREQ1 0x4B00` (1000 Hz from 19.2 MHz) and `BLC_PWM_DUTY1 0x1A2D` (about 35%). Whether
+  that PWM changes this panel's brightness is the first R4 test.
 
 ## Platform
 
@@ -106,8 +116,11 @@ show a picture through WhateverXe until eDP (R3) or Type-C support exists.**
   - a CPUID spoof to Comet Lake (`Cpuid1Data 55060A00…`, mask `FFFFFFFF…`);
   - `ProvideCurrentCpuInfo`, which supports asymmetric cores on macOS 10.14 and newer.
 
-  Similar machines boot macOS both older and newer than Big Sur. A Big Sur boot test on the reference
-  machine is in progress.
+  Big Sur boots on the reference machine with those two settings **plus Booter `SetupVirtualMap` enabled**;
+  the other Booter quirks stay at Dortania's defaults (`DevirtualiseMmio`, `RebuildAppleMemoryMap` and
+  `SyncRuntimePermissions` on). Without `SetupVirtualMap` the firmware hangs during the hand-off, before the
+  kernel starts: the screen stops at `EXITBS:START`, on Big Sur and Sequoia alike. Once booted, macOS starts
+  all 16 threads and runs XCPM.
 - **Lilu 1.7.2** does not list model `0xBA`; `lilucpu=17` selects RaptorLake. WhateverXe itself never reads
   the CPU generation.
 - **ACPI.**
@@ -119,7 +132,7 @@ show a picture through WhateverXe until eDP (R3) or Type-C support exists.**
 - **Root patch.** The OCLP fork's Xe root patch selects GPUs by device ID (Tiger Lake and Alder Lake-N only so
   far) and build `20G1443`. It does not check the Mac model.
 - **Recovery download.** Apple's recovery server answers the Big Sur board ID only in `-os latest` mode;
-  `-os default` returns HTTP 403.
+  `-os default` returns HTTP 403. The image it serves is the 11.5.2 (20G95) recovery.
 
 ## Raptor Lake-HX is a different case
 
