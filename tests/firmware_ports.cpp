@@ -57,6 +57,14 @@ int main(int argc,char **argv){
  auto a=parse(adl.data(),adl.size(),Family::AlderLakeN);assert(a.valid()&&a.present==0xB&&a.hdmi(3).hdmi==3);
  assert(ddi(Family::TigerLake,9)==3&&ddi(Family::AlderLakeN,13)==3&&ddi(Family::AlderLakeN,19)==6);
  assert(ddi(Family::AlderLakeN,9)==PortCount&&ddi(Family::TigerLake,8)==PortCount);
+ // RPL-P laptop layout: eDP on DVO A with AUX A, DP alt mode on Type-C 1 and 2 (DVO F/G).
+ auto rpl=table({{0x1806,10,0,0x40},{0x68c6,13,0,0x50},{0x68c6,15,0,0x60}});
+ auto rp=parse(rpl.data(),rpl.size(),Family::RaptorLakeP);
+ assert(rp.valid()&&rp.present==0x19&&rp.ambiguous==0x19&&!rp.hdmi(3).hdmi);
+ assert(rp.port[0].internal()&&rp.port[0].dp()&&rp.port[0].aux==0x40&&!rp.port[0].fixedTMDS());
+ assert(ddi(Family::RaptorLakeP,10)==0&&ddi(Family::RaptorLakeP,13)==3&&ddi(Family::RaptorLakeP,15)==4);
+ assert(ddi(Family::RaptorLakeP,8)==PortCount&&ddi(Family::RaptorLakeP,9)==PortCount);
+ assert(parse(rpl.data(),rpl.size(),Family::AlderLakeS).status==Status::Platform);
  for(auto p:{Port{0x60d6,1,2},Port{0x78c6,10,1},Port{0x60d2,1,2,0,4},Port{0x60d2,1,2,0,2},Port{0x60d2,1,2,0,0,1}}){
   auto b=table({p});auto q=parse(b.data(),b.size(),Family::TigerLake);assert(q.valid()&&!q.hdmi(3).hdmi);
  }

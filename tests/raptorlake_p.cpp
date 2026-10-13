@@ -225,6 +225,21 @@ int main() {
     auto stuck=RaptorLakeP::readGT(stuckGT,true);
     assert(stuck.forcewake.status==GTStatus::ReleaseFailed && stuck.forcewake.releaseFailedMask==1 && !stuck.resources.eus);
     std::puts("RaptorLakeP GT forcewake ownership, release and profile re-evaluation fixtures passed");
+    // The shared Display 13 path reads through AlderLakeN::readGT (with its EDRAM read), then qualify().
+    auto measured=firmwareGT();measured.regs[0x9118]=0x88;measured.regs[0x9140]=0xe00fe;
+    uint32_t edram=0;
+    auto shared=AlderLakeN::readGT(measured,true,&edram);
+    assert(shared.status==GTStatus::ProfileMismatch && !shared.resources.eus);
+    RaptorLakeP::qualify(shared);
+    assert(shared.status==GTStatus::Complete && shared.resources.nativeSubslices==8 && shared.resources.eus==64);
+    assert(shared.resources.l3Banks==6 && shared.resources.urbKiB==384);
+    auto unqualified=firmwareGT();
+    auto other=AlderLakeN::readGT(unqualified,true,&edram);RaptorLakeP::qualify(other);
+    assert(other.status==GTStatus::ProfileMismatch && !other.resources.eus && !other.resources.l3Banks);
+    auto ownedIO=firmwareGT();ownedIO.regs[0xA188]=1;
+    auto owned=AlderLakeN::readGT(ownedIO,true,&edram);RaptorLakeP::qualify(owned);
+    assert(owned.status==GTStatus::ExistingOwner);
+    std::puts("RaptorLakeP qualify: shared ADL-N readout re-judged to 8 subslices, 6 banks, 64 EU passed");
 
     IO absent;
     const AlderLakeN::DisplayReadout none;

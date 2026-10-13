@@ -102,6 +102,12 @@ int main() {
  for(uint32_t pci:{0x46A68086U,0x46808086U,0xA7A08086U}) {
   xe=boot({},pci);assert(!xe.adlnNativeRequested && !xe.display13FramebufferRequested && !adlnNativeRCSProfileRequested);
  }
+ // The qualified RPL-P part joins the Display 13 path at revision 4 only (the host also needs -wex-rplp-gt).
+ xe=XE{};xe.init();xe.selectProfile(XELP::identify(0xA7A88086,4));
+ assert(xe.adlnRequested && xe.adlnDetected && xe.adlnKernelReady && xe.adlnNativeRequested && xe.display13FramebufferRequested);
+ assert(xe.tglAcceleratorRequested && xe.currentFramebuffer==&kextIntelTGLFb && xe.currentGraphics==&kextIntelTGL);
+ xe=XE{};xe.selectProfile(XELP::identify(0xA7A88086,0));
+ assert(!xe.adlnRequested && !xe.adlnNativeRequested && !xe.display13FramebufferRequested);
  xe=XE{};xe.selectProfile(XELP::identify(0x46D28086,1));
  assert(!xe.adlnNativeRequested && !xe.display13FramebufferRequested && !adlnNativeRCSProfileRequested);
  auto malformed=XELP::identify(0x46D28086,0);malformed.display=XELP::Display::XeD;

@@ -66,6 +66,15 @@ inline bool qualifiedGT(uint32_t slice, uint32_t dss, uint32_t euDisable,
     return true;
 }
 
+// AlderLakeN::readGT judges fuses against the ADL-N profile. A readout whose reads
+// and release all succeeded (Complete or ProfileMismatch) is re-judged here
+// against qualifiedGT, so the shared Display 13 path gets this part's values.
+inline void qualify(AlderLakeN::GTReadout &gt) {
+    if (gt.status != AlderLakeN::GTStatus::Complete && gt.status != AlderLakeN::GTStatus::ProfileMismatch) return;
+    gt.status = qualifiedGT(gt.fuses[0], gt.fuses[1], gt.fuses[2], gt.fuses[3], gt.fuses[4], gt.resources) ?
+        AlderLakeN::GTStatus::Complete : AlderLakeN::GTStatus::ProfileMismatch;
+}
+
 // The Gen12 forcewake/fuse/engine protocol is AlderLakeN::readGT's. Its final
 // Complete or ProfileMismatch status means every read succeeded and both
 // domains were released; only the profile verdict is re-evaluated here.

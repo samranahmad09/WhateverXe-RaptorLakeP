@@ -67,8 +67,10 @@ static bool xelpSelectedDevice(IOPCIDevice *pci) {
     return pci && pci==xelpSelectedGPU && xelpSelectedProfile.admitted() &&
         XELP::same(xelpSelectedProfile,XELP::deviceProfile(pci));
 }
+// The Display 13 Xe-LP backends: AlderLakeN and the qualified RaptorLakeP part share these paths.
 static bool xelpAlderLakeNDevice(IOPCIDevice *pci) {
-    return xelpSelectedProfile.family==XELP::Family::AlderLakeN && xelpSelectedDevice(pci);
+    return (xelpSelectedProfile.family==XELP::Family::AlderLakeN ||
+        xelpSelectedProfile.family==XELP::Family::RaptorLakeP) && xelpSelectedDevice(pci);
 }
 // Detailed read-only display evidence is opt-in; control and first-fault
 // receipts remain active in the ordinary AlderLakeN profile.
@@ -2591,8 +2593,9 @@ void XE::init() {
 void XE::selectProfile(const XELP::Profile &profile) {
     xeProfile=profile;
     adlnNativeRCSProfileRequested=false;
-    adlnRequested=profile.admitted() && profile.family==XELP::Family::AlderLakeN &&
-        profile.display==XELP::Display::XeLPD && profile.gt==XELP::GT::ADLNSmall;
+    adlnRequested=profile.admitted() && profile.display==XELP::Display::XeLPD &&
+        ((profile.family==XELP::Family::AlderLakeN && profile.gt==XELP::GT::ADLNSmall) ||
+         (profile.family==XELP::Family::RaptorLakeP && profile.gt==XELP::GT::RPLPMedium));
     adlnDetected=adlnRequested;
     modDVMTCalcFix.available=profile.admitted();
     if(adlnRequested) {
@@ -2650,8 +2653,11 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 	uint64_t connector[] {1,adlnNativeRequested,wiring!=nullptr,board.valid,board.hdmi,bootDDI};
 	pci->setProperty("N97NativeBootConnector",connector,sizeof(connector));
 	pci->setProperty("N97DisplayVersion", AlderLakeN::DisplayVersion, 32);
-	pci->setProperty("N97GTStep", "A0");
-	pci->setProperty("N97DisplayStep", "D0");
+	// ADL-N is admitted at A0/D0 only, the RPL-P part at revision 4 (GT C0 / display E0).
+	const bool raptorLake = xeProfile.family==XELP::Family::RaptorLakeP;
+	const auto step = RaptorLakeP::stepping(revision);
+	pci->setProperty("N97GTStep", raptorLake ? step.gt : "A0");
+	pci->setProperty("N97DisplayStep", raptorLake ? step.display : "D0");
 	pci->setProperty("N97GGC", pci->configRead16(0x50), 32);
 	if (!(pci->configRead16(4) & 2)) return;
 	const bool linearTest = display13FramebufferRequested;
@@ -2809,6 +2815,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 		uint32_t edram=UINT32_MAX;
 		auto gt=AlderLakeN::readGT(io,barReady && xelpMemoryMatches(pci),
 			adlnNativeRequested ? &edram : nullptr);
+		if (xeProfile.family==XELP::Family::RaptorLakeP) RaptorLakeP::qualify(gt);
 		if (adlnNativeRequested) {
             adlnNativeSubslices=gt.resources.nativeSubslices; adlnL3Banks=gt.resources.l3Banks; adlnNativeEUs=gt.resources.eus;
 			AlderLakeN::LinearPlan plan;
