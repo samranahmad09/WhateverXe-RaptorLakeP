@@ -58,6 +58,18 @@ jobs:
           name: Artifacts
           path: build/dist/*
           if-no-files-found: error
+      - name: Upload root-staging inputs
+        # tools/stage_root.py takes both kexts and build-manifest.json from one build tree;
+        # the packages above carry only the OpenCore plugin.
+        uses: actions/upload-artifact@v4
+        with:
+          name: Root-staging-inputs
+          path: |
+            build/DEBUG/*.kext
+            build/DEBUG/build-manifest.json
+            build/RELEASE/*.kext
+            build/RELEASE/build-manifest.json
+          if-no-files-found: error
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
