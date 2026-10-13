@@ -51,6 +51,22 @@ int main() {
   const uint32_t v[]={d,d+1,2,0,0x800,0x202};__builtin_memcpy(r,v,sizeof(v));
   assert(probeMode(io,b,2,reinterpret_cast<uintptr_t>(r),r)==(d<2?1U:0U));}
  assert(io.reads.empty());auto other=b;other.access=3;assert(!b.sameBinding(other));assert(b.sameBinding(b));
+ // RPL-P built-in panel: only the DDI A panel record probes, as the native Combo/panel mode, without MMIO.
+ c={};c.profile=identify(0xA7A88086,4);c.panel=1;b.config=c;assert(c.valid() && b.valid());
+ other=b;other.config.panel=0;other.config.combo=other.config.comboBackend=1;assert(other.config.valid() && !b.sameBinding(other));
+ for(unsigned d=0;d<9;++d){auto r=reinterpret_cast<uint32_t *>(platform+0x20+24*d);
+  const uint32_t v[]={d,0,0,0,d?1U:2U,d?0U:0x18U};__builtin_memcpy(r,v,sizeof(v));
+  assert(probeMode(io,b,2,reinterpret_cast<uintptr_t>(r),r)==(d?0U:1U));}
+ auto panelRecord=reinterpret_cast<uint32_t *>(platform+0x20);
+ for(unsigned word=1;word<6;++word){const auto saved=panelRecord[word];panelRecord[word]^=0x800;
+  assert(!probeMode(io,b,2,reinterpret_cast<uintptr_t>(panelRecord),panelRecord));panelRecord[word]=saved;}
+ const uint32_t hdmiA[]={0,1,2,0,0x800,0x202};__builtin_memcpy(panelRecord,hdmiA,sizeof(hdmiA));
+ assert(!probeMode(io,b,2,reinterpret_cast<uintptr_t>(panelRecord),panelRecord) && io.reads.empty());
+ // The panel is RPL-P's alone and never combines with Combo HDMI, legacy or Type-C selection.
+ for(unsigned bad=0;bad<6;++bad){auto x=c;if(bad==0)x.panel=2;if(bad==1)x.combo=1;if(bad==2)x.comboBackend=3;
+  if(bad==3)x.profile=identify(0x46D18086,0);if(bad==4)x.typeC=1U<<3;if(bad==5)x.abi=3;
+  assert(!x.valid());}
+ auto tglPanel=c;tglPanel.profile=identify(0x9A498086,1);tglPanel.comboBackend=7;assert(!tglPanel.valid());
  // CPU association and power-consumer accounting are independent of transport.
  NativePorts ports {platform,(1U<<0)|(1U<<4)|(1U<<6)};
  assert(ports.bound(platform+0x20+24*4,4));assert(!ports.bound(platform+0x20+24*3,4));
@@ -63,5 +79,5 @@ int main() {
  assert(map.valid && map.mask[0]==7 && map.mask[6]==1 && map.mask[4]==4);
  for(uint32_t n:{0U,1U,4095U,4096U,0x4000000U,0x4001000U,UINT32_MAX})
   assert(XELPDonor::displayPoolRequest(1,n)==(n && !(n&4095) && n<=0x4000000));
- puts("PASS exhaustive PCI/revision admission, typed ABI/profile rejection, TGL six-port result/read-order parity, no Type-C reads, ADL-N Combo parity, three-pipe mixed-port publication/retirement.");
+ puts("PASS exhaustive PCI/revision admission, typed ABI/profile rejection, TGL six-port result/read-order parity, no Type-C reads, ADL-N Combo parity, RPL-P panel-only probe, three-pipe mixed-port publication/retirement.");
 }

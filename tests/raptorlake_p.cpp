@@ -96,6 +96,7 @@ int main() {
             assert(p.donor==(measured ? XELP::Donor::C004FC1A : XELP::Donor::Unknown));
             assert(p.admitted()==(measured && revision==4) && !AlderLakeN::matches(pci,revision));
             XELP::ProbeConfig c;c.profile=p;c.combo=c.comboBackend=1;assert(c.valid()==p.admitted());
+            c={};c.profile=p;c.panel=1;assert(c.valid()==p.admitted());
         }
         assert(!RaptorLakeP::family((pci&0xFFFF0000U)|0x10DE));
     }

@@ -22,5 +22,5 @@ with tempfile.TemporaryDirectory(prefix="xelp-provider-binding-") as directory:
                     "-fno-omit-frame-pointer", "-I" + str(root.parent / "AppleIntelTGLCompat"),
                     "-I" + str(root.parent / "WhateverXe"),
                     str(cpp), "-o", str(exe)], check=True)
-    for mode in ["tgl", "tgl-9a40", "tgl-g4", "adln", "adln-16eu", "adln-abi1", "unknown", "adln-revision", "adln-fake", "tgl-fake", "adln-abi1-fake"]:
+    for mode in ["tgl", "tgl-9a40", "tgl-g4", "adln", "adln-16eu", "adln-abi1", "unknown", "adln-revision", "adln-fake", "tgl-fake", "adln-abi1-fake", "rplp"]:
         subprocess.run([str(exe), mode], check=True)

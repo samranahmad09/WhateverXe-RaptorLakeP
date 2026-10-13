@@ -31,7 +31,9 @@ template<class IO> uint32_t probeMode(IO &io,const ProbeBinding &b,uintptr_t man
     if(!b.bound(manager,record,c))return 0;
     if(b.config.profile.display==Display::XeD)
         return legacyTGLMode(io,c[0],b.config.legacy&b.config.legacyBackend);
-    // Display13 fixed Combo HDMI remains the only qualified transport.
+    // Display13 qualifies fixed Combo HDMI and the built-in eDP panel record
+    // on DDI A, which keeps the native Combo/panel mode as on TGL.
+    if(b.config.panel)return !c[0] && !c[1] && !c[2] && !c[3] && c[4]==2 && c[5]==0x18 ? 1 : 0;
     if(!(b.config.combo&b.config.comboBackend&(1U<<c[0])))return 0;
     return c[1]>=1 && c[1]<=3 && c[2]==2 && !c[3] && c[4]==0x800 && (c[5]&0xB)==2 ? 1 : 0;
 }

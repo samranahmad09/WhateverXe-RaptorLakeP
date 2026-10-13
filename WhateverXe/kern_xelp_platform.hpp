@@ -61,27 +61,31 @@ struct NativePorts {
     }
 };
 // ABI3 includes physical/effective identity and binds a profile and immutable probe policy, not mutable connection state.
+// ABI4 adds the built-in panel policy (RPL-P eDP on DDI A); an ABI3 peer is refused.
 // legacy permits probing for mode4; it does not force mode4 or classify a
 // USB-C-capable connector as physically fixed DP. The provider still checks FIA.
 // Type-C intent is represented but not admitted by either current backend.
 struct ProbeConfig {
-    uint32_t abi {3},bytes {sizeof(ProbeConfig)};
+    uint32_t abi {4},bytes {sizeof(ProbeConfig)};
     Profile profile;
-    uint32_t combo {},legacy {},typeC {},excluded {},comboBackend {},legacyBackend {};
+    uint32_t combo {},legacy {},typeC {},excluded {},comboBackend {},legacyBackend {},panel {};
     bool valid() const {
-        if(abi!=3 || bytes!=sizeof(ProbeConfig) || !profile.admitted() ||
+        if(abi!=4 || bytes!=sizeof(ProbeConfig) || !profile.admitted() ||
            !same(profile,identify(profile.identity,profile.revision,profile.effectiveIdentity)))return false;
         if((combo&~7U) || ((legacy|typeC|excluded|legacyBackend)&~0x1F8U) ||
-           (comboBackend&~7U) || (legacy&typeC) || (legacy&excluded) || (typeC&excluded))return false;
-        if(profile.display==Display::XeD)return comboBackend==7;
-        return profile.display==Display::XeLPD && combo && !(combo&~3U) &&
-            comboBackend && !(comboBackend&~3U) && !legacy && !typeC && !legacyBackend;
+           (comboBackend&~7U) || (legacy&typeC) || (legacy&excluded) || (typeC&excluded) || (panel&~1U))return false;
+        if(profile.display==Display::XeD)return comboBackend==7 && !panel;
+        if(profile.display!=Display::XeLPD || legacy || typeC || legacyBackend)return false;
+        // Display 13 qualifies fixed Combo HDMI or, on RPL-P alone, the
+        // built-in eDP panel on DDI A. The two policies never combine.
+        if(panel)return profile.family==Family::RaptorLakeP && !combo && !comboBackend;
+        return combo && !(combo&~3U) && comboBackend && !(comboBackend&~3U);
     }
 };
 inline bool same(const ProbeConfig &a,const ProbeConfig &b) {
     return a.abi==b.abi && a.bytes==b.bytes && same(a.profile,b.profile) && a.combo==b.combo &&
         a.legacy==b.legacy && a.typeC==b.typeC && a.excluded==b.excluded &&
-        a.comboBackend==b.comboBackend && a.legacyBackend==b.legacyBackend;
+        a.comboBackend==b.comboBackend && a.legacyBackend==b.legacyBackend && a.panel==b.panel;
 }
 using ConfigureProbe = bool (*)(void *,const ProbeConfig *);
 using ProbePort = uint32_t (*)(void *);

@@ -29,6 +29,7 @@ int main(int argc,char **argv) {
  const bool legacy=!strncmp(argv[1],"adln-abi1",9);
  const bool fake=strstr(argv[1],"fake")!=nullptr;
  const bool rejected=!strcmp(argv[1],"unknown") || !strcmp(argv[1],"adln-revision");
+ const bool rplp=!strcmp(argv[1],"rplp"); // The built-in eDP panel policy.
  IOService controller;IOPCIDevice pci;OSObject access,port,foreign;IOMemoryMap map;
  std::vector<uint8_t> mmio(0x1000000);alignas(8) uint8_t platform[0x1C0] {};
  pci.identity=adln?0x46D18086:0x9A498086;
@@ -37,6 +38,7 @@ int main(int argc,char **argv) {
  if(!strcmp(argv[1],"adln-16eu"))pci.identity=0x46D28086;
  if(!strcmp(argv[1],"unknown"))pci.identity=0x46A68086;
  if(!strcmp(argv[1],"adln-revision"))pci.revision=1;
+ if(rplp){pci.identity=0xA7A88086;pci.revision=4;}
  OSData fakeID;
  if(fake){pci.identity=0x12348086;fakeID.value=adln?0x46D2:0x9A49;pci.property=&fakeID;}
  controller.provider=&pci;platform[0x12]=9;
@@ -51,17 +53,18 @@ int main(int argc,char **argv) {
  field<void *>(&port,0x548)=initial;
  assert(!tglProbePort(&port));
  assert(!hardwareAllowed(nullptr));IOService orphan;assert(!hardwareAllowed(&orphan));
- const bool physicalTGL=!adln && !rejected;
+ const bool physicalTGL=!adln && !rplp && !rejected;
  assert(hardwareAllowed(&controller)==physicalTGL);
  assert(tglProbePort(&port)==(physicalTGL?1U:0U));
  field<void *>(&port,0x578)=&foreign;assert(!tglProbePort(&port));field<void *>(&port,0x578)=&access;
  XELP::ProbeConfig config;config.profile=XELP::deviceProfile(&pci);
  xelpSelectedGPU=&pci;xelpSelectedProfile=config.profile;
  assert(xelpSelectedDevice(&pci)==config.profile.admitted());
- assert(xelpAlderLakeNDevice(&pci)==(adln && !rejected));
+ assert(xelpAlderLakeNDevice(&pci)==((adln || rplp) && !rejected));
  IOPCIDevice foreignPCI;foreignPCI.identity=pci.identity;foreignPCI.revision=pci.revision;foreignPCI.property=pci.property;
  assert(!xelpSelectedDevice(&foreignPCI));
  config.combo=3;config.comboBackend=adln?3:7;config.legacy=adln?0:0x1F8;config.legacyBackend=adln?0:0x1F8;
+ if(rplp){config.combo=config.comboBackend=config.legacy=config.legacyBackend=0;config.panel=1;}
  // The contract derives generation from physical identity, not boot args.
  assert(!xelpConfigurePortProbe(&controller,2,3,3));
  if(!adln)assert(!xelpConfigurePortProbe(&controller,1,3,3));
@@ -99,9 +102,15 @@ int main(int argc,char **argv) {
    const uint32_t bases[]={0x163000,0x16E000,0x16F000};const auto base=bases[(d-3)/2];
    *reinterpret_cast<uint32_t *>(mmio.data()+base+0x8A0)=0x10;
    *reinterpret_cast<uint32_t *>(mmio.data()+base+0x890)=1U<<((d-3)%2);}
-  assert(tglProbePort(&port)==(adln?(d<2?1U:0U):(d<3?1U:4U)));
+  assert(tglProbePort(&port)==(rplp?0U:adln?(d<2?1U:0U):(d<3?1U:4U)));
   field<void *>(&port,0x578)=&foreign;assert(!tglProbePort(&port));field<void *>(&port,0x578)=&access;
   field<void *>(&port,0x548)=reinterpret_cast<void *>(1);assert(!tglProbePort(&port));
+ }
+ if(rplp) {
+  // Only the built-in panel record at DDI A probes; an HDMI or DP record there does not.
+  auto panel=reinterpret_cast<uint32_t *>(platform+0x20);const uint32_t values[]={0,0,0,0,2,0x18};
+  memcpy(panel,values,sizeof(values));field<void *>(&port,0x548)=panel;assert(tglProbePort(&port)==1);
+  panel[4]=0x400;assert(!tglProbePort(&port));panel[4]=2;panel[5]=0x201;assert(!tglProbePort(&port));
  }
  // No second ownership epoch, no rebinding to a changed platform.
  field<void *>(&controller,0xD40)=nullptr;assert(!xelpConfigureDisplay(&controller,&config));
