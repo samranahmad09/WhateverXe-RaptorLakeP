@@ -140,6 +140,26 @@ int main() {
     assert(bootstrapPanelDDI(true,7,3,0x8a000106)==UINT32_MAX); // No silent second-GOP takeover.
     assert(bootstrapPanelDDI(true,6,1,0x8a000106)==UINT32_MAX && bootstrapPanelDDI(false,7,1,0x8a000106)==UINT32_MAX);
     assert(bootstrapPanelDDI(true,7,2,0x8a000106)==UINT32_MAX && bootstrapPanelDDI(true,7,1,0x88030100)==UINT32_MAX);
+    // Call sites dispatch on the policy: panel clear is exactly the HDMI behaviour, panel set the eDP one.
+    const auto none=TGLHDMIWiring::empty();
+    assert(policySupported(none,true) && !policySupported(wiring,true) && !policySupported(TGLHDMIWiring{},true));
+    assert(policySupported(wiring,false)==supportedWiring(wiring) && !policySupported(none,false));
+    assert(policyPorts(none,true)==1 && !policyPorts(wiring,true) && policyPorts(wiring,false)==wiring.hdmi && !policyPorts(none,false));
+    assert(policyBootDDI(none,true,0x8a000106)==0 && policyBootDDI(wiring,true,0x8a000106)==UINT32_MAX);
+    assert(policyBootDDI(wiring,false,0x90030100)==1 && policyBootDDI(wiring,false,0x8a000106)==UINT32_MAX);
+    assert(policyBootstrapDDI(none,true,true,7,1,0x8a000106)==0 && policyBootstrapDDI(wiring,true,true,7,1,0x8a000106)==UINT32_MAX);
+    assert(policyBootstrapDDI(wiring,false,true,3,1,0x91030100)==1 && policyBootstrapDDI(none,false,true,7,1,0x8a000106)==UINT32_MAX);
+    Platform policyOut,hdmiOut;
+    assert(policyApply(policyOut.data(),Bytes,panelIn.data(),none,true) && !memcmp(policyOut.data(),panelOut.data(),Bytes));
+    assert(!policyApply(policyOut.data(),Bytes,panelIn.data(),wiring,true));
+    assert(policyApply(hdmiOut.data(),Bytes,input.data(),wiring,false) && !memcmp(hdmiOut.data(),output.data(),Bytes));
+    assert(policySelected(panelOut.data(),panelOut.config(0),none,true) && !policySelected(panelOut.data(),panelOut.config(0),wiring,true));
+    assert(!policySelected(panelOut.data(),panelOut.config(0),none,false) && policySelected(output.data(),output.config(1),wiring,false));
+    assert(!policySelected(output.data(),output.config(1),none,true));
+    assert(policyBoundPorts(panelOut.data(),none,true).selected==1 && !policyBoundPorts(panelOut.data(),wiring,true).valid());
+    assert(policyBoundPorts(output.data(),wiring,false).selected==2 && !policyBoundPorts(output.data(),none,true).valid());
+    assert(policyExcludedTypeC(panelOut.data(),Bytes,none,true)==0x3F000000 && !policyExcludedTypeC(panelOut.data(),Bytes,wiring,true));
+    assert(policyExcludedTypeC(output.data(),Bytes,wiring,false)==0x3F000000 && !policyExcludedTypeC(panelOut.data(),Bytes,none,false));
     puts("PASS AlderLakeN connector policy: stable identities/counts/pool, A/DDC1, B/DDC2 and A+B; measured single-GOP bootstrap, excluded connectors, malformed wiring and foreign config rejection. CPU only.");
     puts("PASS RaptorLakeP panel policy: built-in record kept at A, dummies elsewhere, DP SST boot pipe on A only, preflight before any write. CPU only.");
 }

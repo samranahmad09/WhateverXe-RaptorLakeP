@@ -162,5 +162,36 @@ inline uint32_t excludedPanelTypeC(const void *platform,uint32_t bytes) {
     }
     return 0x3F000000;
 }
+// The connector policy at each call site: fixed Combo HDMI wiring (ADL-N)
+// or, with panel set, the built-in eDP on DDI A (RPL-P). A panel policy
+// carries no HDMI wiring. With panel clear these are the HDMI helpers above.
+inline bool policySupported(const TGLHDMIWiring &w,bool panel) {
+    return panel ? w.valid && !w.hdmi : supportedWiring(w);
+}
+inline uint32_t policyPorts(const TGLHDMIWiring &w,bool panel) {
+    return panel ? (policySupported(w,true) ? 1U : 0U) : w.hdmi;
+}
+inline uint32_t policyBootDDI(const TGLHDMIWiring &w,bool panel,uint32_t trans) {
+    if(!panel)return bootDDI(w,trans);
+    return policySupported(w,true) ? bootPanelDDI(trans) : UINT32_MAX;
+}
+inline uint32_t policyBootstrapDDI(const TGLHDMIWiring &w,bool panel,bool complete,uint32_t powered,uint32_t active,uint32_t trans) {
+    if(!panel)return bootstrapDDI(w,complete,powered,active,trans);
+    return policySupported(w,true) ? bootstrapPanelDDI(complete,powered,active,trans) : UINT32_MAX;
+}
+inline bool policyApply(void *destination,uint32_t bytes,const void *source,const TGLHDMIWiring &w,bool panel) {
+    return panel ? policySupported(w,true) && applyPanel(destination,bytes,source) : apply(destination,bytes,source,w);
+}
+inline bool policySelected(const void *platform,const void *config,const TGLHDMIWiring &w,bool panel) {
+    return panel ? policySupported(w,true) && panelSelected(platform,config) : selected(platform,config,w);
+}
+inline XELP::NativePorts policyBoundPorts(const void *platform,const TGLHDMIWiring &w,bool panel) {
+    if(!panel)return boundPorts(platform,w);
+    return policySupported(w,true) ? boundPanelPorts(platform) : XELP::NativePorts {};
+}
+inline uint32_t policyExcludedTypeC(const void *platform,uint32_t bytes,const TGLHDMIWiring &w,bool panel) {
+    if(!panel)return excludedTypeC(platform,bytes,w);
+    return policySupported(w,true) ? excludedPanelTypeC(platform,bytes) : 0;
+}
 }
 #endif
