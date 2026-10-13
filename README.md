@@ -7,8 +7,8 @@ A fork of [WhateverXe](https://github.com/b00t0x/WhateverXe) working toward macO
 processors, including the laptop's internal (eDP) panel.
 
 > **Status: not a working driver yet.**
-> - Today this fork only adds an opt-in, read-only diagnostic (`-wex-rplp-observe`). It reports the GPU's
->   configuration and the firmware's display state.
+> - Today this fork adds two opt-in diagnostics: the read-only `-wex-rplp-observe`, which reports the GPU's
+>   configuration and the firmware's display state, and `-wex-rplp-gpu`, a one-shot GPU command self-test.
 > - Raptor Lake-P GPUs remain unsupported.
 > - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.
 > - Hardware findings so far: [docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md).
@@ -50,7 +50,7 @@ every hardware rule.
 | Stage | Goal | Done when | Status |
 | --- | --- | --- | --- |
 | R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Done: on the reference machine the macOS readout matches the Linux capture (all five fuses, 64 EU, 4 DSS) |
-| R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | Not started |
+| R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | In progress: the BCS self-test (`-wex-rplp-gpu`) is written and CI-tested; hardware run pending. The accelerator start depends on R3, because the donor's accelerator registers only after a Display 13 framebuffer controller starts |
 | R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Not started |
 | R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
 | R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | Not started |
@@ -102,6 +102,22 @@ sudo dmesg | grep -E 'RaptorLakeP|WhateverXe' > ~/Desktop/rplp-dmesg.txt
 - `RPLPGTReadout`, `RPLPDisplay13Boot`, `RPLPEDPBoot`
 - `RPLPPhysicalMemoryLayout`, `RPLPStolenReservation`
 - Physical identity, revision, and the GT and display stepping names
+
+## Trying the R2 GPU self-test
+
+**What it does.** With `-wex-rplp-gpu` added to `-wex-rplp-observe`, the diagnostic submits one blitter (BCS)
+command batch through the execlist queue and checks that the GPU wrote two known values to memory. It is
+upstream's Alder Lake-N self-test, run at a Raptor Lake-P lease.
+- It runs only on revision 4 with the fuse set measured on the reference machine (4 DSS, 64 EU, L3 `0x88`,
+  media `0x000E00FE`), with physical DMA and the firmware's 1:1 stolen-memory GGTT.
+- It leases 16 GGTT pages at 32 MiB, inside stolen memory and clear of the firmware's plane, and saves the
+  old entries.
+- It writes those PTEs and BCS engine registers, and may enable PCI bus mastering. After any engine write,
+  its pages stay pinned until reboot.
+- It needs no Apple driver, so it also runs from the Big Sur recovery.
+
+**Reading it.** `tools/rplp-decode.py` prints the lease and the result, and ends with `R2 BCS self-test
+verdict`. The properties are `RPLPGPUAdmission`, `RPLPGPULease` and `RPLPGPUCommandTest`.
 
 ## Related work (outside this repository)
 
@@ -226,6 +242,7 @@ No family-selection or per-feature enable arguments are required for Alder Lake-
 | `-wexbeta` | Bypass the plugin's OS-version check. Exact kernel/driver checks still apply. |
 | `-wex-tgl-off` | Disable the Tiger Lake path. |
 | `-wex-rplp-observe` | Raptor Lake-P only: publish the read-only R1 diagnostic described above. The GPU stays unsupported. |
+| `-wex-rplp-gpu` | Raptor Lake-P only, with `-wex-rplp-observe`: run the one-shot R2 BCS self-test described above. The GPU stays unsupported. |
 
 ### Upstream roadmap
 

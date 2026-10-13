@@ -2894,6 +2894,9 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 // Not an admission path: no revision is qualified, so unknown steppings are
 // published without a name. The only MMIO writes are readGT's balanced
 // forcewake request/release; display, PPS, backlight and AUX are read only.
+// -wex-rplp-gpu adds the R2 BCS self-test for the qualified revision-4 fuse
+// set: it writes the sixteen leased GGTT PTEs and BCS engine registers, may
+// enable bus mastering, and keeps its pages pinned after any engine write.
 void XE::observeRaptorLakeP(IOPCIDevice *pci) {
 	const auto identity = pci->configRead32(0);
 	const auto revision = pci->configRead8(8);
@@ -2916,10 +2919,20 @@ void XE::observeRaptorLakeP(IOPCIDevice *pci) {
 	struct ReadIO {
 		volatile uint8_t *base;
 		uint64_t length;
+		volatile uint8_t *aperture {};
 		bool readable(uint32_t offset) const { return base && length >= 4 && offset <= length - 4; }
 		uint32_t read(uint32_t offset) const { return *reinterpret_cast<volatile uint32_t *>(base + offset); }
 		void write(uint32_t offset,uint32_t value) { *reinterpret_cast<volatile uint32_t *>(base + offset)=value; }
 		void delay() { IODelay(100); }
+		uint64_t readPTE(uint32_t offset) { return *reinterpret_cast<volatile uint64_t *>(base + offset); }
+		void writePTE(uint32_t offset,uint64_t value) { *reinterpret_cast<volatile uint64_t *>(base + offset)=value; }
+		uint32_t apertureRead(uint32_t offset) { return *reinterpret_cast<volatile uint32_t *>(aperture + offset); }
+		void fence() { __asm__ volatile("mfence" ::: "memory"); }
+		void flushMemory(void *memory,uint32_t bytes) {
+			for (uint32_t off = 0; off < bytes; off += 64)
+				__asm__ volatile("clflush (%0)" :: "r"(static_cast<uint8_t *>(memory) + off) : "memory");
+			fence();
+		}
 	} io {reinterpret_cast<volatile uint8_t *>(map->getVirtualAddress()), map->getLength()};
 	const bool barReady = io.base && io.length == 0x1000000;
 	const auto reservedHigh = barReady ? io.read(0x1082C4) : UINT32_MAX;
@@ -2939,6 +2952,64 @@ void XE::observeRaptorLakeP(IOPCIDevice *pci) {
 		revision, static_cast<uint32_t>(gt.forcewake.status), gt.resources.eus, gt.resources.dss,
 		gt.resources.l3BankPairs, gt.forcewake.fuses[4], static_cast<uint32_t>(display.status),
 		display.poweredPipes, display.activePipes, static_cast<uint32_t>(edp.status), edp.dpPipes, edp.ddiAPipes);
+	if (checkKernelArgument("-wex-rplp-gpu")) {
+		static IOBufferMemoryDescriptor *pinnedGPU = nullptr;
+		AlderLakeN::GPUResult result;
+		RaptorLakeP::GPULease lease;
+		AlderLakeN::Resources profile;
+		IOBufferMemoryDescriptor *buffer = nullptr;
+		IOMemoryMap *apertureMap = nullptr;
+		uint64_t dma[AlderLakeN::GPUPages] {}, predecessor[AlderLakeN::GPUPages] {};
+		auto optionProperty = pci->getProperty("IOMemoryDescriptorOptions");
+		auto opts = OSDynamicCast(OSNumber, optionProperty);
+		const uint64_t mapperOptions = opts ? opts->unsigned64BitValue() : 0;
+		const auto systemMapper = reinterpret_cast<uintptr_t>(IOMapper::gSystem);
+		const bool physical = (opts && (mapperOptions & kIOMemoryMapperNone)) ||
+			((!optionProperty || opts) && !mapperOptions && !systemMapper);
+		const auto commandBefore = pci->configRead16(4);
+		const auto &f = gt.forcewake.fuses;
+		const bool qualified = RaptorLakeP::qualifiedGT(f[0], f[1], f[2], f[3], f[4], profile);
+		// Revision, GT status, profile, mapper options, system mapper, physical DMA, PCI command before/after.
+		uint64_t admission[] {1, revision, static_cast<uint64_t>(gt.forcewake.status), qualified,
+			mapperOptions, systemMapper, physical, commandBefore, commandBefore};
+		do {
+			if (!barReady || revision != 4 || gt.forcewake.status != AlderLakeN::GTStatus::Complete || !qualified ||
+				!physical || !(commandBefore & 2) || page_size != 4096 || pinnedGPU) break;
+			result.status = uint64_t(AlderLakeN::GPUStatus::BadMemory);
+			if (!aperture || aperture->getLength() != 0x10000000) break;
+			lease = RaptorLakeP::leaseGPU(io, display, predecessor, true, bounded);
+			if (lease.status != 1) { result.status = uint64_t(AlderLakeN::GPUStatus::BusyGGTT); break; }
+			buffer = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut | kIOMemoryMapperNone, AlderLakeN::GPUBytes, 4096);
+			if (!buffer || !buffer->getBytesNoCopy() || buffer->getLength() != AlderLakeN::GPUBytes) break;
+			bool complete = true;
+			for (unsigned p = 0; p < AlderLakeN::GPUPages; ++p) {
+				IOByteCount length = 0;
+				dma[p] = buffer->getPhysicalSegment(p * 4096, &length, kIOMemoryMapperNone);
+				if (!dma[p] || (dma[p] & 4095) || dma[p] > 0x7FFFFFF000ULL || length < 4096) { complete = false; break; }
+			}
+			if (!complete) break;
+			apertureMap = aperture->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapInhibitCache,
+				RaptorLakeP::GPUSlot, AlderLakeN::GPUBytes);
+			if (!apertureMap || !apertureMap->getVirtualAddress() || apertureMap->getLength() != AlderLakeN::GPUBytes) break;
+			io.aperture = reinterpret_cast<volatile uint8_t *>(apertureMap->getVirtualAddress());
+			// The blitter must master the bus to reach the leased pages.
+			if (!(commandBefore & 4)) pci->setBusMasterEnable(true);
+			admission[8] = pci->configRead16(4);
+			result = AlderLakeN::testGPU(io, static_cast<uint8_t *>(buffer->getBytesNoCopy()), dma, predecessor, true,
+				RaptorLakeP::GPUSlot);
+			if (!(commandBefore & 4) && !result.retained) pci->setBusMasterEnable(false);
+		} while (false);
+		io.aperture = nullptr;
+		if (result.retained) pinnedGPU = buffer;
+		else OSSafeReleaseNULL(buffer);
+		OSSafeReleaseNULL(apertureMap);
+		pci->setProperty("RPLPGPUAdmission", admission, sizeof(admission));
+		pci->setProperty("RPLPGPULease", &lease, sizeof(lease));
+		pci->setProperty("RPLPGPUCommandTest", &result, sizeof(result));
+		SYSLOG("igfx", "RaptorLakeP BCS status=%llu stage=%llu lease=%llu verified=%llu writes=%llu head/tail=%llx/%llx result/token=%llx/%llx retained=%llu",
+			result.status, result.stage, lease.status, lease.verifiedPages, result.engineWrites, result.head, result.tail,
+			result.result, result.token, result.retained);
+	}
 	map->release();
 }
 

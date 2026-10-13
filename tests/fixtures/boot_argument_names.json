@@ -129,6 +129,7 @@
     "-tgltc-bootstrap"
   ],
   "-wex-rplp-observe": [],
+  "-wex-rplp-gpu": [],
   "-wexoff": [
     "-wxeoff"
   ],

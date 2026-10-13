@@ -6,7 +6,7 @@
 対象は第13世代Core H／P／Uシリーズのノート向けCPUに搭載されたUHD／Iris Xe Graphicsと、ノートPCの内蔵ディスプレイ（eDP）です。
 
 > **現状：まだ動作するドライバではありません。**
-> - このforkが現在追加しているのは、任意かつ読み取り専用の診断機能（`-wex-rplp-observe`）のみです。GPUの構成とファームウェアの画面状態を報告します。
+> - このforkが現在追加しているのは、任意の診断機能2つのみです。読み取り専用の`-wex-rplp-observe`はGPUの構成とファームウェアの画面状態を報告し、`-wex-rplp-gpu`はGPUがコマンドを実行できるかを1回だけ確かめるセルフテストです。
 > - Raptor Lake-PのGPUは引き続き非対応です。
 > - upstreamが対応する機種（Tiger Lake、Alder Lake-N / Twin Lake）の動作はupstreamと変わりません。
 > - これまでのハードウェア調査結果：[docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md)（英語）。
@@ -39,7 +39,7 @@
 | 段階 | 目標 | 完了条件 | 状況 |
 | --- | --- | --- | --- |
 | R1 | 読み取り専用のRaptor Lake-Pプロファイル：fuse、EU構成、ファームウェアの画面状態。forcewakeの取得／解放以外の書き込みなし | macOSでの読み出し結果が、同じ機種のLinux i915キャプチャと一致する | 完了：検証機でのmacOSの読み出し結果がLinuxキャプチャと一致（fuse 5つすべて、64 EU、4 DSS） |
-| R2 | GTバックエンド：既存のBCSセルフテスト、次にこのGPUのURB／L3値でアクセラレータ修正を適用 | セルフテストが通り、ファームウェアのframebuffer上でアクセラレータが起動する | 未着手 |
+| R2 | GTバックエンド：既存のBCSセルフテスト、次にこのGPUのURB／L3値でアクセラレータ修正を適用 | セルフテストが通り、ファームウェアのframebuffer上でアクセラレータが起動する | 進行中：BCSセルフテスト（`-wex-rplp-gpu`）は実装済み・CIテスト済みで、実機での実行待ち。donorのアクセラレータはDisplay 13のframebufferコントローラが起動して初めて登録されるため、アクセラレータの起動はR3に依存する |
 | R3 | 内蔵ディスプレイの初表示：donorの内蔵パネル用コネクタを残し、ファームウェアが確立したリンクを引き継ぐ | ファームウェアのモードで内蔵パネルにデスクトップが表示される | 未着手 |
 | R4 | 内蔵ディスプレイの本対応：パネル電源シーケンス、バックライト、消灯／点灯、ADL-Pのテーブルによるリンク再トレーニング、144Hz | 輝度調整、スリープ／復帰、ネイティブのリフレッシュレートが動作する | 未着手 |
 | R5 | 内蔵ディスプレイでのMetalと安定化。その後USB-C出力 | 内蔵パネルでWindowServerがアクセラレーションされる | 未着手 |
@@ -81,6 +81,16 @@ sudo dmesg | grep -E 'RaptorLakeP|WhateverXe' > ~/Desktop/rplp-dmesg.txt
 - `RPLPGTReadout`、`RPLPDisplay13Boot`、`RPLPEDPBoot`
 - `RPLPPhysicalMemoryLayout`、`RPLPStolenReservation`
 - 物理ID、revision、GTとディスプレイのステッピング名
+
+## R2 GPUセルフテストの試し方
+
+**動作。** `-wex-rplp-observe`に加えて`-wex-rplp-gpu`を指定すると、ブリッター（BCS）のコマンドを1回だけexeclistキュー経由で投入し、GPUが既知の2つの値をメモリに書き込んだことを確認します。upstreamのAlder Lake-N用セルフテストを、Raptor Lake-P用のリースで実行するものです。
+- 実行されるのは、revision 4かつ検証機で測定したfuse構成（4 DSS、64 EU、L3 `0x88`、media `0x000E00FE`）で、DMAが物理アドレスで、ファームウェアがstolen memoryを1:1でGGTTにマップしている場合のみです。
+- stolen memory内の32 MiBの位置にGGTTの16ページをリースします。ファームウェアのプレーンとは重ならず、元のエントリは保存します。
+- それらのPTEとBCSエンジンのレジスタに書き込み、PCIのバスマスタを有効にすることがあります。エンジンへ一度でも書き込んだ後は、そのページを再起動まで固定したままにします。
+- Appleのドライバを必要としないため、Big Surのリカバリーからも実行できます。
+
+**読み方。** `tools/rplp-decode.py`がリースと結果を表示し、最後に`R2 BCS self-test verdict`を出力します。propertyは`RPLPGPUAdmission`、`RPLPGPULease`、`RPLPGPUCommandTest`です。
 
 ## 関連する取り組み（このリポジトリ外）
 
@@ -189,6 +199,7 @@ Alder Lake-N / Twin Lakeで世代選択や個別機能の有効化引数を追�
 | `-wexbeta` | プラグインのOSバージョンチェックを回避する。kernel／driverの一致条件は維持する。 |
 | `-wex-tgl-off` | Tiger Lakeの処理を無効にする。 |
 | `-wex-rplp-observe` | Raptor Lake-Pのみ。上記の読み取り専用R1診断を公開する。GPUは非対応のまま。 |
+| `-wex-rplp-gpu` | Raptor Lake-Pのみ。`-wex-rplp-observe`と併用し、上記のR2 BCSセルフテストを1回実行する。GPUは非対応のまま。 |
 
 ### upstreamのロードマップ
 

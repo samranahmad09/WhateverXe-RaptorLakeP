@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Decode WhateverXe's -wex-rplp-observe properties and diff them against a Linux capture.
+"""Decode WhateverXe's -wex-rplp-observe properties (and -wex-rplp-gpu's self-test) and diff them
+against a Linux capture.
 
 On macOS (booted with -wex-rplp-observe):
     ioreg -lw0 -r -k RPLPObserveVersion > rplp-ioreg.txt
@@ -16,6 +17,15 @@ from pathlib import Path
 GT_STATUS = ['NotAdmitted', 'ExistingOwner', 'AckTimeout', 'Unavailable', 'ProfileMismatch', 'ReleaseFailed', 'Complete']
 DISPLAY_STATUS = ['NotAdmitted', 'Complete', 'Unavailable', 'PowerChanged']
 EDP_STATUS = ['NotAdmitted', 'Complete', 'Unavailable', 'PowerChanged']
+GPU_STATUS = ['NotAdmitted', 'BadMemory', 'BusyGGTT', 'ForcewakeBusy', 'ForcewakeTimeout', 'EngineBusy', 'Mapped',
+              'Complete', 'TimedOut', 'ReleaseFailed', 'RestoreFailed']
+LEASE_STATUS = {0: 'not run', 1: 'leased', 2: 'display or memory precondition failed',
+                3: 'GGTT is not the identity stolen mapping'}
+GPU_VALUE, GPU_TOKEN = 0x4E393742, 0xC001CAFE
+GPU_FIELDS = ['version', 'status', 'stage', 'retained', 'pteWrites', 'pteErrors', 'apertureSamples', 'apertureErrors',
+              'fwBefore', 'fwHeld', 'fwAfter', 'fwReleased', 'engineWrites', 'polls', 'descriptor', 'dmaFirst', 'dmaLast',
+              'result', 'token', 'head', 'tail', 'miMode', 'elStatusLo', 'elStatusHi', 'csbPointer', 'csbWrite',
+              'gucStatus', 'irqEnable', 'errors', 'ipeir', 'ipehr', 'faultAddress']
 FUSES = [(0x9138, 'slice enable'), (0x913C, 'DSS enable'), (0x9134, 'EU disable'), (0x9118, 'mirror fuse 3 (L3)'), (0x9140, 'media disable')]
 NAMES = {
     0x45404: 'PWR_WELL_CTL2', 0x45400: 'PWR_WELL_CTL1 (BIOS)', 0x60400: 'TRANS_DDI_FUNC_CTL A', 0x64000: 'DDI_BUF_CTL A',
@@ -81,6 +91,22 @@ def decode(props):
         out['edp'] = {'status': EDP_STATUS[w[1]] if w[1] < len(EDP_STATUS) else w[1], 'count': w[2],
                       'dpPipes': w[3], 'ddiAPipes': w[4]}
         for off, val in registers(w, 5, min(w[2], 64)): out['registers'].setdefault(off, val)
+    # -wex-rplp-gpu (R2 BCS self-test).
+    if 'RPLPGPUAdmission' in props:
+        out['gpuAdmission'] = dict(zip(['version', 'revision', 'gtStatus', 'qualified', 'mapperOptions', 'systemMapper',
+                                        'physical', 'commandBefore', 'commandAfter'], qwords(props['RPLPGPUAdmission'])))
+    if 'RPLPGPULease' in props:
+        lease = dict(zip(['version', 'status', 'slot', 'bytes', 'stolenBase', 'verifiedPages', 'gopEnd', 'first', 'last'],
+                         qwords(props['RPLPGPULease'])))
+        lease['meaning'] = LEASE_STATUS.get(lease['status'], lease['status'])
+        out['gpuLease'] = lease
+    if 'RPLPGPUCommandTest' in props:
+        q = qwords(props['RPLPGPUCommandTest'])
+        if len(q) != 44: raise ValueError('RPLPGPUCommandTest: expected 44 qwords, got %d' % len(q))
+        gpu = dict(zip(GPU_FIELDS, q[:32]))
+        gpu['csb'] = q[32:]
+        gpu['statusName'] = GPU_STATUS[gpu['status']] if gpu['status'] < len(GPU_STATUS) else gpu['status']
+        out['gpu'] = gpu
     return out
 
 def linux_registers(path):
@@ -126,7 +152,29 @@ def report(d, linux=None):
         if key in d: print(key, d[key])
     eDP = [o for o in sorted(d['registers']) if o in NAMES]
     for o in eDP: print('  %-8s %-22s %#010x' % (hex(o), NAMES[o], d['registers'][o]))
-    if linux is None: return 0
+    gpu_bad = 0
+    if 'gpuAdmission' in d or 'gpu' in d:
+        a, l, g = d.get('gpuAdmission', {}), d.get('gpuLease', {}), d.get('gpu', {})
+        print('\nBCS self-test (-wex-rplp-gpu)')
+        print('  admission revision=%s qualified=%s physical=%s mapper=%#x/%#x PCI command %#06x -> %#06x' % (
+            a.get('revision'), a.get('qualified'), a.get('physical'), a.get('mapperOptions', 0), a.get('systemMapper', 0),
+            a.get('commandBefore', 0), a.get('commandAfter', 0)))
+        print('  lease %s (status %s) slot %#x stolen base %#x verified pages %s GOP end %#x' % (
+            l.get('meaning'), l.get('status'), l.get('slot', 0), l.get('stolenBase', 0), l.get('verifiedPages'), l.get('gopEnd', 0)))
+        if g:
+            print('  status %s stage %s retained %s forcewake %#x/%#x/%#x released=%s' % (
+                g['statusName'], g['stage'], g['retained'], g['fwBefore'], g['fwHeld'], g['fwAfter'], g['fwReleased']))
+            print('  PTE writes %d errors %d, aperture samples %d errors %d, engine writes %d, polls %d' % (
+                g['pteWrites'], g['pteErrors'], g['apertureSamples'], g['apertureErrors'], g['engineWrites'], g['polls']))
+            print('  result %#x (want %#x) token %#x (want %#x) head %#x tail %#x MI_MODE %#x' % (
+                g['result'], GPU_VALUE, g['token'], GPU_TOKEN, g['head'], g['tail'], g['miMode']))
+            print('  execlist %#x:%#x CSB ptr %#x write %#x GuC %#x IRQ %#x errors %#x IPEIR %#x IPEHR %#x fault %#x' % (
+                g['elStatusHi'], g['elStatusLo'], g['csbPointer'], g['csbWrite'], g['gucStatus'], g['irqEnable'],
+                g['errors'], g['ipeir'], g['ipehr'], g['faultAddress']))
+        ok = g.get('statusName') == 'Complete' and g.get('result') == GPU_VALUE and g.get('token') == GPU_TOKEN and g.get('fwReleased')
+        gpu_bad = not ok
+        print('R2 BCS self-test verdict:', 'PASS' if ok else 'FAIL')
+    if linux is None: return 1 if gpu_bad else 0
     regs, bound, sseu = linux
     print('\nLinux capture: %d registers, i915 driver: %s' % (len(regs), bound))
     bad = 0
@@ -150,7 +198,7 @@ def report(d, linux=None):
           '' if 'no driver' in bound else ' (expected: Linux shows i915 state, macOS shows GOP state)'))
     for o in diff[:40]: print('    %-8s %-22s macOS %#010x  Linux %#010x' % (hex(o), NAMES.get(o, ''), d['registers'][o], regs[o]))
     print('R1 fuse/SSEU verdict:', 'PASS' if not bad else 'FAIL (%d mismatches)' % bad)
-    return 1 if bad else 0
+    return 1 if bad or gpu_bad else 0
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
