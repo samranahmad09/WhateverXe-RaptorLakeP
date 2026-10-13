@@ -46,6 +46,32 @@ static GTIO firmwareGT() {
     GTIO io;io.regs={{0x9138,1},{0x913c,0xf},{0x9134,0},{0x9118,0},{0x9140,0xe00fa}};
     return io;
 }
+// The measured A7A8 under OpenCore: GGC 0x02C1 (64MiB stolen, 8MiB GTT) at
+// 0x4B800000, GEN6_STOLEN_RESERVED 0x4F600087 (2MiB WOPCM at the top).
+static XELPMemory::Layout measuredStolen(uint16_t ggc=0x02c1) {
+    auto memory=XELPMemory::decode(ggc,0x4b800001,0);
+    XELPMemory::reservation(memory,memory.base+memory.bytes-0x200000+0x87);
+    return memory;
+}
+// Firmware GGTT: every stolen page mapped 1:1, as the R1 readout implies.
+struct PTEIO : IO {
+    std::map<uint32_t,uint64_t> ptes;
+    unsigned pteReads=0;
+    uint64_t readPTE(uint32_t offset) {++pteReads;auto it=ptes.find(offset);return it==ptes.end() ? 0 : it->second;}
+};
+static PTEIO identityGGTT(const XELPMemory::Layout &memory) {
+    PTEIO io;
+    for(uint32_t i=0;i<memory.bytes/4096;++i)io.ptes[0x800000+8*i]=memory.pte(uint64_t(i)*4096);
+    return io;
+}
+// The firmware plane the R1 readout recorded: pipe A, linear XRGB8888, FHD, stride 7680.
+static AlderLakeN::DisplayReadout firmwarePlane(uint32_t ctl=0x94000008,uint32_t surface=0) {
+    AlderLakeN::DisplayReadout d;d.status=AlderLakeN::ReadoutStatus::Complete;d.poweredPipes=d.activePipes=1;
+    const AlderLakeN::Register regs[] {{0x45404,0xfc0f},{0x60400,0x8a000106},{0x70180,ctl},{0x70188,0x78},
+        {0x70190,0x0437077f},{0x7019c,surface}};
+    for(auto r:regs)d.registers[d.count++]=r;
+    return d;
+}
 static IO eDP() {
     IO io;io.regs={{0x45404,0x401},{0x60400,0x8a000000},{0xc7200,0x80000008},
         {0xc8250,0x80000000},{0x64000,0x80000001}};
@@ -99,6 +125,67 @@ int main() {
     assert(!RaptorLakeP::resources(1,0xf,0,0xff,0xe00fa,res) && RaptorLakeP::resources(1,0xf,0,0xf0,0xe00fa,res));
     assert(res.l3BankPairs==0xf);
     std::puts("RaptorLakeP SSEU, L3 bank-pair and media fuse decoding fixtures passed");
+
+    // One disable bit per bank: ADL-N's 0xF0 keeps four, the measured 0x88 six, a full GT eight.
+    assert(RaptorLakeP::l3Banks(0xf0)==4 && RaptorLakeP::l3Banks(0x88)==6 && RaptorLakeP::l3Banks(0)==8);
+    assert(RaptorLakeP::l3Banks(0xff)==0 && RaptorLakeP::l3Banks(0xf00)==8 && RaptorLakeP::l3Banks(0x188)==6);
+    AlderLakeN::Resources gtRes;
+    assert(RaptorLakeP::qualifiedGT(1,0xf,0,0x88,0xe00fe,gtRes));
+    assert(gtRes.slices==1 && gtRes.dss==4 && gtRes.nativeSubslices==8 && gtRes.eus==64);
+    assert(gtRes.l3Banks==6 && gtRes.urbKiB==384);
+    // Upper 0x9118 bits are not bank disables; the measured low byte is what qualifies.
+    assert(RaptorLakeP::qualifiedGT(1,0xf,0,0x10088,0xe00fe,gtRes) && gtRes.l3Banks==6);
+    unsigned qualified=0;
+    for(unsigned dss=0;dss<0x80;++dss)for(unsigned disabled:{0U,1U,0x88U,0xfeU})
+        for(unsigned l3:{0U,0x88U,0xf0U,0x8U})for(unsigned media:{0xe00feU,0xe00faU,0U}) {
+            const bool expected=dss==0xf && !disabled && l3==0x88 && media==0xe00fe;
+            assert(RaptorLakeP::qualifiedGT(1,dss,disabled,l3,media,gtRes)==expected);
+            if(expected)++qualified;else assert(!gtRes.eus && !gtRes.l3Banks && !gtRes.urbKiB);
+        }
+    assert(qualified==1);
+    for(uint32_t slice:{0U,2U})assert(!RaptorLakeP::qualifiedGT(slice,0xf,0,0x88,0xe00fe,gtRes));
+    // The same four DSS in another position are a different, unmeasured part.
+    assert(!RaptorLakeP::qualifiedGT(1,0x3c,0,0x88,0xe00fe,gtRes) && !RaptorLakeP::qualifiedGT(1,0x2d,0,0x88,0xe00fe,gtRes));
+    std::puts("RaptorLakeP qualified GT profile: measured fuse set only, six L3 banks, 384KiB URB passed");
+
+    // The self-test lease: 32MiB clears the 7.9MiB FHD plane and fits the 62MiB usable stolen.
+    const auto stolen=measuredStolen();
+    assert(stolen.valid && stolen.reservationKnown && stolen.bytes==0x4000000 && stolen.usable()==0x3e00000);
+    uint64_t end=0;
+    assert(RaptorLakeP::scanoutEnd(firmwarePlane(),end) && end==7680ULL*1080);
+    uint64_t saved[AlderLakeN::GPUPages] {};
+    auto ggtt=identityGGTT(stolen);
+    auto lease=RaptorLakeP::leaseGPU(ggtt,firmwarePlane(),saved,true,stolen);
+    assert(lease.status==1 && lease.slot==RaptorLakeP::GPUSlot && lease.bytes==AlderLakeN::GPUBytes);
+    assert(lease.verifiedPages==stolen.bytes/4096 && lease.stolenBase==0x4b800000 && lease.gopEnd==7680ULL*1080);
+    for(unsigned i=0;i<AlderLakeN::GPUPages;++i)assert(saved[i]==((0x4b800000ULL+RaptorLakeP::GPUSlot+i*4096)|1));
+    assert(lease.first==saved[0] && lease.last==saved[AlderLakeN::GPUPages-1]);
+    auto unadmitted=identityGGTT(stolen);uint64_t unused[AlderLakeN::GPUPages] {};
+    assert(RaptorLakeP::leaseGPU(unadmitted,firmwarePlane(),unused,false,stolen).status==0 && !unadmitted.pteReads);
+    // One foreign PTE anywhere in stolen memory refuses the lease and says where.
+    auto foreign=identityGGTT(stolen);foreign.ptes[0x800000+8*100]=0x12345001;
+    auto refused=RaptorLakeP::leaseGPU(foreign,firmwarePlane(),saved,true,stolen);
+    assert(refused.status==3 && refused.verifiedPages==100);
+    // Preconditions that fail before any PTE read.
+    const AlderLakeN::DisplayReadout blocked[] {firmwarePlane(0x94000008,0x01ff0000),firmwarePlane(0x94001008),
+        [] {auto d=firmwarePlane();d.status=AlderLakeN::ReadoutStatus::PowerChanged;return d;}(),
+        [] {auto d=firmwarePlane();d.count=3;return d;}()};
+    for(const auto &d:blocked) {
+        auto io=identityGGTT(stolen);
+        assert(RaptorLakeP::leaseGPU(io,d,saved,true,stolen).status==2 && !io.pteReads);
+    }
+    assert(RaptorLakeP::leaseGPU(ggtt,firmwarePlane(),nullptr,true,stolen).status==2);
+    // A 32MiB stolen size leaves 30MiB usable: the slot does not fit.
+    const auto smallStolen=measuredStolen(0x01c1);
+    auto smallStolenIO=identityGGTT(smallStolen);
+    assert(smallStolen.valid && smallStolen.usable()==0x1e00000 &&
+           RaptorLakeP::leaseGPU(smallStolenIO,firmwarePlane(),saved,true,smallStolen).status==2);
+    // A disabled plane, or one on an unpowered pipe, does not count.
+    auto off=firmwarePlane(0x14000008,0x03000000);
+    assert(RaptorLakeP::scanoutEnd(off,end) && !end);
+    auto unpowered=firmwarePlane(0x94000008,0x03000000);unpowered.poweredPipes=0;
+    assert(RaptorLakeP::scanoutEnd(unpowered,end) && !end);
+    std::puts("RaptorLakeP BCS self-test lease: identity stolen GGTT, plane exclusion and fail-closed preconditions passed");
 
     auto gt=firmwareGT();gt.regs[0xA188]=8;gt.regs[0x130044]=8;
     auto ready=RaptorLakeP::readGT(gt,true);

@@ -1,7 +1,9 @@
-// RPL-P/RPL-U identity and read-only GT/eDP evidence. Observation only:
+// RPL-P/RPL-U identity, read-only GT/eDP evidence and the opt-in BCS self-test.
 // RaptorLakeP stays catalogued without a GT backend, so XELP admission, DVMT,
-// donor start and every Display 13 write path remain off. The only MMIO
-// writes are AlderLakeN::readGT's balanced forcewake request/release.
+// donor start and every Display 13 write path remain off. Observation writes
+// only AlderLakeN::readGT's balanced forcewake request/release; the self-test
+// (qualifiedGT, leaseGPU, AlderLakeN::testGPU) also writes its leased PTEs and
+// BCS engine registers.
 // Linux intel_step.c adlp_rplp_revids and intel_display_device.c
 // adl_p_rpl_pu_steppings cover both RPL-P and RPL-U: revision 4 is GT C0 /
 // display E0. Other revisions have no stepping and no WA review.
@@ -10,6 +12,7 @@
 #include <stdint.h>
 #include "kern_xelp_platform.hpp"
 #include "kern_alderlake_n.hpp"
+#include "kern_alderlake_n_gpu.hpp"
 
 namespace RaptorLakeP {
 constexpr uint32_t DisplayVersion = 13;
@@ -42,6 +45,27 @@ inline bool resources(uint32_t slice, uint32_t dss, uint32_t euDisable,
     return true;
 }
 
+// L3: 0x9118 bits7:0 disable one bank each of the eight a full Xe-LP GT has.
+// That reads AlderLakeN's 0xF0 as its four banks and this part's 0x88 as six,
+// matching Mesa's intel_device_info_update_l3_banks for three to five DSS.
+inline uint32_t l3Banks(uint32_t l3Disable) {
+    return 8-static_cast<uint32_t>(__builtin_popcount(l3Disable&0xFFU));
+}
+
+// The GT profile the backend may use: only the fuse set measured on hardware
+// (R1, i7-13620H A7A8 rev 4) qualifies. URB follows the TGL PRM's configurations,
+// 64KiB per L3 bank: 256KiB at four banks (GT1), 384KiB at six (GT1.xf).
+inline bool qualifiedGT(uint32_t slice, uint32_t dss, uint32_t euDisable,
+                        uint32_t l3Disable, uint32_t media, AlderLakeN::Resources &out) {
+    out = {};
+    Resources r;
+    if (!resources(slice, dss, euDisable, l3Disable, media, r) || dss != 0xF || euDisable ||
+        (l3Disable&0xFFU) != 0x88 || media != 0x000E00FE)
+        return false;
+    out = {r.slices, r.dss, r.nativeSubslices, r.eus, l3Banks(l3Disable), 64*l3Banks(l3Disable)};
+    return true;
+}
+
 // The Gen12 forcewake/fuse/engine protocol is AlderLakeN::readGT's. Its final
 // Complete or ProfileMismatch status means every read succeeded and both
 // domains were released; only the profile verdict is re-evaluated here.
@@ -60,6 +84,63 @@ template<class IO> GTReadout readGT(IO &io, bool admitted) {
         gt.status=resources(gt.fuses[0],gt.fuses[1],gt.fuses[2],gt.fuses[3],gt.fuses[4],out.resources) ?
             AlderLakeN::GTStatus::Complete : AlderLakeN::GTStatus::ProfileMismatch;
     }
+    return out;
+}
+
+// End of every enabled primary plane on a powered pipe, from the display
+// readout: linear only (PLANE_CTL bits12:10), stride in 64-byte units (bits11:0),
+// height from PLANE_SIZE bits28:16. A tiled or incompletely read plane fails closed.
+inline bool scanoutEnd(const AlderLakeN::DisplayReadout &display, uint64_t &end) {
+    end = 0;
+    for (unsigned pipe = 0; pipe < 3; ++pipe) {
+        if (!(display.poweredPipes & (1U << pipe))) continue;
+        const uint32_t o = 0x1000 * pipe;
+        uint32_t ctl {}, stride {}, size {}, surface {};
+        if (!AlderLakeN::value(display, 0x70180 + o, ctl) || !AlderLakeN::value(display, 0x70188 + o, stride) ||
+            !AlderLakeN::value(display, 0x70190 + o, size) || !AlderLakeN::value(display, 0x7019C + o, surface))
+            return false;
+        if (!(ctl & 0x80000000)) continue;
+        if (ctl & (7U << 10)) return false;
+        const uint64_t last = uint64_t(surface & ~4095U) + uint64_t(stride & 0xFFF) * 64 * (((size >> 16) & 0x1FFF) + 1);
+        if (last > end) end = last;
+    }
+    return true;
+}
+
+// The BCS self-test's sixteen pages, leased at 32MiB: inside the measured part's
+// 62MiB usable stolen memory, clear of an FHD firmware plane. Like AlderLakeN's
+// firmware lease this is not an allocator: the whole stolen range must carry
+// the firmware's identity mapping, and every leased PTE is saved for restore.
+constexpr uint32_t GPUSlot = 0x02000000;
+struct GPULease {
+    uint64_t version {1}, status {}, slot {GPUSlot}, bytes {AlderLakeN::GPUBytes};
+    uint64_t stolenBase {}, verifiedPages {}, gopEnd {}, first {}, last {};
+};
+static_assert(sizeof(GPULease) == 9 * 8, "RaptorLakeP GPU lease layout");
+
+// status: 1 leased, 2 a display or memory precondition failed, 3 the GGTT is
+// not the identity stolen mapping (verifiedPages says where it stopped).
+template<class IO> GPULease leaseGPU(IO &io, const AlderLakeN::DisplayReadout &display,
+                                     uint64_t *predecessor, bool admitted, const XELPMemory::Layout &memory) {
+    GPULease out;
+    if (!admitted) return out;
+    out.status = 2;
+    if (!predecessor || display.status != AlderLakeN::ReadoutStatus::Complete ||
+        !scanoutEnd(display, out.gopEnd) || out.gopEnd > GPUSlot ||
+        !memory.range(GPUSlot, AlderLakeN::GPUBytes, true) || !io.readable(0x800000 + (memory.bytes / 4096) * 8 - 1))
+        return out;
+    out.stolenBase = memory.base;
+    out.status = 3;
+    for (uint32_t i = 0; i < memory.bytes / 4096; ++i) {
+        const auto expected = memory.pte(uint64_t(i) * 4096);
+        if (io.readPTE(0x800000 + 8 * i) != expected) return out;
+        ++out.verifiedPages;
+        if (i >= GPUSlot / 4096 && i < (GPUSlot + AlderLakeN::GPUBytes) / 4096)
+            predecessor[i - GPUSlot / 4096] = expected;
+    }
+    out.first = predecessor[0];
+    out.last = predecessor[AlderLakeN::GPUPages - 1];
+    out.status = 1;
     return out;
 }
 
