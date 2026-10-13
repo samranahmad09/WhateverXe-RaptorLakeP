@@ -25,6 +25,7 @@ struct Port {
 struct Ports {
     Status status {Status::Missing};
     uint32_t version {},bytes {},present {},unmapped {},ambiguous {};
+    uint32_t checksum {}; // Byte sum over the VBT; 0 when its checksum matches.
     Port port[PortCount];
     bool valid() const {return status==Status::Valid;}
     // TGL external DP candidates, not a fixed/alt/TBT mode decision. Current
@@ -89,7 +90,12 @@ inline Ports parse(const void *data,size_t length,Family family) {
     const size_t header=u16(p+22),size=u16(p+24),bdb=u32(p+28);
     if(header<48 || size<header || size>length || bdb<header || bdb>size || size-bdb<22)return r;
     uint8_t sum=0;for(size_t i=0;i<size;++i)sum+=p[i];
-    if(sum){r.status=Status::Checksum;return r;}
+    // The measured RPL-P firmware ships a VBT whose checksum byte does not
+    // match its contents, and Linux i915 does not verify it. There the sum
+    // is kept as evidence and every structural bound below still applies;
+    // the other families reject the table.
+    r.checksum=sum;
+    if(sum && family!=Family::RaptorLakeP){r.status=Status::Checksum;return r;}
     const auto b=p+bdb;const size_t bh=u16(b+18),bs=u16(b+20);
     if(memcmp(b,"BIOS_DATA_BLOCK ",16) || bh<22 || bs<bh || bs>size-bdb)return r;
     r.version=u16(b+16);r.bytes=static_cast<uint32_t>(size);

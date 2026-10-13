@@ -57,10 +57,10 @@ int main(int argc,char **argv){
  auto a=parse(adl.data(),adl.size(),Family::AlderLakeN);assert(a.valid()&&a.present==0xB&&a.hdmi(3).hdmi==3);
  assert(ddi(Family::TigerLake,9)==3&&ddi(Family::AlderLakeN,13)==3&&ddi(Family::AlderLakeN,19)==6);
  assert(ddi(Family::AlderLakeN,9)==PortCount&&ddi(Family::TigerLake,8)==PortCount);
- // RPL-P laptop layout: eDP on DVO A with AUX A, DP alt mode on Type-C 1 and 2 (DVO F/G).
- auto rpl=table({{0x1806,10,0,0x40},{0x68c6,13,0,0x50},{0x68c6,15,0,0x60}});
+ // The measured RPL-P laptop VBT: eDP on DVO A with AUX A, USB-C on Type-C 1 and 2 (DVO F/G, AUX F/G).
+ auto rpl=table({{0x1806,10,3,0x40,0xc0,0},{0x68c6,13,3,0x60,0xc0,3},{0x68c6,15,4,0x70,0xc0,3}});
  auto rp=parse(rpl.data(),rpl.size(),Family::RaptorLakeP);
- assert(rp.valid()&&rp.present==0x19&&rp.ambiguous==0x19&&!rp.hdmi(3).hdmi);
+ assert(rp.valid()&&rp.present==0x19&&rp.ambiguous==0x19&&!rp.hdmi(3).hdmi&&!rp.checksum);
  assert(rp.port[0].internal()&&rp.port[0].dp()&&rp.port[0].aux==0x40&&!rp.port[0].fixedTMDS());
  assert(ddi(Family::RaptorLakeP,10)==0&&ddi(Family::RaptorLakeP,13)==3&&ddi(Family::RaptorLakeP,15)==4);
  assert(ddi(Family::RaptorLakeP,8)==PortCount&&ddi(Family::RaptorLakeP,9)==PortCount);
@@ -69,13 +69,24 @@ int main(int argc,char **argv){
  assert(rp.internalPanelA()&&!a.internalPanelA()&&!r.internalPanelA()&&!Ports{}.internalPanelA());
  for(auto first:{Port{0x1806,10,0,0x10},Port{0x68c6,10,0,0x40},Port{0x1c06,10,0,0x40},Port{0x1826,10,0,0x40},
                  Port{0x1807,10,0,0x40},Port{0x1802,10,0,0x40}}){
-  auto b=table({first,{0x68c6,13,0,0x50}});auto q=parse(b.data(),b.size(),Family::RaptorLakeP);
+  auto b=table({first,{0x68c6,13,3,0x60,0xc0,3}});auto q=parse(b.data(),b.size(),Family::RaptorLakeP);
   assert(q.valid()&&(q.present&1)&&!q.internalPanelA());
  }
  auto sharedAux=table({{0x1806,10,0,0x40},{0x68c6,13,0,0x40}});
  assert(!parse(sharedAux.data(),sharedAux.size(),Family::RaptorLakeP).internalPanelA());
  auto panelB=table({{0x1806,7,0,0x40}});
  assert(!parse(panelB.data(),panelB.size(),Family::RaptorLakeP).internalPanelA());
+ // Its firmware's checksum byte is stale (measured); RPL-P keeps the sum as evidence, other families reject.
+ auto stale=rpl;stale[26]+=0x24;
+ auto sp=parse(stale.data(),stale.size(),Family::RaptorLakeP);
+ assert(sp.valid()&&sp.checksum==0x24&&sp.present==0x19&&sp.internalPanelA());
+ assert(parse(stale.data(),stale.size(),Family::AlderLakeN).status==Status::Checksum);
+ assert(parse(stale.data(),stale.size(),Family::TigerLake).status==Status::Checksum);
+ for(size_t len=0;len<stale.size();++len)assert(!parse(stale.data(),len,Family::RaptorLakeP).valid());
+ // Unchecked bytes reach the structural bounds: a bounded sweep with no checksum repair.
+ unsigned rseed=11;for(unsigned n=0;n<4000;++n){auto b=stale;rseed=rseed*1664525+1013904223;
+  b[rseed%b.size()]^=uint8_t(rseed>>24);auto q=parse(b.data(),b.size(),Family::RaptorLakeP);
+  if(q.valid())assert(!(q.present&~0x1FFU) && q.version>=216 && q.version<=256);}
  for(auto p:{Port{0x60d6,1,2},Port{0x78c6,10,1},Port{0x60d2,1,2,0,4},Port{0x60d2,1,2,0,2},Port{0x60d2,1,2,0,0,1}}){
   auto b=table({p});auto q=parse(b.data(),b.size(),Family::TigerLake);assert(q.valid()&&!q.hdmi(3).hdmi);
  }

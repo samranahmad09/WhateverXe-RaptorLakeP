@@ -49,7 +49,7 @@ void XE::xelpReadFirmware(IOPCIDevice *pci) {
     const auto hdmi=firmwarePorts.hdmi(3); // physical Combo A/B on both admitted families
     uint32_t summary[]={1,static_cast<uint32_t>(firmwarePorts.status),source,firmwarePorts.version,
         firmwarePorts.present,firmwarePorts.unmapped,firmwarePorts.ambiguous,hdmi.valid,hdmi.hdmi,
-        hdmi.ddc[0],hdmi.ddc[1],hdmi.ddc[2]};
+        hdmi.ddc[0],hdmi.ddc[1],hdmi.ddc[2],firmwarePorts.checksum};
     pci->setProperty("WhateverXeFirmwarePorts",summary,sizeof(summary));
     pci->setProperty("WhateverXeFirmwarePortRecords",firmwarePorts.port,sizeof(firmwarePorts.port));
 }
