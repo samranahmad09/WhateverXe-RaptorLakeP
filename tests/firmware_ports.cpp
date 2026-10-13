@@ -65,6 +65,17 @@ int main(int argc,char **argv){
  assert(ddi(Family::RaptorLakeP,10)==0&&ddi(Family::RaptorLakeP,13)==3&&ddi(Family::RaptorLakeP,15)==4);
  assert(ddi(Family::RaptorLakeP,8)==PortCount&&ddi(Family::RaptorLakeP,9)==PortCount);
  assert(parse(rpl.data(),rpl.size(),Family::AlderLakeS).status==Status::Platform);
+ // The RPL-P panel policy: exactly one internal eDP child on Combo A, with AUX A to itself.
+ assert(rp.internalPanelA()&&!a.internalPanelA()&&!r.internalPanelA()&&!Ports{}.internalPanelA());
+ for(auto first:{Port{0x1806,10,0,0x10},Port{0x68c6,10,0,0x40},Port{0x1c06,10,0,0x40},Port{0x1826,10,0,0x40},
+                 Port{0x1807,10,0,0x40},Port{0x1802,10,0,0x40}}){
+  auto b=table({first,{0x68c6,13,0,0x50}});auto q=parse(b.data(),b.size(),Family::RaptorLakeP);
+  assert(q.valid()&&(q.present&1)&&!q.internalPanelA());
+ }
+ auto sharedAux=table({{0x1806,10,0,0x40},{0x68c6,13,0,0x40}});
+ assert(!parse(sharedAux.data(),sharedAux.size(),Family::RaptorLakeP).internalPanelA());
+ auto panelB=table({{0x1806,7,0,0x40}});
+ assert(!parse(panelB.data(),panelB.size(),Family::RaptorLakeP).internalPanelA());
  for(auto p:{Port{0x60d6,1,2},Port{0x78c6,10,1},Port{0x60d2,1,2,0,4},Port{0x60d2,1,2,0,2},Port{0x60d2,1,2,0,0,1}}){
   auto b=table({p});auto q=parse(b.data(),b.size(),Family::TigerLake);assert(q.valid()&&!q.hdmi(3).hdmi);
  }

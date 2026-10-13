@@ -290,6 +290,26 @@ int main() {
     assert(AlderLakeN::reinitializeLinear(twoHeads,AlderLakeN::readDisplay(twoHeads,true),true,0).status==AlderLakeN::LinearStatus::NotSingleHDMI && twoHeads.writes.empty());
     auto changedA=firmware();changedA.regs[0x60400]=0x90030100;
     assert(AlderLakeN::reinitializeLinear(changedA,aState,true,0).status==AlderLakeN::LinearStatus::StateChanged && changedA.writes.empty());
+    // RPL-P built-in panel: the firmware's DP SST scanout on DDI A at the measured 144 Hz timing.
+    // The HDMI policy rejects it; the panel policy reinitializes it with the same plane writes.
+    auto panelA=firmware();panelA.regs[0x60400]=0x8a000106;panelA.regs[0x60000]=0x081f077f;panelA.regs[0x6000c]=0x04850437;
+    const auto panelState=AlderLakeN::readDisplay(panelA,true);
+    assert(panelState.activePipes==1 && !panelState.hdmiBPipes);
+    assert(AlderLakeN::linearPlan(panelState,plan,0)==AlderLakeN::LinearStatus::NotSingleHDMI);
+    assert(AlderLakeN::linearPlan(panelState,plan,1,true)==AlderLakeN::LinearStatus::NotSingleHDMI);
+    assert(AlderLakeN::linearPlan(panelState,plan,0,true)==AlderLakeN::LinearStatus::Ready && plan.pipe==0);
+    assert(plan.geometry.width==1920 && plan.geometry.height==1080 && plan.geometry.pitch==7680);
+    auto panelResult=AlderLakeN::reinitializeLinear(panelA,panelState,true,0,true);
+    assert(panelResult.status==AlderLakeN::LinearStatus::Success && panelResult.writes==result.writes);
+    assert(panelA.writes.size()==live.writes.size());
+    for(unsigned i=0;i<live.writes.size();++i)
+        assert(panelA.writes[i].offset==live.writes[i].offset && panelA.writes[i].value==live.writes[i].value);
+    // The panel policy takes only DP SST on A: not HDMI/DVI on A, MST, 10 bpc, another port or a disabled pipe.
+    for(uint32_t trans:{0x88030100U,0x89030100U,0x8b000106U,0x8a100106U,0x92000106U,0x0a000106U}) {
+        auto other=firmware();other.regs[0x60400]=trans;
+        const auto otherState=AlderLakeN::readDisplay(other,true);
+        assert(AlderLakeN::reinitializeLinear(other,otherState,true,0,true).status!=AlderLakeN::LinearStatus::Success && other.writes.empty());
+    }
     // Invalid/changed ownership or layout must cause zero MMIO writes.
     for(auto reg:{0x70080U,0x70280U,0x71280U,0x70188U,0x701acU,0x60000U}) {
         auto bad=firmware();bad.regs[reg]=(reg==0x70188?119:reg==0x70080?0x27:0x80000000);

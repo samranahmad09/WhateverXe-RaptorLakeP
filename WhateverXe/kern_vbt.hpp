@@ -43,6 +43,16 @@ struct Ports {
         }
         return result;
     }
+    // RPL-P laptops scan out the built-in eDP panel from Combo A on AUX A.
+    // Only that exact child qualifies for the panel policy; a MIPI, LVDS or
+    // external route on A, or another child on AUX A, is a different board.
+    bool internalPanelA() const {
+        if(!valid() || !(present&1))return false;
+        const auto &p=port[0];
+        if(!p.internal() || !p.dp() || (p.type&(0x400|0x20|1)) || p.aux!=0x40)return false;
+        for(unsigned d=1;d<PortCount;++d)if((present&(1U<<d)) && port[d].aux==0x40)return false;
+        return true;
+    }
     TGLHDMIWiring hdmi(uint32_t backend) const {
         auto w=TGLHDMIWiring::empty();
         if(!valid())return w; // no guessed wiring; caller retains existing guards

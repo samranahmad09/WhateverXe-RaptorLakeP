@@ -37,7 +37,7 @@ struct Fixture {
         if(page==2 && deadPower)registers[0x45404]=UINT32_MAX;
         return ptes[page];
     }
-    Readout inspect(unsigned ddi=1) {return Display13FBMemory::inspect(*this,controller,sizeof(controller),framebuffer,sizeof(framebuffer),0x10000000,memory,true,0,ddi);}
+    Readout inspect(unsigned ddi=1,bool panel=false) {return Display13FBMemory::inspect(*this,controller,sizeof(controller),framebuffer,sizeof(framebuffer),0x10000000,memory,true,0,ddi,panel);}
 };
 static void testRelocatedPools() {
     for(auto ggc : {0xFEC1U,0x02C1U,0x03C1U,0x04C1U}) {
@@ -281,6 +281,17 @@ int main() {
     Fixture changedA;changedA.registers[0x60400]=0x88030100;changedA.changeRegister=0x60400;
     assert(changedA.inspect(0).status==Status::StateChanged);
     Fixture flip;flip.registers[0x701AC]=4096;assert(flip.inspect().status==Status::DisplayState);
+    // RPL-P built-in panel: DP SST on DDI A is accepted under the panel policy only.
+    Fixture panel;panel.registers[0x60400]=0x8a000106;
+    assert(panel.inspect(0).status==Status::DisplayState && !panel.reads);
+    assert(panel.inspect(0,true).status==Status::Complete && panel.reads==panel.ptes.size());
+    Fixture panelOnB;panelOnB.registers[0x60400]=0x92000106;
+    assert(panelOnB.inspect(0,true).status==Status::DisplayState && panelOnB.inspect(1,true).status==Status::DisplayState && !panelOnB.reads);
+    for(uint32_t trans:{0x88030100U,0x89030100U,0x8b000106U,0x8a100106U}) {
+        Fixture other;other.registers[0x60400]=trans;assert(other.inspect(0,true).status==Status::DisplayState && !other.reads);
+    }
+    Fixture changedPanel;changedPanel.registers[0x60400]=0x8a000106;changedPanel.changeRegister=0x60400;
+    assert(changedPanel.inspect(0,true).status==Status::StateChanged);
     Fixture tail;tail.ptes.back()=0;const auto partial=tail.inspect();
     assert(partial.status==Status::PTE && partial.verifiedPages==12287);
     Fixture scratch;scratch.ptes[17]=scratch.ptes[0];assert(scratch.inspect().status==Status::PTE);

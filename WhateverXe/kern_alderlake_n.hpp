@@ -212,9 +212,10 @@ struct LinearResult {
 // plane on the explicitly selected Combo A/B/C. The default remains B for
 // the original standalone diagnostics. No new PLL/PHY/power-well cold
 // initialization, a new GGTT mapping, full modeset or accelerated scanout.
-inline LinearStatus linearPlan(const DisplayReadout &r, LinearPlan &p,unsigned ddi=1) {
+// The panel policy (RPL-P) instead requires the built-in eDP's DP SST pipe on A.
+inline LinearStatus linearPlan(const DisplayReadout &r, LinearPlan &p,unsigned ddi=1,bool panel=false) {
     p={};
-    if (ddi>=3 || r.status!=ReadoutStatus::Complete || !r.activePipes || (r.activePipes&~7U) ||
+    if (ddi>=3 || (panel && ddi) || r.status!=ReadoutStatus::Complete || !r.activePipes || (r.activePipes&~7U) ||
         (r.activePipes & (r.activePipes-1)) || (r.activePipes&~r.poweredPipes) ||
         (ddi==1 && r.activePipes!=r.hdmiBPipes))
         return LinearStatus::NotSingleHDMI;
@@ -229,7 +230,7 @@ inline LinearStatus linearPlan(const DisplayReadout &r, LinearPlan &p,unsigned d
         !value(r,0x701AC+delta,surfLive) || !value(r,0x60400+delta,trans) ||
         !value(r,0x70008+delta,pipeConf) || !value(r,0x60000+delta,htotal) || !value(r,0x6000C+delta,vtotal))
         return LinearStatus::NotLinearFHD;
-    if(!(trans&(1U<<31)) || ((trans>>27)&15)!=ddi+1 || ((trans>>24)&7)>1)
+    if(!(trans&(1U<<31)) || ((trans>>27)&15)!=ddi+1 || (panel ? ((trans>>24)&7)!=2 : ((trans>>24)&7)>1))
         return LinearStatus::NotSingleHDMI;
     p.geometry=XELPGeometry::linear(p.control,p.stride,p.size,p.position,p.offset);
     if(!p.geometry.valid || (p.surface&4095) || p.surface!=surfLive ||
@@ -251,11 +252,11 @@ inline LinearStatus linearPlan(const DisplayReadout &r, LinearPlan &p,unsigned d
     return LinearStatus::Ready;
 }
 
-template<class IO> LinearResult reinitializeLinear(IO &io, const DisplayReadout &r, bool admitted,unsigned ddi=1) {
+template<class IO> LinearResult reinitializeLinear(IO &io, const DisplayReadout &r, bool admitted,unsigned ddi=1,bool panel=false) {
     LinearResult out;
     if (!admitted) return out;
     LinearPlan p;
-    out.status=linearPlan(r,p,ddi);
+    out.status=linearPlan(r,p,ddi,panel);
     if(out.status!=LinearStatus::Ready)return out;
     out.pipe=p.pipe;
     const auto d=0x1000*p.pipe;

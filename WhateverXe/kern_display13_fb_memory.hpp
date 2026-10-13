@@ -326,12 +326,13 @@ template<class IO> SurfaceReadout inspectSurface(IO &io,const void *controller,s
 template<class IO> Readout inspect(IO &io,const void *controller,size_t controllerBytes,
                                   const void *framebuffer,size_t framebufferBytes,
                                   uint64_t apertureBytes,const XELPMemory::Layout &memory,bool bootScanout=true,uintptr_t expectedOwner=0,
-                                  unsigned expectedDDI=1) {
+                                  unsigned expectedDDI=1,bool panel=false) {
     Readout r;
     if (!associations(controller,controllerBytes,framebuffer,framebufferBytes,expectedOwner)) {
         r.status=Status::Association;return r;
     }
-    if(bootScanout && expectedDDI>=3) {r.status=Status::DisplayState;return r;}
+    // The panel policy (RPL-P) scans out the built-in eDP: DP SST on DDI A only.
+    if(bootScanout && (expectedDDI>=3 || (panel && expectedDDI))) {r.status=Status::DisplayState;return r;}
     r.pool=pool(controller);const auto &p=r.pool;
     if (field<uint8_t>(framebuffer,0x4288)!=0 || !field<uint8_t>(controller,0xDF5) ||
         field<uint8_t>(controller,0xDF5)>3 || !field<uint8_t>(controller,0xDF4) ||
@@ -362,7 +363,7 @@ template<class IO> Readout inspect(IO &io,const void *controller,size_t controll
         r.surface=io.read(0x7019C);r.control=io.read(0x70180);r.stride=io.read(0x70188);r.size=io.read(0x70190);
         const auto geometry=XELPGeometry::linear(r.control,r.stride,r.size,position,offset);
         if (!(dpt&(1U<<30)) || !(trans&(1U<<31)) || ((trans>>27)&15)!=expectedDDI+1 ||
-            ((trans>>24)&7)>1 || ((trans>>20)&7) || (conf&0xC0000000)!=0xC0000000 ||
+            (panel ? ((trans>>24)&7)!=2 : ((trans>>24)&7)>1) || ((trans>>20)&7) || (conf&0xC0000000)!=0xC0000000 ||
             !geometry.valid ||
             position || offset || (r.surface&4095) ||
             r.surface!=io.read(0x701AC) || r.surface<p.base ||

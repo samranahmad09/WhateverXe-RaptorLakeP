@@ -249,6 +249,8 @@ int main() {
     assert(boot.status==AlderLakeN::ReadoutStatus::Complete && boot.poweredPipes==1 && boot.activePipes==1 && !boot.hdmiBPipes);
     AlderLakeN::LinearPlan plan;
     assert(AlderLakeN::linearPlan(boot,plan,0)==AlderLakeN::LinearStatus::NotSingleHDMI);
+    // The panel policy passes this DP SST pipe's transcoder gate; the readout has no plane.
+    assert(AlderLakeN::linearPlan(boot,plan,0,true)==AlderLakeN::LinearStatus::NotLinearFHD);
     panel.reads.clear();
     auto edp=RaptorLakeP::readEDP(panel,boot);
     assert(edp.status==EDPStatus::Complete && edp.dpPipes==1 && edp.ddiAPipes==1 && edp.count==36);

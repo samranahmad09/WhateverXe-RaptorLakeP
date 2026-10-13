@@ -93,5 +93,53 @@ int main() {
     }
     assert(singleOutputWiring(wiring));
     auto invalid=wiring;invalid.ddc[1]=4;assert(bootDDI(invalid,0x90030100)==UINT32_MAX);
+    // RPL-P built-in panel: DDI A keeps the donor's panel record, every other port becomes a native dummy.
+    Platform panelIn,panelOut;const auto panelOriginal=panelIn;
+    assert(applyPanel(panelOut.data(),Bytes,panelIn.data()));
+    assert(!memcmp(panelIn.data(),panelOriginal.words,Bytes));
+    assert(panelRecord(panelOut.config(0)) && panelSelected(panelOut.data(),panelOut.config(0)));
+    for(unsigned d=1;d<Ports;++d) {
+        assert(!memcmp(panelOut.config(d),panelIn.config(d),16) && panelOut.config(d)[4]==1 && !panelOut.config(d)[5]);
+        assert(!panelSelected(panelOut.data(),panelOut.config(d)));
+    }
+    assert(!memcmp(panelOut.data(),panelIn.data(),0x20+24) && !memcmp(panelOut.data()+0xF8,panelIn.data()+0xF8,Bytes-0xF8));
+    assert(!panelSelected(panelOut.data(),panelIn.config(0)) && !panelSelected(nullptr,panelOut.config(0)));
+    const auto panelPorts=boundPanelPorts(panelOut.data());
+    assert(panelPorts.valid() && panelPorts.platform==panelOut.data() && panelPorts.selected==1 && panelPorts.bound(panelOut.config(0),0));
+    assert(!panelPorts.bound(panelOut.config(1),1) && !boundPanelPorts(nullptr).valid());
+    // The HDMI policy never accepts the panel record or the DP SST boot pipe.
+    for(unsigned mask=1;mask<=3;++mask) {
+        const uint32_t prop[] {1,mask,(mask&1)?1U:0U,(mask&2)?2U:0U,0};
+        const auto w=TGLHDMIWiring::fromProperty(prop,sizeof(prop));
+        assert(!selected(panelOut.data(),panelOut.config(0),w) && bootDDI(w,0x8a000106)==UINT32_MAX);
+    }
+    assert(excludedPanelTypeC(panelOut.data(),Bytes)==0x3F000000);
+    assert(!excludedPanelTypeC(panelOut.data(),Bytes-1) && !excludedPanelTypeC(nullptr,Bytes) && !excludedPanelTypeC(panelIn.data(),Bytes));
+    auto activePort=panelOut;activePort.config(1)[4]=0x400;assert(!excludedPanelTypeC(activePort.data(),Bytes));
+    activePort=panelOut;activePort.config(8)[5]=0x201;assert(!excludedPanelTypeC(activePort.data(),Bytes));
+    activePort=panelOut;activePort.config(0)[5]=0x202;
+    assert(!excludedPanelTypeC(activePort.data(),Bytes) && !panelSelected(activePort.data(),activePort.config(0)));
+    // Preflight before any write: identities, count, the panel at A and Combo B's DP record.
+    const auto panelSentinel=panelOut;
+    auto broken=panelIn;broken.config(8)[0]=7;
+    assert(!applyPanel(panelOut.data(),Bytes,broken.data()) && !memcmp(panelOut.data(),panelSentinel.words,Bytes));
+    broken=panelIn;broken.data()[0x12]=8;assert(!applyPanel(panelOut.data(),Bytes,broken.data()));
+    broken=panelIn;broken.config(0)[4]=0x800;assert(!applyPanel(panelOut.data(),Bytes,broken.data()));
+    broken=panelIn;broken.config(1)[4]=0x800;assert(!applyPanel(panelOut.data(),Bytes,broken.data()));
+    assert(!applyPanel(panelIn.data(),Bytes,panelIn.data()) && !applyPanel(panelOut.data(),Bytes-1,panelIn.data()));
+    assert(!applyPanel(panelOut.data(),Bytes,nullptr) && !applyPanel(nullptr,Bytes,panelIn.data()));
+    assert(!memcmp(panelOut.data(),panelSentinel.words,Bytes));
+    // The boot pipe: enabled, DDI A, DP SST. The measured GOP value is 0x8a000106.
+    for(unsigned enable=0;enable<2;++enable)for(unsigned selector=0;selector<16;++selector)
+        for(unsigned mode=0;mode<8;++mode) {
+            const auto trans=(enable<<31)|(selector<<27)|(mode<<24)|0x106;
+            assert(bootPanelDDI(trans)==(enable && selector==1 && mode==2 ? 0U : UINT32_MAX));
+        }
+    assert(bootPanelDDI(UINT32_MAX)==UINT32_MAX && bootPanelDDI(0x8a000106)==0);
+    assert(bootstrapPanelDDI(true,7,1,0x8a000106)==0 && bootstrapPanelDDI(true,1,1,0x8a000106)==0);
+    assert(bootstrapPanelDDI(true,7,3,0x8a000106)==UINT32_MAX); // No silent second-GOP takeover.
+    assert(bootstrapPanelDDI(true,6,1,0x8a000106)==UINT32_MAX && bootstrapPanelDDI(false,7,1,0x8a000106)==UINT32_MAX);
+    assert(bootstrapPanelDDI(true,7,2,0x8a000106)==UINT32_MAX && bootstrapPanelDDI(true,7,1,0x88030100)==UINT32_MAX);
     puts("PASS AlderLakeN connector policy: stable identities/counts/pool, A/DDC1, B/DDC2 and A+B; measured single-GOP bootstrap, excluded connectors, malformed wiring and foreign config rejection. CPU only.");
+    puts("PASS RaptorLakeP panel policy: built-in record kept at A, dummies elsewhere, DP SST boot pipe on A only, preflight before any write. CPU only.");
 }
