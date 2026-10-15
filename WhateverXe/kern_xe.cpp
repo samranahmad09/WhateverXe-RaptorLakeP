@@ -1145,15 +1145,30 @@ static void tglPrepareMMIOUC(KernelPatcher &patcher,IOPCIDevice *pci) {
  const uint8_t update[] {0x8B,0x75,0x9C,0x89,0xF0,0x83,0xE0,1,0x48,0x09,0xD0,0x40,0xF6,0xC6,2};
  uint32_t lo,hi;asm volatile("rdmsr" : "=a"(lo),"=d"(hi) : "c"(0x277));
  const uint64_t pat=static_cast<uint64_t>(hi)<<32|lo;
- bool ok=native20G && tglVM.pciBAR==0x4010000000ULL && bar && bar->getLength()==0x1000000 &&
-  pat==0x1040600070406ULL && fn && protect && kernelMap &&
-  !memcmp(reinterpret_cast<void *>(protect),protectFrame,sizeof(protectFrame)) &&
-  !memcmp(reinterpret_cast<void *>(protect+0xD2),protectCall,sizeof(protectCall)) &&
-  tglVMRead(kernelMap,tglKernelMap) && (tglKernelMap>>47)==0x1FFFF &&
-  !memcmp(reinterpret_cast<void *>(fn+0x48),frame,sizeof(frame)) &&
-  !memcmp(reinterpret_cast<void *>(fn+0x157),nonEPT,sizeof(nonEPT)) &&
-  !memcmp(reinterpret_cast<void *>(fn+0x15FA),create,sizeof(create)) &&
-  !memcmp(reinterpret_cast<void *>(fn+0x1850),update,sizeof(update));
+ // The MMIO BAR is wherever this firmware placed it (the reference machine's was 0x4010000000;
+ // a Raptor Lake-P laptop measured 0x622e000000). Require the config-space BAR0 that tglVMPrepare
+ // read to be the 16 MiB-aligned region IOKit also reports, not a fixed address.
+ IOByteCount barLength=0;
+ const uint64_t barPhysical=bar ? bar->getPhysicalSegment(0,&barLength) : 0;
+ // Each preflight condition is published as one mask bit, so a refused boot names the condition.
+ const bool checks[] {
+  native20G,
+  tglVM.enabled && tglVM.pciBAR && !(tglVM.pciBAR&0xFFFFFF) && barPhysical==tglVM.pciBAR,
+  bar && bar->getLength()==0x1000000 && barLength>=0x1000000,
+  pat==0x1040600070406ULL,
+  fn && protect && kernelMap,
+  protect && !memcmp(reinterpret_cast<void *>(protect),protectFrame,sizeof(protectFrame)) &&
+   !memcmp(reinterpret_cast<void *>(protect+0xD2),protectCall,sizeof(protectCall)),
+  kernelMap && tglVMRead(kernelMap,tglKernelMap) && (tglKernelMap>>47)==0x1FFFF,
+  fn && !memcmp(reinterpret_cast<void *>(fn+0x48),frame,sizeof(frame)) &&
+   !memcmp(reinterpret_cast<void *>(fn+0x157),nonEPT,sizeof(nonEPT)),
+  fn && !memcmp(reinterpret_cast<void *>(fn+0x15FA),create,sizeof(create)) &&
+   !memcmp(reinterpret_cast<void *>(fn+0x1850),update,sizeof(update)),
+ };
+ uint64_t mask=0;bool ok=true;
+ for (unsigned i=0;i<arrsize(checks);++i) {mask|=static_cast<uint64_t>(checks[i])<<i;ok=ok && checks[i];}
+ IORegistryEntry::getRegistryRoot()->setProperty("TGLMMIOStrongUCPreflightMask",mask,64);
+ IORegistryEntry::getRegistryRoot()->setProperty("TGLMMIOBAR",tglVM.pciBAR,64);
  if (ok) {
   tglProtectCacheMode=reinterpret_cast<decltype(tglProtectCacheMode)>(protect);
   tglPmapEntryResume=fn+0x58; tglPmapNewResume=fn+0x1609; tglPmapUpdateResume=fn+0x185F;
