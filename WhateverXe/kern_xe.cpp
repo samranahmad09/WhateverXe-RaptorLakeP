@@ -7054,7 +7054,8 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	}
 	c.pipe[pipe].wmLatch=result;c.pipe[pipe].wmCommitting=false;
 	// Timing/Inactive: a mode change in flight; the update stays pending and nothing retires.
-	const bool inFlight=result.status==Display13WM::Status::Timing || result.status==Display13WM::Status::Inactive;
+	const bool inFlight=result.status==Display13WM::Status::Timing || result.status==Display13WM::Status::Inactive ||
+		result.status==Display13WM::Status::Stalled;
 	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && !inFlight)adlnFault(c.watermarkFaulted,__LINE__);
 	record[0]=1;record[1]=static_cast<uint32_t>(result.status);record[2]=pending;record[3]=c.pipe[pipe].wmPending;
 	record[4]=result.frameBefore;record[5]=result.frameAfter;record[6]=result.waitUs;record[7]=result.budgetUs;
@@ -7065,14 +7066,33 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 		// The pipe's timing, clock source and link ratio at this arm, kept from the first
 		// result of each kind: the next capture shows whether the native path then programmed
 		// the target mode (line time 0x45270 follows the pixel clock of the live timing).
-		uint64_t timing[20] {1,static_cast<uint32_t>(result.status)|(pipe<<8),result.expected,result.observed};Display13FBDBUFIO readout {c.map};
+		uint64_t timing[48] {1,static_cast<uint32_t>(result.status)|(pipe<<8),result.expected,result.observed};Display13FBDBUFIO readout {c.map};
+		const uint32_t bank=0x1000*pipe;const bool powered=Display13FBIRQ::powered(readout.read(0x45404),pipe);
 		const uint32_t regs[] {0x60000,0x6000C,0x6001C,0x70008,0x60400,0x60030,0x60034,0x60040,0x60044,0x70040,0x70180,0x70188};
-		for(unsigned i=0;i<arrsize(regs);++i)timing[4+i]=readout.read(regs[i]+0x1000*pipe);
+		if(powered)for(unsigned i=0;i<arrsize(regs);++i)timing[4+i]=readout.read(regs[i]+bank);
 		timing[16]=readout.read(0x46010);timing[17]=readout.read(0x46014);timing[18]=readout.read(0x164280);timing[19]=c.sequence;
 		timing[15]|=uint64_t(result.lastReg)<<32; // PLANE_STRIDE in the low word, the refused register above it.
+		// The pipe's clock path and link state at this arm: transcoder clock select, DPLL0/1
+		// dividers, DDI A buffer, transcoder DP_TP control/status, two scanline reads 2 ms apart
+		// with the frame counter, PSR1/2, the panel power sequencer, pipe misc, VRR, the
+		// reference strap, DSB 0 control/head/tail, DDI B, power wells, CDCLK and the uptime.
+		timing[20]=readout.read(0x46140+4*pipe);
+		timing[21]=readout.read(0x164284);timing[22]=readout.read(0x164288);timing[23]=readout.read(0x16428C);timing[24]=readout.read(0x164290);
+		timing[25]=readout.read(0x64000);timing[43]=readout.read(0x64100);timing[44]=readout.read(0x45404);
+		timing[35]=readout.read(0xC7204);timing[36]=readout.read(0xC7200);timing[39]=readout.read(0x51004);
+		timing[45]=readout.read(0x46070);timing[46]=readout.read(0x46000);
+		if(powered) {
+			timing[26]=readout.read(0x60540+bank);timing[27]=readout.read(0x60544+bank);
+			timing[28]=readout.read(0x70000+bank);IOSleep(2);timing[29]=readout.read(0x70000+bank);timing[30]=readout.read(0x70040+bank);
+			timing[31]=readout.read(0x60800+bank);timing[32]=readout.read(0x60840+bank);timing[33]=readout.read(0x60900+bank);timing[34]=readout.read(0x60940+bank);
+			timing[37]=readout.read(0x70030+bank);timing[38]=readout.read(0x60420+bank);
+			timing[40]=readout.read(0x70B08+bank);timing[41]=readout.read(0x70B0C+bank);timing[42]=readout.read(0x70B10+bank);
+		}
+		{uint64_t ticks=0,ns=0;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);timing[47]=ns/1000;}
 		auto root=IORegistryEntry::getRegistryRoot();root->setProperty("N97FBWMLatchTiming",timing,sizeof(timing));
 		const char *first=result.status==Display13WM::Status::Timing ? "N97FBWMLatchTimingFirst" :
-			result.status==Display13WM::Status::Inactive ? "N97FBWMLatchInactiveFirst" : "N97FBWMLatchConflictFirst";
+			result.status==Display13WM::Status::Inactive ? "N97FBWMLatchInactiveFirst" :
+			result.status==Display13WM::Status::Stalled ? "N97FBWMLatchStalledFirst" : "N97FBWMLatchConflictFirst";
 		if(!root->getProperty(first))root->setProperty(first,timing,sizeof(timing));
 	}
 	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && !inFlight) {

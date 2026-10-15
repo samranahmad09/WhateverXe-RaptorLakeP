@@ -24,7 +24,8 @@ enum class Status : uint32_t {Unavailable,Complete,Input,WM0,SAGV,MailboxBusy,Ma
     Inactive, // The pipe or its primary plane is off: a mode change in flight, verified again once they run.
     Intent,   // Wrapper side: the arm carried no valid trigger intent (never a latch() result).
     Queue,    // Wrapper side: the native path still counts queued packets; observed = that count.
-    Binding}; // Wrapper side: path binding, scaler or framebuffer state refused; observed = condition bits.
+    Binding,  // Wrapper side: path binding, scaler or framebuffer state refused; observed = condition bits.
+    Stalled}; // No new frame and a scanline that never moved for the whole budget: the pipe is not running (in flight).
 // CPU certificates are prerequisites only. The caller still owns each active
 // FB mutex and validates hardware at current/target Hz before a shared crawl.
 template<class Pipe,unsigned N> bool clockConsumersReady(const Pipe (&pipes)[N],uint32_t active,uint64_t hz) {
@@ -343,6 +344,12 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
     r.budgetUs=static_cast<uint32_t>(3*period+1000);
     r.frameBefore=io.read(0x70040+bank);
     if(r.frameBefore==UINT32_MAX) {r.status=Status::Readback;return r;}
+    // New-frame evidence: the frame counter, or a wrap of the scanline (PIPEDSL bits 19:0),
+    // which still counts frames when the counter stands still. A scanline that never moves
+    // over the whole budget is a pipe that is not running: Stalled, in flight like Timing.
+    const bool scan=io.readable(0x70000+bank);
+    const uint32_t scanFirst=scan ? io.read(0x70000+bank)&0xFFFFF : 0;
+    uint32_t scanPrev=scanFirst;bool scanMoved=false,scanWrapped=false;
     const auto start=io.nowUs();
     for(;;) {
         const auto power=io.read(0x45404);
@@ -387,8 +394,14 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
         r.frameAfter=io.read(0x70040+bank);
         r.waitUs=static_cast<uint32_t>(io.nowUs()-start);
         if(r.frameAfter==UINT32_MAX) {r.status=Status::Readback;return r;}
-        if(r.frameAfter!=r.frameBefore) {
-            if(uint32_t(r.frameAfter-r.frameBefore)>=0x80000000U) {r.status=Status::Conflict;return r;}
+        if(scan) {
+            const auto line=io.read(0x70000+bank)&0xFFFFF;
+            if(line!=scanPrev)scanMoved=true;
+            if(line<scanPrev)scanWrapped=true;
+            scanPrev=line;
+        }
+        if(r.frameAfter!=r.frameBefore || scanWrapped) {
+            if(uint32_t(r.frameAfter-r.frameBefore)>=0x80000000U)return refuse(Status::Conflict,0x70040+bank,r.frameBefore,r.frameAfter);
             // The frame counter can advance at VBlank before the live-surface
             // readback catches up (observed for a native direct cursor swap).
             // Keep every programmed/control/clock check on each poll; qualify
@@ -399,7 +412,10 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
             if(live) {r.status=Status::Complete;return r;}
             if(r.waitUs>=r.budgetUs)return r;
         }
-        if(r.waitUs>=r.budgetUs) {r.status=Status::CommitTimeout;return r;}
+        if(r.waitUs>=r.budgetUs) {
+            if(scan && !scanMoved && r.frameAfter==r.frameBefore)return refuse(Status::Stalled,0x70000+bank,scanFirst,scanPrev);
+            return refuse(Status::CommitTimeout,0x70040+bank,r.frameBefore,r.frameAfter);
+        }
         io.delayUs(1000);
     }
 }

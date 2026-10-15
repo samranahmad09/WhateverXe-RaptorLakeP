@@ -37,7 +37,7 @@ struct DisplayIO {
 };
 struct LatchIO : DisplayIO {
     uint64_t elapsed {},clock {614400000};
-    bool frozen {},losePower {},oldSurface {},changeClock {},resetFrame {},advanceForeign {};
+    bool frozen {},losePower {},oldSurface {},changeClock {},resetFrame {},advanceForeign {},scanning {},scanWrap {};
     uint32_t frameAdvance {1},surface {0x100000},cursorSurface {0x200000};
     unsigned pipeIndex {};
     void moveToPipe(unsigned index) {
@@ -52,7 +52,7 @@ struct LatchIO : DisplayIO {
     LatchIO(const Plan &p,const Plan *c=nullptr,bool only=false) : DisplayIO(false) {
         regs[0x70008]=0xC0000000;regs[0x70180]=0x84000000;regs[0x70080]=c ? 7 : 0;
         regs[0x70190]=0x0437077F;regs[0x60000]=(2199U<<16)|1919;
-        regs[0x6000C]=(1124U<<16)|1079;regs[0x70040]=100;
+        regs[0x6000C]=(1124U<<16)|1079;regs[0x70040]=100;regs[0x70000]=0;
         regs[0x45270]=pipeLineTime(p.htotal,p.pixelHz);
         for(unsigned i=1;i<5;++i)regs[0x70180+0x100*i]=0;
         regs[0x7027C]=0x07D70000;regs[0x7017C]=c ? 0x07FF07DC : 0;
@@ -75,6 +75,7 @@ struct LatchIO : DisplayIO {
     uint64_t nowUs() {return elapsed;}
     void delayUs(unsigned us) {
         const auto before=elapsed;elapsed+=us;
+        if(scanning) {auto &line=regs[0x70000+pipeIndex*0x1000];line=(line+(scanWrap ? 400 : 1))%1158;}
         if(advanceForeign && pipeIndex)++regs[0x70040];
         if(before<2000 && elapsed>=2000) {
             const auto bank=pipeIndex*0x1000;
@@ -221,7 +222,8 @@ int main() {
     // The published numbering of the latch results is part of the capture format.
     static_assert(static_cast<uint32_t>(Status::Conflict)==11 && static_cast<uint32_t>(Status::Timing)==12 &&
                   static_cast<uint32_t>(Status::Inactive)==13 && static_cast<uint32_t>(Status::Intent)==14 &&
-                  static_cast<uint32_t>(Status::Queue)==15 && static_cast<uint32_t>(Status::Binding)==16,"latch status numbering");
+                  static_cast<uint32_t>(Status::Queue)==15 && static_cast<uint32_t>(Status::Binding)==16 &&
+                  static_cast<uint32_t>(Status::Stalled)==17,"latch status numbering");
     // A pipe or primary plane switched off mid-modeset is Inactive (a refusal without a wait), naming the register;
     // a foreign plane or a cursor mismatch is still Conflict, also naming its register.
     {LatchIO off(yp);off.regs[0x70180]=0x94001008;off.regs[0x70008]=0x40000000;const auto r=latch(off,off.snapshot(yp));
@@ -318,9 +320,18 @@ int main() {
     assert(!clockFits(clockPlan,384000000));
     LatchIO afterCrawl(p);afterCrawl.clock=1305600000;
     assert(latch(afterCrawl,afterCrawl.snapshot(p)).status==Status::Complete && afterCrawl.writes.empty());
+    // No new frame for the whole budget: a scanline that never moved is a pipe that is not running
+    // (Stalled, in flight, naming PIPEDSL); a moving scanline without a frame is CommitTimeout; a
+    // scanline wrap is a new frame even while the frame counter stands still.
     LatchIO sameFrame(p);sameFrame.frozen=true;
-    const auto timeoutProof=latch(sameFrame,sameFrame.snapshot(p));
-    assert(timeoutProof.status==Status::CommitTimeout && timeoutProof.waitUs==52000);
+    const auto stalledProof=latch(sameFrame,sameFrame.snapshot(p));
+    assert(stalledProof.status==Status::Stalled && stalledProof.waitUs==52000 && stalledProof.lastReg==0x70000);
+    LatchIO scanning(p);scanning.frozen=true;scanning.scanning=true;
+    const auto timeoutProof=latch(scanning,scanning.snapshot(p));
+    assert(timeoutProof.status==Status::CommitTimeout && timeoutProof.waitUs==52000 && timeoutProof.lastReg==0x70040);
+    LatchIO wrapping(p);wrapping.frozen=true;wrapping.scanning=true;wrapping.scanWrap=true;
+    const auto wrapProof=latch(wrapping,wrapping.snapshot(p));
+    assert(wrapProof.status==Status::Complete && wrapProof.frameAfter==wrapProof.frameBefore && wrapProof.waitUs==3000);
     LatchIO staleSurface(p);staleSurface.oldSurface=true;
     assert(latch(staleSurface,staleSurface.snapshot(p)).status==Status::Readback);
     LatchIO poweredOff(p);poweredOff.losePower=true;
@@ -365,7 +376,7 @@ int main() {
         DisplayIO missingProgram(false,pipe);missingProgram.regs[0x45404]=3;
         assert(program(missingProgram,p,false,false,pipe).status==Status::Power && missingProgram.writes.empty());
         LatchIO late(p);late.moveToPipe(pipe);late.frozen=true;late.advanceForeign=true;late.regs[0x70040]=200;
-        assert(latch(late,late.snapshot(p)).status==Status::CommitTimeout);
+        assert(latch(late,late.snapshot(p)).status==Status::Stalled);
         if(pipe)assert(late.regs[0x70040]>200 && late.regs[0x70040+pipe*0x1000]==100);
         LatchIO wrongWM(p);wrongWM.moveToPipe(pipe);wrongWM.regs[0x70258+pipe*0x1000]^=1;
         assert(latch(wrongWM,wrongWM.snapshot(p)).status==Status::Readback);

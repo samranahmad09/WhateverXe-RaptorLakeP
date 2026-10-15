@@ -266,3 +266,29 @@ own refusals are distinct results (`Intent`, `Queue`, `Binding`) instead of an a
 refused DBUF retire names the DDB register and the retire status. The pipe/DPLL snapshot is kept for every
 refusal kind (`N97FBWMLatchTimingFirst`, `N97FBWMLatchInactiveFirst`, `N97FBWMLatchConflictFirst`; word 1
 = status | pipe << 8, word 15 = `PLANE_STRIDE` | refused register << 32). Pending hardware validation.
+
+### Native boot: Inactive tolerated; the pipe produces no frames (2026-10-16)
+
+With the previous change three arms happened inside one frame (6317): Timing (line time 48 against 116),
+then Inactive with `PLANE_CTL_1_A` read as 0 (the native driver disabled the primary plane right after
+the Timing arm; no fault this time), then at sequence 178 an arm where every compare passed, the last one
+`PLANE_WM_SAGV_TRANS_1_A` (0x7025C), but the frame counter (`PIPE_FRMCOUNT_A`, 0x70040) stood at 6317 for
+the whole 52 ms budget: CommitTimeout, which was still a fault, and the mode change aborted behind it.
+
+The frame counter was already standing at the first arm of this boot and of the previous one, while
+`TRANSCONF_A` read enabled and active (`0xC0000000`), both DPLLs read enabled and locked (`0xCC000000`)
+and the firmware's link M/N (0xA4D73 / 0x80000, the 144 Hz values) were still programmed. The firmware
+ran DDI A from DPLL1 (`DPCLKA_CFGCR0` select 01, DPLL0 off); at every arm DDI A is on DPLL0 (select 00)
+with DPLL0 enabled, so the native driver re-sourced the panel's clock before the first arm. The transcoder
+clock select, the DPLL dividers, the DDI buffer and the link-training state were in no record.
+
+Change: `Display13WM::Status::Stalled` for a latch whose compares passed but that saw no new frame and a
+scanline (`PIPEDSL`, 0x70000) that never moved over the whole budget: the pipe is not running, which is
+in flight like Timing (nothing retires, the update stays pending, no fault). A scanline wrap now counts as
+a new frame even when the frame counter stands still; a moving scanline without a frame stays
+CommitTimeout, a fault. The arm snapshot grew to 48 words: transcoder clock select (0x46140), DPLL0/1
+CFGCR0/1, DDI_BUF_CTL A/B, transcoder DP_TP control/status (0x60540/0x60544), two PIPEDSL reads 2 ms apart
+with the frame counter, PSR1/PSR2 control/status, PP_CONTROL/PP_STATUS, PIPE_MISC, TRANS_VRR_CTL, DSSM, DSB 0
+control/head/tail, power wells, CDCLK_PLL_ENABLE, CDCLK_CTL and the uptime, with the pipe-bank reads taken
+only while the pipe's power well is on. A Stalled result keeps `N97FBWMLatchStalledFirst`. Pending
+hardware validation.
