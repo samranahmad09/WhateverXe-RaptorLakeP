@@ -162,6 +162,8 @@ int main() {
     assert(overridden.valid && overridden.cursor==0x6040000 && overridden.changed==2);
     // Captured native RGB8888/Y-tiled control, not the GOP linear control.
     assert(supportedRGBControl(0x94001008) && supportedRGBControl(0x94000008));
+    // X-tiled RGB8888: the internal-panel modeset on Raptor Lake-P. Yf (5) stays refused below.
+    assert(supportedRGBControl(0x94000408) && supportedRGBControl(0x92000400));
     // Actual dual hot-add switches pipe A to 32bpp RGB2101010, while B
     // stays RGB8888. Neither permits YUV, FP16, CCS or rotation.
     assert(supportedRGBControl(0x92001000) && supportedRGBControl(0x82000000));
@@ -222,6 +224,7 @@ int main() {
     assert(latch(wrongCursorSize,wrongCursorSize.snapshot(yp,&c256,true)).status==Status::Conflict);
     auto p=plan(1920,2200,148500000,2008,latency,true,false,1080);
     assert(p.status==Status::Complete);
+    LatchIO xLatch(p);xLatch.regs[0x70180]=0x94000408;assert(latch(xLatch,xLatch.snapshot(p)).status==Status::Complete);
     const unsigned blocks[] {16,65,97,113,161,161},lines[] {1,4,6,7,10,10};
     for(unsigned i=0;i<6;++i) {
         assert(p.normal[i].enable && p.normal[i].blocks==blocks[i] && p.normal[i].lines==lines[i]);

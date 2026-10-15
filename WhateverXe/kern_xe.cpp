@@ -6894,12 +6894,12 @@ static bool adlnObserveScanoutPixels(unsigned pipe,uint64_t (&q)[88]) {
     q[8]=surface;q[9]=live;q[10]=frame;
     q[12]=tglVM.enabled && tglVM.nofault && tglVM.directBase && tglVM.directEnd>tglVM.directBase;
     const auto width=(q[6]&8191)+1,height=((q[6]>>16)&8191)+1;
-    const bool tiled=((control>>10)&7)==4;
+    const uint32_t tiling=(control>>10)&7;
     const uint32_t xs[] {256,960,1664},ys[] {256,512,800};
     for(unsigned j=0;j<9;++j) {
         auto r=q+16+j*8;const auto x=xs[j%3],y=ys[j/3];r[0]=x|(uint64_t(y)<<32);
         uint64_t off=0;
-        if(!q[12] || (q[5]&~4095ULL) || !Display13FBMemory::scanoutSampleOffset(tiled,q[5],width,height,q[7],x,y,off) ||
+        if(!q[12] || (q[5]&~4095ULL) || !Display13FBMemory::scanoutSampleOffset(tiling,q[5],width,height,q[7],x,y,off) ||
            off>=0x100000000ULL-surface || 16>0x100000000ULL-surface-off)continue;
         r[1]=surface+off;
         const auto reg=0x800000+((r[1]&~4095ULL)>>9);

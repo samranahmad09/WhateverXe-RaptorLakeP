@@ -137,7 +137,12 @@ inline bool supportedRGBControl(uint32_t ctl) {
     const auto tile=(ctl>>10)&7,format=(ctl>>23)&31;
     // ICL+ RGB2101010 (4) and RGB8888 (8) both use four bytes per pixel.
     // Native dual-display reconfiguration may select the 30-bit format.
-    return ctl!=UINT32_MAX && (format==4 || format==8) && (tile==0 || tile==4) &&
+    // Linear (0), X-tiled (1) and Y-tiled (4). The internal-panel modeset on
+    // Raptor Lake-P programs an X-tiled primary; on Display 10+ its watermark
+    // method is the linear one (Linux skl_watermark.c: the blocks-per-line
+    // +1 applies to X-tiled as to linear there, and the X-tiled bandwidth
+    // workaround is Gen9 only), so only the control check needed it.
+    return ctl!=UINT32_MAX && (format==4 || format==8) && (tile==0 || tile==1 || tile==4) &&
         !(ctl&((1U<<15)|(1U<<4)|3U)); // No CCS/media compression or rotation.
 }
 // Wa_22012358565: ADL-P Display13 needs one programmable slot for a

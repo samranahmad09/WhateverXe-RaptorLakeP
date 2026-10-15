@@ -36,17 +36,23 @@ struct Fixture {
 };
 int main() {
     uint64_t sample=UINT64_MAX;
-    assert(scanoutSampleOffset(true,60,1920,1080,0,256,256,sample) && sample==(8*60+8)*4096ULL);
-    assert(scanoutSampleOffset(true,60,1920,1080,0,960,512,sample) && sample==(16*60+30)*4096ULL);
-    assert(scanoutSampleOffset(false,120,1920,1080,0,960,512,sample) && sample==512*7680+960*4);
-    assert(scanoutSampleOffset(true,61,1920,1080,32,0,0,sample) && sample==4096);
-    assert(!scanoutSampleOffset(true,60,1920,1080,0,257,256,sample));
-    assert(!scanoutSampleOffset(true,60,1920,1080,0,256,257,sample));
-    assert(!scanoutSampleOffset(true,60,1920,1080,0,1920,256,sample));
-    assert(!scanoutSampleOffset(true,60,1920,1080,0,1918,256,sample));
-    assert(!scanoutSampleOffset(false,60,1920,1080,0,960,512,sample));
-    assert(!scanoutSampleOffset(true,60,1920,1080,1,256,256,sample));
-    assert(!scanoutSampleOffset(true,0,1920,1080,0,0,0,sample));
+    assert(scanoutSampleOffset(4,60,1920,1080,0,256,256,sample) && sample==(8*60+8)*4096ULL);
+    assert(scanoutSampleOffset(4,60,1920,1080,0,960,512,sample) && sample==(16*60+30)*4096ULL);
+    assert(scanoutSampleOffset(0,120,1920,1080,0,960,512,sample) && sample==512*7680+960*4);
+    assert(scanoutSampleOffset(4,61,1920,1080,32,0,0,sample) && sample==4096);
+    assert(!scanoutSampleOffset(4,60,1920,1080,0,257,256,sample));
+    assert(!scanoutSampleOffset(4,60,1920,1080,0,256,257,sample));
+    assert(!scanoutSampleOffset(4,60,1920,1080,0,1920,256,sample));
+    assert(!scanoutSampleOffset(4,60,1920,1080,0,1918,256,sample));
+    assert(!scanoutSampleOffset(0,60,1920,1080,0,960,512,sample));
+    assert(!scanoutSampleOffset(4,60,1920,1080,1,256,256,sample));
+    assert(!scanoutSampleOffset(4,0,1920,1080,0,0,0,sample));
+    // X-tiled: 512-byte x 8-line tiles, row-major, stride in tiles (1920 x 4 bytes = 15 tiles).
+    assert(scanoutSampleOffset(1,15,1920,1080,0,960,512,sample) && sample==(64*15+7)*4096ULL+256);
+    assert(scanoutSampleOffset(1,15,1920,1080,0,256,256,sample) && sample==(32*15+2)*4096ULL);
+    assert(scanoutSampleOffset(1,15,1920,1080,0,4,3,sample) && sample==3*512+16);
+    assert(!scanoutSampleOffset(1,15,1920,1080,0,257,256,sample) && !scanoutSampleOffset(1,14,1920,1080,0,1916,0,sample));
+    assert(!scanoutSampleOffset(5,15,1920,1080,0,256,256,sample) && !scanoutSampleOffset(2,120,1920,1080,0,0,0,sample));
 
     Fixture f;auto r=f.inspect();assert(r.status==SurfaceStatus::Complete && r.verifiedPages==22500);
     assert(r.gpu==f.gpu && r.bytes==f.bytes && r.pitch==25600);

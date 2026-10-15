@@ -207,3 +207,19 @@ ratio 34 / divider 2) under the live pipe is a decline there too. With that wrap
 inputs record confirms the watermark failure was downstream of the latch (`clockFaulted` was its only
 false precondition). The wrapper now also keeps its first non-Complete result, because later calls were
 overwriting the only record of what happened.
+
+### Native boot: the internal-panel modeset programs an X-tiled primary plane (2026-10-16)
+
+With the clock declines no longer faulting, the first refusal moved to the plane: the native driver
+programs the panel's primary with `PLANE_CTL 0x94000408` (RGB8888, tiling field 1 = X-tiled; the
+firmware's plane was `0x94000008`, linear). The plugin's RGB control check accepted linear and Y-tiled only,
+so the watermark plan stayed unavailable and the DBUF allocation write was refused as unassociated, and the
+PCODE mailbox was refused behind those flags. The HDMI reference path never produced an X-tiled primary.
+
+Linux v6.12 `skl_watermark.c`: on Display 10 and later the X-tiled blocks-per-line takes the same +1 as
+linear (the no-+1 case is Gen9), and the only other X-tiled special case is a Gen9 bandwidth workaround.
+On Display 13 the X-tiled watermark method is therefore the linear one the module already implements;
+only the control check needed to accept tiling 1. The trace-only scanout sampler now takes the tiling mode
+and addresses X tiles (512 bytes x 8 lines, stride in tiles). Yf and compressed layouts stay refused.
+
+Pending hardware validation.

@@ -11,19 +11,26 @@
 #include <string.h>
 
 namespace Display13FBMemory {
-// Four RGB pixels at a Y-tile origin (32 pixels x 32 lines), or a
-// 16-byte aligned linear position. Sample origins avoid guessing the tile's
-// internal swizzle. Stride units are tiles for Y and 64 bytes for linear.
-inline bool scanoutSampleOffset(bool yTiled,uint32_t stride,uint32_t width,uint32_t height,
+// Four RGB pixels at a Y-tile origin (32 pixels x 32 lines), a 16-byte
+// aligned position inside an X tile (512 bytes x 8 lines, row-major), or a
+// 16-byte aligned linear position. Sample origins avoid guessing a Y tile's
+// internal swizzle. `tiling` is PLANE_CTL[12:10]: 0 linear, 1 X, 4 Y. Stride
+// units are tiles for X and Y (512 and 128 bytes wide) and 64 bytes for linear.
+inline bool scanoutSampleOffset(uint32_t tiling,uint32_t stride,uint32_t width,uint32_t height,
                                uint32_t origin,uint32_t x,uint32_t y,uint64_t &offset) {
     if(!stride || stride>4095 || !width || !height || width>8192 || height>8192 ||
        x>=width || width-x<4 || y>=height)return false;
+    if(tiling!=0 && tiling!=1 && tiling!=4)return false;
     const uint64_t sx=uint64_t(origin&65535)+x,sy=uint64_t(origin>>16)+y;
-    const uint64_t pitch=uint64_t(stride)*(yTiled ? 128 : 64);
+    const uint64_t pitch=uint64_t(stride)*(tiling==4 ? 128 : tiling==1 ? 512 : 64);
     if((sx+4)*4>pitch)return false;
-    if(yTiled) {
+    if(tiling==4) {
         if((sx&31) || (sy&31))return false;
         offset=((sy/32)*stride+sx/32)*4096;
+    } else if(tiling==1) {
+        if(sx&3)return false;
+        const uint64_t bx=sx*4;
+        offset=((sy/8)*stride+bx/512)*4096+(sy%8)*512+bx%512;
     } else {
         if(sx&3)return false;
         offset=sy*pitch+sx*4;
