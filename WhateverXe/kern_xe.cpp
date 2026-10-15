@@ -6296,12 +6296,21 @@ void XE::wrapAlderLakeNClockSet(IOService *controller,uint64_t nativeHz) {
 			*reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(controller)+0xE98)=result.after.nativeHz();
 		}
 	}
-	if(result.status!=Display13Clock::ChangeStatus::Complete)adlnFault(c.clockFaulted,__LINE__);
+	// A declined change (for the internal panel: a divider change under its live
+	// pipe) wrote nothing and keeps the clock known; only a change that failed
+	// after writing faults the clock path.
+	if(result.status!=Display13Clock::ChangeStatus::Complete && !Display13Clock::declined(result))adlnFault(c.clockFaulted,__LINE__);
 	wmRecord[0]=1;wmRecord[3]=static_cast<uint32_t>(beforeWM.status);wmRecord[4]=static_cast<uint32_t>(afterWM.status);
 	wmRecord[5]=c.pipe[0].watermarkClockHz;
 	IOLockUnlock(c.lock);if(mutex)IORecursiveLockUnlock(mutex);
-	IORegistryEntry::getRegistryRoot()->setProperty("N97FBClockWM",wmRecord,sizeof(wmRecord));
-	IORegistryEntry::getRegistryRoot()->setProperty("N97FBClockChange",&result,sizeof(result));
+	auto root=IORegistryEntry::getRegistryRoot();
+	root->setProperty("N97FBClockWM",wmRecord,sizeof(wmRecord));
+	root->setProperty("N97FBClockChange",&result,sizeof(result));
+	// Keep the first result that was not Complete: later calls overwrite the two above.
+	if(result.status!=Display13Clock::ChangeStatus::Complete && !root->getProperty("N97FBClockChangeFirst")) {
+		root->setProperty("N97FBClockChangeFirst",&result,sizeof(result));
+		root->setProperty("N97FBClockWMFirst",wmRecord,sizeof(wmRecord));
+	}
 }
 
 // A shared crawl needs real WM certificates for every active native pipe.

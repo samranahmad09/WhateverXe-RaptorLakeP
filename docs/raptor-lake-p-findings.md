@@ -199,3 +199,11 @@ backlight cycled four times. The plugin's own records placed the next gate in it
 
 Pending hardware validation. Not yet explained: the four backlight cycles, and what the driver does after
 its clock request on this path.
+
+Addendum (2026-10-16): the decline rule above was applied to the stop wrapper and the multi-output set
+wrapper only. The internal panel uses the single-output set wrapper, which still latched on any result
+other than Complete; a divider change (179.2 MHz is ratio 14 / divider 3, the requested 652.8 MHz is
+ratio 34 / divider 2) under the live pipe is a decline there too. With that wrapper fixed, the watermark
+inputs record confirms the watermark failure was downstream of the latch (`clockFaulted` was its only
+false precondition). The wrapper now also keeps its first non-Complete result, because later calls were
+overwriting the only record of what happened.
