@@ -33,8 +33,8 @@ README on top.
 - **GT profile.** Upstream's Alder Lake-N profile accepts at most 2 DSS / 32 EU. The reference GPU has
   4 DSS / 64 EU and needs its own L3 and URB values.
 - **Stepping.** Revision 04 (GT C0 / display E0 in Linux's tables) needs its own workaround review.
-- **Internal panel.** WhateverXe drives fixed HDMI and DisplayPort outputs. eDP (panel power sequencing,
-  backlight, link training) is not implemented for any platform yet.
+- **Internal panel.** This branch has an experimental Raptor Lake-P eDP boot-handoff path.
+  Native desktop operation, panel power sequencing, backlight and link retraining still need hardware validation.
 - **Outputs.** On the reference machine, as on many Raptor Lake-H laptops, the Intel GPU's only outputs are
   the eDP panel and USB-C DisplayPort; HDMI is wired to the NVIDIA GPU. Upstream drives neither on display
   version 13 yet, so the internal panel (R3) is the first possible picture.
@@ -51,7 +51,7 @@ every hardware rule.
 | --- | --- | --- | --- |
 | R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Done: on the reference machine the macOS readout matches the Linux capture (all five fuses, 64 EU, 4 DSS) |
 | R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | In progress: the BCS self-test (`-wex-rplp-gpu`) passes on the reference machine. The accelerator start depends on R3, because the donor's accelerator registers only after a Display 13 framebuffer controller starts |
-| R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Not started |
+| R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Experimental implementation; native desktop operation is not yet validated |
 | R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
 | R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | Not started |
 

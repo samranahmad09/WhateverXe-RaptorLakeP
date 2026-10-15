@@ -20,6 +20,7 @@
 #include "kern_display13_fb_gtt.hpp"
 #include "kern_display13_fb_sysmem.hpp"
 #include "kern_display13_fb_topology.hpp"
+#include "kern_display13_panel_timing.hpp"
 #include "kern_tgl_fb_binding.hpp"
 #include "kern_display13_fb_irq.hpp"
 #include "kern_display13_cursor.hpp"
@@ -5002,6 +5003,25 @@ bool XE::processDisplay13FramebufferOutput(KernelPatcher &patcher,size_t index,m
 		memcmp(reinterpret_cast<void *>(address+0x9A0E8),before,sizeof(before)) ||
 		memcmp(reinterpret_cast<void *>(bus+0x335),busBefore,sizeof(busBefore)) ||
 		memcmp(reinterpret_cast<void *>(bus+0x2E0),resetBefore,sizeof(resetBefore)))return false;
+	if(xelpPanelPolicy()) {
+		// Xe-LPD has no dedicated eDP transcoder. The query otherwise replaces
+		// path+3640 with 15 and rereads link M/N from the unused 0x6F040/44 bank.
+		// Keep the physical path selected by the normal timing-cache readout.
+		auto root=IORegistryEntry::getRegistryRoot();root->setProperty("RPLPPanelTimingPatchReady",false);
+		const auto query=patcher.solveSymbol<mach_vm_address_t>(index,
+			"__ZN31AppleIntelFramebufferController35hwCRTCToIODetailedTimingInformationEP21AppleIntelFramebufferP29IODetailedTimingInformationV2",address,size);
+		patcher.clearError();
+		if(Display13PanelTiming::plan(true,reinterpret_cast<const void *>(address),size,
+			query>=address ? query-address : 0)!=Display13PanelTiming::Plan::Ready)return false;
+		KernelPatcher::LookupPatch timing {currentFramebuffer,Display13PanelTiming::Before,
+			Display13PanelTiming::After,sizeof(Display13PanelTiming::Before),1};
+		auto site=reinterpret_cast<uint8_t *>(address+Display13PanelTiming::Selection);
+		patcher.applyLookupPatch(&timing,site,sizeof(Display13PanelTiming::Before)+1);
+		const bool applied=patcher.getError()==KernelPatcher::Error::NoError &&
+			!memcmp(site,Display13PanelTiming::After,sizeof(Display13PanelTiming::After));
+		patcher.clearError();root->setProperty("RPLPPanelTimingPatchReady",applied);
+		if(!applied)return false; // Output-hook readiness gates controller start.
+	}
 	struct Change {uintptr_t offset;const uint8_t *find,*replace;size_t length;};
 	const Change changes[] {
 		{0x9A0E8,reinterpret_cast<const uint8_t *>(before),reinterpret_cast<const uint8_t *>(after),sizeof(before)},
