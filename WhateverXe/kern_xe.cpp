@@ -6839,10 +6839,11 @@ Display13WM::Latch XE::adlnVerifyWMLatch(IOService *fb,uint64_t nativeHz,uint64_
 	const bool pathValid=binding.status==TGLFBBinding::Status::Complete && binding.pipe==pipe &&
 		display13FBAssociations(c.controller,0x1C20,fb,fb->getMetaClass()->getClassSize(),display13FBExpectedOwner(c.controller));
 	auto scaler=pathValid ? Display13FBMemory::field<OSObject *>(path,0x32C0) : nullptr;
-	if(!pathValid || !scaler || scaler->getMetaClass()->getClassSize()<0x58 ||
-		Display13FBMemory::field<uint8_t>(fb,0x4A48) || Display13FBMemory::field<uint32_t>(path,0x35F0)) {
-		result.status=Display13WM::Status::Conflict;return result;
-	}
+	// Every refusal names its cause: Binding carries the failed condition bits, Queue the queued packet count.
+	const uint32_t refused=(!pathValid ? 1U : 0U)|(!scaler ? 2U : 0U)|
+		((scaler && scaler->getMetaClass()->getClassSize()<0x58) ? 4U : 0U)|(Display13FBMemory::field<uint8_t>(fb,0x4A48) ? 8U : 0U);
+	if(refused) {result.status=Display13WM::Status::Binding;result.observed=refused;return result;}
+	if(const auto queued=Display13FBMemory::field<uint32_t>(path,0x35F0)) {result.status=Display13WM::Status::Queue;result.observed=queued;return result;}
 	const bool cursor=readout.read(0x70080+bank)&63;
 	const auto conf=readout.read(0x70008+bank);
 	if(conf==UINT32_MAX) {result.status=Display13WM::Status::Readback;return result;}
@@ -7038,36 +7039,43 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	Display13FBClockIO clockIO {c.map};const auto actualHz=Display13Clock::read(clockIO).nativeHz();
 	trigger[9]=path ? Display13FBMemory::field<uint32_t>(path,0x35F0) : UINT32_MAX;
 	if(intent.valid && !trigger[9])result=adlnVerifyWMLatch(fb,actualHz,actualHz);
-	else result.status=Display13WM::Status::Conflict;
+	else if(!intent.valid)result.status=Display13WM::Status::Intent;
+	else {result.status=Display13WM::Status::Queue;result.observed=static_cast<uint32_t>(trigger[9]);}
 	if(result.status==Display13WM::Status::Complete) {
 		Display13FBDBUFIO readout {c.map};
 		const auto primary=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].primary);
 		const auto cursor=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].cursor);
 		retired=Display13DBUF::retire(readout,c.dbuf,primary,cursor,result.frameBefore,result.frameAfter,pipe);
 		if(retired==Display13DBUF::Status::Complete) {c.pipe[pipe].watermarkClockHz=actualHz;c.pipe[pipe].wmPending=0;}
-		else result.status=Display13WM::Status::Conflict;
+		else {	// A verified latch whose DBUF retire refused: named by the DDB register and the retire status.
+			result.status=Display13WM::Status::Conflict;result.lastReg=0x7027C+0x1000*pipe;
+			result.expected=static_cast<uint32_t>(Display13DBUF::Status::Complete);result.observed=static_cast<uint32_t>(retired);
+		}
 	}
 	c.pipe[pipe].wmLatch=result;c.pipe[pipe].wmCommitting=false;
-	// Timing: a mode change in flight; the update stays pending and nothing retires.
-	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable &&
-	   result.status!=Display13WM::Status::Timing)adlnFault(c.watermarkFaulted,__LINE__);
+	// Timing/Inactive: a mode change in flight; the update stays pending and nothing retires.
+	const bool inFlight=result.status==Display13WM::Status::Timing || result.status==Display13WM::Status::Inactive;
+	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && !inFlight)adlnFault(c.watermarkFaulted,__LINE__);
 	record[0]=1;record[1]=static_cast<uint32_t>(result.status);record[2]=pending;record[3]=c.pipe[pipe].wmPending;
 	record[4]=result.frameBefore;record[5]=result.frameAfter;record[6]=result.waitUs;record[7]=result.budgetUs;
 	record[8]=result.lastReg;record[9]=result.expected;record[10]=result.observed;
 	record[11]=static_cast<uint32_t>(retired);record[12]=old;record[13]=c.dbuf.unretired;
 	record[14]=c.dbuf.owned;record[15]=c.pipe[pipe].watermarkClockHz;
-	if(result.status==Display13WM::Status::Timing) {
+	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable) {
 		// The pipe's timing, clock source and link ratio at this arm, kept from the first
-		// Timing result: the next capture shows whether the native path then programmed
+		// result of each kind: the next capture shows whether the native path then programmed
 		// the target mode (line time 0x45270 follows the pixel clock of the live timing).
-		uint64_t timing[20] {1,pipe,result.expected,result.observed};Display13FBDBUFIO readout {c.map};
+		uint64_t timing[20] {1,static_cast<uint32_t>(result.status)|(pipe<<8),result.expected,result.observed};Display13FBDBUFIO readout {c.map};
 		const uint32_t regs[] {0x60000,0x6000C,0x6001C,0x70008,0x60400,0x60030,0x60034,0x60040,0x60044,0x70040,0x70180,0x70188};
 		for(unsigned i=0;i<arrsize(regs);++i)timing[4+i]=readout.read(regs[i]+0x1000*pipe);
 		timing[16]=readout.read(0x46010);timing[17]=readout.read(0x46014);timing[18]=readout.read(0x164280);timing[19]=c.sequence;
+		timing[15]|=uint64_t(result.lastReg)<<32; // PLANE_STRIDE in the low word, the refused register above it.
 		auto root=IORegistryEntry::getRegistryRoot();root->setProperty("N97FBWMLatchTiming",timing,sizeof(timing));
-		if(!root->getProperty("N97FBWMLatchTimingFirst"))root->setProperty("N97FBWMLatchTimingFirst",timing,sizeof(timing));
+		const char *first=result.status==Display13WM::Status::Timing ? "N97FBWMLatchTimingFirst" :
+			result.status==Display13WM::Status::Inactive ? "N97FBWMLatchInactiveFirst" : "N97FBWMLatchConflictFirst";
+		if(!root->getProperty(first))root->setProperty(first,timing,sizeof(timing));
 	}
-	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && result.status!=Display13WM::Status::Timing) {
+	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && !inFlight) {
 		uint64_t cursor[8] {1,pipe};Display13FBDBUFIO readout {c.map};
 		if(Display13FBIRQ::powered(readout.read(0x45404),pipe)) {
 			cursor[2]=readout.read(0x70080+0x1000*pipe);

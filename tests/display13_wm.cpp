@@ -218,6 +218,18 @@ int main() {
      assert(t.status==Status::Timing && t.lastReg==0x45270 && t.observed==48 && t.expected==pipeLineTime(2200,148500000));}
     {LatchIO size(yp);size.regs[0x70180]=0x94001008;size.regs[0x70190]=0x04370780;
      assert(latch(size,size.snapshot(yp)).status==Status::Readback);}
+    // The published numbering of the latch results is part of the capture format.
+    static_assert(static_cast<uint32_t>(Status::Conflict)==11 && static_cast<uint32_t>(Status::Timing)==12 &&
+                  static_cast<uint32_t>(Status::Inactive)==13 && static_cast<uint32_t>(Status::Intent)==14 &&
+                  static_cast<uint32_t>(Status::Queue)==15 && static_cast<uint32_t>(Status::Binding)==16,"latch status numbering");
+    // A pipe or primary plane switched off mid-modeset is Inactive (a refusal without a wait), naming the register;
+    // a foreign plane or a cursor mismatch is still Conflict, also naming its register.
+    {LatchIO off(yp);off.regs[0x70180]=0x94001008;off.regs[0x70008]=0x40000000;const auto r=latch(off,off.snapshot(yp));
+     assert(r.status==Status::Inactive && r.lastReg==0x70008 && r.observed==0x40000000 && !off.elapsed);}
+    {LatchIO planeOff(yp);planeOff.regs[0x70180]=0x14001008;const auto r=latch(planeOff,planeOff.snapshot(yp));
+     assert(r.status==Status::Inactive && r.lastReg==0x70180 && !planeOff.elapsed);}
+    {LatchIO foreign(yp);foreign.regs[0x70180]=0x94001008;foreign.regs[0x70280]=0x80000000;const auto r=latch(foreign,foreign.snapshot(yp));
+     assert(r.status==Status::Conflict && r.lastReg==0x70280 && r.observed==0x80000000);}
     LatchIO wrongTile(yp);
     assert(latch(wrongTile,wrongTile.snapshot(yp)).status==Status::Conflict);
     assert(cursorMatches(0,256,true) && cursorMatches(35,256) && cursorMatches(34,128) && cursorMatches(39,64));

@@ -20,7 +20,11 @@ template<class Pipe,unsigned N> uint32_t busyPipes(const Pipe (&pipes)[N],bool p
     return mask;
 }
 enum class Status : uint32_t {Unavailable,Complete,Input,WM0,SAGV,MailboxBusy,MailboxTimeout,MailboxError,Readback,Power,CommitTimeout,Conflict,
-    Timing}; // Timing: the pipe still runs the previous mode's line time while the native path describes the next one.
+    Timing,   // The pipe still runs the previous mode's line time while the native path describes the next one.
+    Inactive, // The pipe or its primary plane is off: a mode change in flight, verified again once they run.
+    Intent,   // Wrapper side: the arm carried no valid trigger intent (never a latch() result).
+    Queue,    // Wrapper side: the native path still counts queued packets; observed = that count.
+    Binding}; // Wrapper side: path binding, scaler or framebuffer state refused; observed = condition bits.
 // CPU certificates are prerequisites only. The caller still owns each active
 // FB mutex and validates hardware at current/target Hz before a shared crawl.
 template<class Pipe,unsigned N> bool clockConsumersReady(const Pipe (&pipes)[N],uint32_t active,uint64_t hz) {
@@ -344,23 +348,31 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
         const auto power=io.read(0x45404);
         if(!Display13FBIRQ::powered(power,s.pipeIndex)) {r.status=Status::Power;return r;}
         const auto pipe=io.read(0x70008+bank),plane=io.read(0x70180+bank),cursor=io.read(0x70080+bank);
-        if(pipe==UINT32_MAX || plane==UINT32_MAX || cursor==UINT32_MAX || (pipe&0xC0000000)!=0xC0000000 ||
-           !(plane&Enabled) || !supportedRGBControl(plane) || (((plane>>10)&7)==4)!=s.primary->yTiled ||
-           bool(cursor&0x27)!=s.cursorActive || (s.cursorActive && !cursorMatches(cursor,s.cursor->width))) {r.status=Status::Conflict;return r;}
+        // Every refusal below names its register and value in the latch record.
+        auto refuse=[&](Status status,uint32_t reg,uint32_t expected,uint32_t observed) {
+            r.status=status;r.lastReg=reg;r.expected=expected;r.observed=observed;return r;
+        };
+        if(pipe==UINT32_MAX || plane==UINT32_MAX || cursor==UINT32_MAX)return refuse(Status::Conflict,0x70008+bank,0,pipe);
+        // A mode change in flight disables the pipe or its plane before the new timing.
+        if((pipe&0xC0000000)!=0xC0000000)return refuse(Status::Inactive,0x70008+bank,0xC0000000,pipe);
+        if(!(plane&Enabled))return refuse(Status::Inactive,0x70180+bank,Enabled,plane);
+        if(!supportedRGBControl(plane) || (((plane>>10)&7)==4)!=s.primary->yTiled)return refuse(Status::Conflict,0x70180+bank,s.primary->yTiled,plane);
+        if(bool(cursor&0x27)!=s.cursorActive || (s.cursorActive && !cursorMatches(cursor,s.cursor->width)))
+            return refuse(Status::Conflict,0x70080+bank,s.cursorActive,cursor);
         // No autonomous DSB writer is admitted by this direct-MMIO proof.
         for(unsigned p=1;p<5;++p) {
             const auto reg=0x70180+bank+0x100*p;
             if(!io.readable(reg))return r;
             const auto ctrl=io.read(reg);
-            if(ctrl==UINT32_MAX || (ctrl&Enabled)) {r.status=Status::Conflict;return r;}
+            if(ctrl==UINT32_MAX || (ctrl&Enabled))return refuse(Status::Conflict,reg,0,ctrl);
         }
         for(unsigned d=0;d<3;++d) {
             const auto reg=Display13FBIRQ::DSBControl(s.pipeIndex,d);
             if(!io.readable(reg))return r;
             const auto ctrl=io.read(reg);
-            if(ctrl==UINT32_MAX || (ctrl&(Enabled|1))) {r.status=Status::Conflict;return r;}
+            if(ctrl==UINT32_MAX || (ctrl&(Enabled|1)))return refuse(Status::Conflict,reg,0,ctrl);
         }
-        if(io.nativeClockHz()!=s.nativeClockHz) {r.status=Status::Conflict;return r;}
+        if(io.nativeClockHz()!=s.nativeClockHz)return refuse(Status::Conflict,0x46000,uint32_t(s.nativeClockHz/1000),uint32_t(io.nativeClockHz()/1000));
         if(!compare(io,r,0x60000+bank,ht) || !compare(io,r,0x6000C+bank,vt))return r;
         // A mode change in flight: the expected line time follows the native path's
         // target timing, while the pipe still runs the previous one (the internal panel

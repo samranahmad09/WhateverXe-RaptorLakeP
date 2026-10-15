@@ -242,3 +242,27 @@ the update stays pending, no wait), but not a fault, so the native modeset can c
 verifies again. On a Timing result the plugin keeps the pipe's timing, DPLL and link M/N registers in
 `N97FBWMLatchTimingFirst`, so the next capture shows whether the target mode was then programmed. Pending
 hardware validation.
+
+### Native boot: the arm after the Timing refusal, same frame (2026-10-16)
+
+The Timing result worked: `N97FBWMLatchTimingFirst` recorded the first arm at sequence 134, frame 6452,
+with `TRANSCONF_A` on (`0xC0000000`), the firmware's 144 Hz timing still live (line time 48, expected
+116), `DPLL0_ENABLE` and `DPLL1_ENABLE` both `0xCC000000`, `PLANE_CTL_1_A` `0x94000408` (X-tiled XRGB) and
+the cursor off. The boot's first fault then came from the very next arm, in the same frame and sequence:
+`Display13WM::latch()` returned Conflict from one of its pre-compare checks, none of which named a register
+(lastReg, expected and observed all zero, no wait), so the arm wrapper faulted the watermark path and every
+later watermark setup was refused (`N97FBPipe0PrimaryWMFailureInputs`). The cursor snapshot taken at that
+refusal shows `CUR_CTL_A` zero, so the cursor check passed; what remains is the primary plane switched off,
+a foreign plane, a DSB enable or the native clock.
+
+Within one frame of the Timing arm, the native mode change's natural next step is disabling the primary
+plane, then the pipe, before the new timing is programmed. The latch treated a disabled plane or pipe as a
+conflict and the mode change was aborted behind the fault.
+
+Change: `Display13WM::Status::Inactive` for a pipe or primary plane that is off at the arm, a refusal like
+Timing (nothing retires, the update stays pending, no wait) and not a fault. Every latch refusal now names
+its register and value, including the foreign-plane, DSB-control and native-clock checks, and the wrapper's
+own refusals are distinct results (`Intent`, `Queue`, `Binding`) instead of an anonymous Conflict; a
+refused DBUF retire names the DDB register and the retire status. The pipe/DPLL snapshot is kept for every
+refusal kind (`N97FBWMLatchTimingFirst`, `N97FBWMLatchInactiveFirst`, `N97FBWMLatchConflictFirst`; word 1
+= status | pipe << 8, word 15 = `PLANE_STRIDE` | refused register << 32). Pending hardware validation.
