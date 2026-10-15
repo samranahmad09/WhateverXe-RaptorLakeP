@@ -153,3 +153,27 @@ say little about Raptor Lake-P, whose display version 13 is the hard part.
 - [`tools/rplp-decode.py`](../tools/rplp-decode.py) decodes the macOS R1 readout (`-wex-rplp-observe`) and
   compares it with a capture.
   - With this machine's fuses, a simulated readout already matches all five fuses and the EU and DSS totals.
+
+### Native boot: display interrupt enable refused the firmware's Type-C hot-plug enables (2026-10-15)
+
+With the panel path bound on A7A8, the boot handoff validated every step except the display interrupt
+enable, so the power bridge faulted on its first operation and refused the driver's later power requests;
+the panel stayed dark while the driver retried (the backlight visibly cycled). The IRQ module's record
+named the cause: `ForeignIRQ` at `0x4447c` with bits `0x30003`.
+
+- `0x44470`–`0x4447c` is the north display hot-plug bank (Linux `GEN11_DE_HPD_ISR/IMR/IIR/IER`). On
+  Display 11+ it carries Type-C hot-plug (`GEN11_TC_HOTPLUG`, bits 16–21) and Thunderbolt hot-plug
+  (`GEN11_TBT_HOTPLUG`, bits 0–5) in addition to the PCH SDE bank (bits 24–29).
+- `0x30003` = TC1|TC2|TBT1|TBT2: the two Type-C ports this laptop's VBT lists. The firmware leaves their
+  enables set. The reference Alder Lake-N machines have no Type-C ports, so this bank was always clean.
+- The native policy already excludes Type-C in the PCH bank (`excludedPCH`, verified write) but had no
+  counterpart for the north bank, so the scan for a foreign interrupt owner tripped on the plugin's own
+  policy.
+- Change: derive the north-bank exclusion from the PCH one (`hpdExcluded`), tolerate those bits in the
+  foreign-owner scan, and mask them with the same write-and-verify as the PCH bank. Host tests cover the
+  masked case, the no-policy refusal, and an unrelated enable in that bank.
+
+Measured on the same boot, for later stages: the handoff path pipe is 0 with the attach state `2` (as on
+the HDMI reference), the plane snapshot matched the R1 readout, the donor's own `start()` returned true,
+the panel's EDID was read and a 1920×1080 mode attached, and the MMIO uncached preflight passed all nine
+conditions. Pending hardware validation of the change.

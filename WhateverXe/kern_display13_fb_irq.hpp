@@ -50,7 +50,7 @@ struct State {
     Status firstFailure {Status::Unavailable};
     uint32_t failureRegister {},failureBits {};
     uint32_t excludedPCH {},ports {3};
-    uint32_t active {},configured {},priorIER[3] {},priorIMR[3] {},priorPCHIER {},priorPCHIMR {};
+    uint32_t active {},configured {},priorIER[3] {},priorIMR[3] {},priorPCHIER {},priorPCHIMR {},priorHPDIER {},priorHPDIMR {};
     uint32_t priorTCEnable {},priorDDIEnable {},priorDSB[3][3] {},lastMaster {},raw[3] {},lastPCH {},lastDDI {},lastTC {},foreign {};
     uint64_t interrupts {},vblanks[3] {},flips[3] {},underruns[3] {},dsbErrors[3] {};
 };
@@ -82,6 +82,15 @@ inline uint32_t nativePipe(uint32_t raw,unsigned pipe) {
     return result;
 }
 inline uint32_t pchOwned(const State &s) {return ((s.ports&7)<<16)|((s.ports>>3)<<24);}
+// Display 11+ raises Type-C hotplug in the north display HPD bank as well
+// (0x44470 ISR/IMR/IIR/IER; Linux GEN11_TC_HOTPLUG at bits 16-21 and
+// GEN11_TBT_HOTPLUG at bits 0-5), not only in the PCH SDE bank (bits 24-29).
+// A connector the native policy excludes is excluded in both banks: the
+// firmware leaves these enables set on laptops that have Type-C ports.
+constexpr uint32_t HPDBank=0x44478; // IIR; IMR at -4, IER at +4.
+constexpr uint32_t hpdExcluded(uint32_t excludedPCH) {
+    const uint32_t ports=(excludedPCH>>24)&0x3FU;return ports|(ports<<16);
+}
 inline uint32_t ddiMask(const State &s,uint32_t value) {
     uint32_t m=0;for(unsigned p=0;p<3;++p)if(s.ports&(1U<<p))m|=value<<(4*p);return m;
 }
@@ -142,9 +151,11 @@ template<class IO> Status enable(IO &io,State &s,uint32_t excludedPCH=0,uint32_t
         configured|=1U<<p;
     }
     if(active!=expectedPipes)return fail(io,s,Status::Topology);
-    constexpr uint32_t otherBanks[] {0x44448,0x44468,0x44478,0x44488};
+    const uint32_t excludedHPD=hpdExcluded(excludedPCH);
+    constexpr uint32_t otherBanks[] {0x44448,0x44468,HPDBank,0x44488};
     for(auto iir : otherBanks) {
-        const auto pending=io.read(iir+4)&~io.read(iir-4);
+        auto pending=io.read(iir+4)&~io.read(iir-4);
+        if(iir==HPDBank)pending&=~excludedHPD;
         if(pending)return fail(io,s,Status::ForeignIRQ,iir+4,pending);
     }
     const auto pchIER=io.read(0xC400C),pchIMR=io.read(0xC4004);
@@ -165,6 +176,13 @@ template<class IO> Status enable(IO &io,State &s,uint32_t excludedPCH=0,uint32_t
         io.write(0xC4004,pchIMR|excludedPCH);
         io.write(0xC400C,pchIER&~excludedPCH);
         if((io.read(0xC400C)&excludedPCH) || (~io.read(0xC4004)&excludedPCH))
+            return fail(io,s,Status::Readback);
+        // The same connectors in the north display HPD bank.
+        const auto hpdIER=io.read(HPDBank+4),hpdIMR=io.read(HPDBank-4);
+        if(!s.begun) {s.priorHPDIER=hpdIER;s.priorHPDIMR=hpdIMR;}
+        io.write(HPDBank-4,hpdIMR|excludedHPD);
+        io.write(HPDBank+4,hpdIER&~excludedHPD);
+        if((io.read(HPDBank+4)&excludedHPD) || (~io.read(HPDBank-4)&excludedHPD))
             return fail(io,s,Status::Readback);
     }
     s.excludedPCH=excludedPCH;

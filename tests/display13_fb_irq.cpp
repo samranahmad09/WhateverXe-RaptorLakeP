@@ -362,5 +362,17 @@ int main() {
      assert(!quiescent(a,state,128,0));}
     {IO b;State state;b.r[0x70008]=0;assert(quiescent(b,state,32,0));
      for(auto reg:b.reads)assert(reg!=0x64000);}
+    // Firmware left Type-C hotplug enabled in the north display HPD bank (0x4447c: TC1|TC2|TBT1|TBT2).
+    // Excluded connectors are masked there as in the PCH bank; without the policy, or for an unrelated
+    // enable in that bank, the foreign owner is still refused.
+    {IO io;State s;io.r[0x4447C]=0x30003;io.r[0x44474]=~0x30003U;
+     assert(hpdExcluded(0x3F000000)==0x3F003F && hpdExcluded(0x03000000)==0x30003 && !hpdExcluded(0));
+     assert(enable(io,s,0x3F000000,NativeGT,1,3)==Status::Complete);
+     assert(!(io.r[0x4447C]&0x3F003F) && (io.r[0x44474]&0x3F003F)==0x3F003F);
+     assert(s.priorHPDIER==0x30003 && s.priorHPDIMR==~0x30003U && s.enabled);}
+    {IO io;State s;io.r[0x4447C]=0x30003;io.r[0x44474]=~0x30003U;
+     assert(enable(io,s,0,NativeGT,1,3)==Status::ForeignIRQ && s.failureRegister==0x4447C && s.failureBits==0x30003 && !s.enabled);}
+    {IO io;State s;io.r[0x4447C]=0x30003|(1U<<8);io.r[0x44474]=~(0x30003U|(1U<<8));
+     assert(enable(io,s,0x3F000000,NativeGT,1,3)==Status::ForeignIRQ && s.failureRegister==0x4447C && s.failureBits==(1U<<8));}
     puts("AlderLakeN Display13 IRQ fixtures passed: powered banks, native events, W1C isolation and fault masking");
 }
