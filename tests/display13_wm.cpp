@@ -212,6 +212,12 @@ int main() {
     assert(yp.status==Status::Complete && yp.yTiled && yp.normal[0].minimum==123 && yp.sagv.enable);
     LatchIO yLatch(yp);yLatch.regs[0x70180]=0x94001008;
     assert(latch(yLatch,yLatch.snapshot(yp)).status==Status::Complete);
+    // Mode change in flight: the pipe still shows the previous line time. Timing, with the register
+    // and both values recorded; a mismatch elsewhere (plane size) is still Readback.
+    {LatchIO timing(yp);timing.regs[0x70180]=0x94001008;timing.regs[0x45270]=48;const auto t=latch(timing,timing.snapshot(yp));
+     assert(t.status==Status::Timing && t.lastReg==0x45270 && t.observed==48 && t.expected==pipeLineTime(2200,148500000));}
+    {LatchIO size(yp);size.regs[0x70180]=0x94001008;size.regs[0x70190]=0x04370780;
+     assert(latch(size,size.snapshot(yp)).status==Status::Readback);}
     LatchIO wrongTile(yp);
     assert(latch(wrongTile,wrongTile.snapshot(yp)).status==Status::Conflict);
     assert(cursorMatches(0,256,true) && cursorMatches(35,256) && cursorMatches(34,128) && cursorMatches(39,64));
@@ -309,8 +315,9 @@ int main() {
     assert(latch(poweredOff,poweredOff.snapshot(p)).status==Status::Power);
     LatchIO invalidWM(p);invalidWM.regs[0x70258]^=1;
     assert(latch(invalidWM,invalidWM.snapshot(p)).status==Status::Readback && !invalidWM.elapsed);
+    // A previous mode's line time is Timing (a refusal without a wait: nothing retires), not Readback.
     LatchIO oldLineTime(p);oldLineTime.regs[0x45270]=118;
-    assert(latch(oldLineTime,oldLineTime.snapshot(p)).status==Status::Readback && !oldLineTime.elapsed);
+    assert(latch(oldLineTime,oldLineTime.snapshot(p)).status==Status::Timing && !oldLineTime.elapsed);
     LatchIO missingLineTime(p);missingLineTime.regs.erase(0x45270);
     assert(latch(missingLineTime,missingLineTime.snapshot(p)).status==Status::Unavailable && !missingLineTime.elapsed);
     LatchIO clockChanged(p);clockChanged.changeClock=true;
@@ -351,7 +358,7 @@ int main() {
         LatchIO wrongWM(p);wrongWM.moveToPipe(pipe);wrongWM.regs[0x70258+pipe*0x1000]^=1;
         assert(latch(wrongWM,wrongWM.snapshot(p)).status==Status::Readback);
         LatchIO wrongLine(p);wrongLine.moveToPipe(pipe);wrongLine.regs[0x45270+4*pipe]=118;
-        assert(latch(wrongLine,wrongLine.snapshot(p)).status==Status::Readback);
+        assert(latch(wrongLine,wrongLine.snapshot(p)).status==Status::Timing);
         for(auto control:{1U,0x80000000U,UINT32_MAX}) {
             LatchIO dsb(p);dsb.moveToPipe(pipe);dsb.regs[0x70B08+0x1000*pipe]=control;
             assert(latch(dsb,dsb.snapshot(p)).status==Status::Conflict && !dsb.elapsed);

@@ -7048,13 +7048,26 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 		else result.status=Display13WM::Status::Conflict;
 	}
 	c.pipe[pipe].wmLatch=result;c.pipe[pipe].wmCommitting=false;
-	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable)adlnFault(c.watermarkFaulted,__LINE__);
+	// Timing: a mode change in flight; the update stays pending and nothing retires.
+	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable &&
+	   result.status!=Display13WM::Status::Timing)adlnFault(c.watermarkFaulted,__LINE__);
 	record[0]=1;record[1]=static_cast<uint32_t>(result.status);record[2]=pending;record[3]=c.pipe[pipe].wmPending;
 	record[4]=result.frameBefore;record[5]=result.frameAfter;record[6]=result.waitUs;record[7]=result.budgetUs;
 	record[8]=result.lastReg;record[9]=result.expected;record[10]=result.observed;
 	record[11]=static_cast<uint32_t>(retired);record[12]=old;record[13]=c.dbuf.unretired;
 	record[14]=c.dbuf.owned;record[15]=c.pipe[pipe].watermarkClockHz;
-	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable) {
+	if(result.status==Display13WM::Status::Timing) {
+		// The pipe's timing, clock source and link ratio at this arm, kept from the first
+		// Timing result: the next capture shows whether the native path then programmed
+		// the target mode (line time 0x45270 follows the pixel clock of the live timing).
+		uint64_t timing[20] {1,pipe,result.expected,result.observed};Display13FBDBUFIO readout {c.map};
+		const uint32_t regs[] {0x60000,0x6000C,0x6001C,0x70008,0x60400,0x60030,0x60034,0x60040,0x60044,0x70040,0x70180,0x70188};
+		for(unsigned i=0;i<arrsize(regs);++i)timing[4+i]=readout.read(regs[i]+0x1000*pipe);
+		timing[16]=readout.read(0x46010);timing[17]=readout.read(0x46014);timing[18]=readout.read(0x164280);timing[19]=c.sequence;
+		auto root=IORegistryEntry::getRegistryRoot();root->setProperty("N97FBWMLatchTiming",timing,sizeof(timing));
+		if(!root->getProperty("N97FBWMLatchTimingFirst"))root->setProperty("N97FBWMLatchTimingFirst",timing,sizeof(timing));
+	}
+	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && result.status!=Display13WM::Status::Timing) {
 		uint64_t cursor[8] {1,pipe};Display13FBDBUFIO readout {c.map};
 		if(Display13FBIRQ::powered(readout.read(0x45404),pipe)) {
 			cursor[2]=readout.read(0x70080+0x1000*pipe);

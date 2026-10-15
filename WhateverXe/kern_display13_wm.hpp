@@ -19,7 +19,8 @@ template<class Pipe,unsigned N> uint32_t busyPipes(const Pipe (&pipes)[N],bool p
         if(pipes[i].wmProgramming || pipes[i].wmCommitting || (pending && pipes[i].wmPending))mask|=1U<<i;
     return mask;
 }
-enum class Status : uint32_t {Unavailable,Complete,Input,WM0,SAGV,MailboxBusy,MailboxTimeout,MailboxError,Readback,Power,CommitTimeout,Conflict};
+enum class Status : uint32_t {Unavailable,Complete,Input,WM0,SAGV,MailboxBusy,MailboxTimeout,MailboxError,Readback,Power,CommitTimeout,Conflict,
+    Timing}; // Timing: the pipe still runs the previous mode's line time while the native path describes the next one.
 // CPU certificates are prerequisites only. The caller still owns each active
 // FB mutex and validates hardware at current/target Hz before a shared crawl.
 template<class Pipe,unsigned N> bool clockConsumersReady(const Pipe (&pipes)[N],uint32_t active,uint64_t hz) {
@@ -360,8 +361,13 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
             if(ctrl==UINT32_MAX || (ctrl&(Enabled|1))) {r.status=Status::Conflict;return r;}
         }
         if(io.nativeClockHz()!=s.nativeClockHz) {r.status=Status::Conflict;return r;}
-        if(!compare(io,r,0x60000+bank,ht) || !compare(io,r,0x6000C+bank,vt) || !compare(io,r,0x45270+4*s.pipeIndex,s.pipeLineTime) ||
-           !compare(io,r,0x70190+bank,((s.primary->height-1)<<16)|(s.primary->width-1)) ||
+        if(!compare(io,r,0x60000+bank,ht) || !compare(io,r,0x6000C+bank,vt))return r;
+        // A mode change in flight: the expected line time follows the native path's
+        // target timing, while the pipe still runs the previous one (the internal panel
+        // changes mode; the HDMI reference never did). Not a fault: the caller keeps the
+        // update pending, retires nothing, and verifies again at a later arm.
+        if(!compare(io,r,0x45270+4*s.pipeIndex,s.pipeLineTime)) {if(r.status==Status::Readback)r.status=Status::Timing;return r;}
+        if(!compare(io,r,0x70190+bank,((s.primary->height-1)<<16)|(s.primary->width-1)) ||
            !compare(io,r,0x7027C+bank,s.primaryDDB) || !compare(io,r,0x7017C+bank,s.cursorDDB) ||
            !compare(io,r,0x45004,s.ipc) || !compare(io,r,0x7019C+bank,s.primarySurface) ||
            !verifyWM(io,r,*s.primary,false,s.wm0Only,s.pipeIndex))return r;

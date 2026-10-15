@@ -223,3 +223,22 @@ only the control check needed to accept tiling 1. The trace-only scanout sampler
 and addresses X tiles (512 bytes x 8 lines, stride in tiles). Yf and compressed layouts stay refused.
 
 Pending hardware validation.
+
+### Native boot: the watermark latch meets a real mode change (2026-10-16)
+
+With the X-tiled primary accepted, the DBUF allocation write completed and the plane path reached the
+watermark latch. The latch refused with a readback mismatch at `PIPE_WM_LINETIME_A` (`0x45270`): expected
+116, the line time of the native path's target timing (1920x1080 @ 60 Hz, 144.52 MHz), observed 48, the
+line time of the firmware's 144 Hz mode still running on the pipe. The plugin does not write that register:
+its line-time hook stores the new value into the native path's pending CRTC record, which the native driver
+programs during its own pipe update, and the latch's expected value follows the path's current timing.
+
+So at the native driver's WM-arm step its software state already describes the next mode while the pipe
+still runs the previous one. That is a mode change in flight, which the HDMI reference path never did, and
+the latch treated it as a failure that faulted the watermark path and refused everything behind it.
+
+Change: a line-time-only mismatch is a distinct `Timing` result. It is still a refusal (nothing retires,
+the update stays pending, no wait), but not a fault, so the native modeset can continue and a later arm
+verifies again. On a Timing result the plugin keeps the pipe's timing, DPLL and link M/N registers in
+`N97FBWMLatchTimingFirst`, so the next capture shows whether the target mode was then programmed. Pending
+hardware validation.
