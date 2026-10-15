@@ -177,3 +177,25 @@ Measured on the same boot, for later stages: the handoff path pipe is 0 with the
 the HDMI reference), the plane snapshot matched the R1 readout, the donor's own `start()` returned true,
 the panel's EDID was read and a 1920×1080 mode attached, and the MMIO uncached preflight passed all nine
 conditions. Pending hardware validation of the change.
+
+### Native boot: a declined CDCLK stop was treated as a clock fault (2026-10-16)
+
+With the interrupt enable fixed, the whole boot handoff passed (boot path adopted, framebuffer start
+accepted, 299 power operations without error, EDID read, a mode attached). The panel stayed dark and the
+backlight cycled four times. The plugin's own records placed the next gate in its clock policy:
+
+- At power-operation 86 (~27 s) the native driver asked to stop CDCLK while pipe A and transcoder A were
+  still active (guard trace: `TRANSCONF A 0xc0000000`, `TRANS_DDI_FUNC_CTL A 0x8a000106`). The guard
+  declined (`ActiveDividerChange`, no writes), which is correct: a stop under a live pipe ends scanout.
+- The wrapper then latched `clockFaulted` on that decline, and the latch refused every later clock
+  calculation, every PCODE mailbox request (the last record shows the CDCLK voltage request, command 7,
+  not accepted) and the watermark programming. On the HDMI reference path a stop is only requested with
+  the pipes already off, so the latch never fired there; the internal panel keeps its pipe active across
+  these calls.
+- Change: a change declined before any register write (`Display13Clock::declined`) is recorded, not
+  latched; a stop is declined up front when a consumer is active, without quiescing interrupts for the
+  guard. The firmware's 179.2 MHz CDCLK is valid for both the 144 Hz and the EDID's 60 Hz timing, and the
+  set path's ratio-only crawl under active pipes is unchanged.
+
+Pending hardware validation. Not yet explained: the four backlight cycles, and what the driver does after
+its clock request on this path.

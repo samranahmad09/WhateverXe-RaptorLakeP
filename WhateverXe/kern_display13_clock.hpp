@@ -94,6 +94,13 @@ struct Conditions {
     bool owned {}, watermarksReady {};
     uint32_t activePipes {};
 };
+// A change that was declined before any register write: the clock is exactly
+// what it was and the readout still describes it. Callers record a decline;
+// only a change that failed after writing (timeouts, mismatches) is a fault.
+inline bool declined(const Change &r) {
+    return !r.writes && (r.status==ChangeStatus::ActiveDividerChange || r.status==ChangeStatus::OwnershipRequired ||
+        r.status==ChangeStatus::WatermarksRequired || r.status==ChangeStatus::InvalidFrequency);
+}
 inline bool plan(uint32_t reference,uint64_t nativeHz,uint32_t &ratio,uint32_t &divisor,uint32_t &control) {
     for(const auto &e:table) if(e.ref==reference && uint64_t(e.frequency)*2000==nativeHz) {
         ratio=e.ratio;divisor=e.ref*e.ratio/e.frequency;

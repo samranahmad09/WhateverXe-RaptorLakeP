@@ -6415,7 +6415,7 @@ void XE::adlnSetDualClock(IOService *controller,uint64_t nativeHz) {
     if(result.status==Display13Clock::ChangeStatus::Complete) {
         c.clock=result.after;c.clockStopped=false;c.resumeClockHz=result.after.nativeHz();
         *reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(controller)+0xE98)=result.after.nativeHz();
-    } else adlnFault(c.clockFaulted,__LINE__);
+    } else if(!Display13Clock::declined(result))adlnFault(c.clockFaulted,__LINE__);
     evidence[16]=static_cast<uint32_t>(result.status);evidence[17]=result.writes;
     for(unsigned p=0;p<3;++p) {
         evidence[18+3*p]=static_cast<uint32_t>(before[p].status);evidence[19+3*p]=static_cast<uint32_t>(after[p].status);
@@ -6437,8 +6437,13 @@ void XE::wrapAlderLakeNClockDisable(IOService *controller) {
 	Display13Clock::Change result;IOLockLock(c.lock);
 	if(callbackXE->display13FBLifecycleHooksReady && controller==c.controller && c.bridge.begun &&
 		!c.bridge.state.faulted && !c.clockFaulted && !Display13WM::busyPipes(c.pipe) && !c.dbuf.updating) {
+		// A stop under a live pipe would end scanout. The internal panel keeps its pipe
+		// active across the native clock calls, so decline here, before the guard
+		// quiesces interrupts for up to 20 ms only to find the same consumer.
+		Display13FBIRQIO irqIO {display13FBIRQ.base};
 		Display13FBClockGuard guard;
-		if(adlnBeginClockGuard(guard)) {
+		if(!irqIO.readable(0x70008) || !Display13FBIRQ::consumersStopped(irqIO,7))result.status=Display13Clock::ChangeStatus::ActiveDividerChange;
+		else if(adlnBeginClockGuard(guard)) {
 			Display13FBClockIO io {c.map};result=Display13Clock::stop(io,{true,false,0});
 			if(result.status==Display13Clock::ChangeStatus::Complete) {
 				if(result.before.nativeHz())c.resumeClockHz=result.before.nativeHz();
@@ -6448,7 +6453,9 @@ void XE::wrapAlderLakeNClockDisable(IOService *controller) {
 			adlnEndClockGuard(guard,result.status==Display13Clock::ChangeStatus::Complete || !result.writes);
 		} else result.status=Display13Clock::ChangeStatus::ActiveDividerChange;
 	}
-	if(result.status!=Display13Clock::ChangeStatus::Complete)adlnFault(c.clockFaulted,__LINE__);
+	// A declined stop wrote nothing: the clock, and every later clock, mailbox and
+	// watermark operation, stays valid. Only a failed stop faults the clock path.
+	if(result.status!=Display13Clock::ChangeStatus::Complete && !Display13Clock::declined(result))adlnFault(c.clockFaulted,__LINE__);
 	IOLockUnlock(c.lock);IORegistryEntry::getRegistryRoot()->setProperty("N97FBClockStop",&result,sizeof(result));
 }
 uint64_t XE::wrapAlderLakeNClockCalculate(IOService *controller,uint64_t minimumHz) {

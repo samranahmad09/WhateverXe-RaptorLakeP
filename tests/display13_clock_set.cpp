@@ -45,6 +45,13 @@ int main() {
     assert(!select(38400,1305600000,false) && !select(0,0,true));
     {IO io;auto r=stop(io,{false,false,0});assert(r.status==ChangeStatus::OwnershipRequired && io.writes.empty());}
     {IO io;auto r=stop(io,ready);assert(r.status==ChangeStatus::ActiveDividerChange && io.writes.empty());}
+    // declined(): a decline wrote nothing and keeps the clock known; a failure after writing, or success, is not a decline.
+    {IO io;auto r=stop(io,ready);assert(declined(r));}
+    {Change r;r.status=ChangeStatus::ActiveDividerChange;assert(declined(r));r.writes=1;assert(!declined(r));}
+    {Change r;r.status=ChangeStatus::OwnershipRequired;assert(declined(r));r.status=ChangeStatus::WatermarksRequired;assert(declined(r));
+     r.status=ChangeStatus::InvalidFrequency;assert(declined(r));}
+    {Change r;r.status=ChangeStatus::ReadbackMismatch;assert(!declined(r));r.status=ChangeStatus::PllTimeout;assert(!declined(r));
+     r.status=ChangeStatus::Unavailable;assert(!declined(r));r.status=ChangeStatus::Complete;assert(!declined(r));r.status=ChangeStatus::NotReady;assert(!declined(r));}
     {IO io;auto r=stop(io,{true,false,0});assert(r.status==ChangeStatus::Complete && r.after.status==Status::Disabled &&
         r.after.nativeMaxHz()==1305600000 && !(io.regs[PLL]&0xC0000000) && io.regs[Control]==0x380011);
      auto restarted=set(io,614400000,{true,true,0});assert(restarted.status==ChangeStatus::Complete && restarted.after.nativeHz()==614400000);}
