@@ -3429,8 +3429,10 @@ static Display13FBSysMem::Result adlnInspectSysMem(IOService *controller,IOServi
 
 // Preserve the initiating display-resource failure, before later power calls
 // report only NotReady. This is a CPU-only snapshot; no new MMIO or retry.
+static void adlnEDPTrace(bool write,uint64_t reg,uint64_t value,uint64_t rva,uint32_t flags);
 static void adlnFault(bool &flag,uint32_t line,uint32_t status=UINT32_MAX) {
     auto &c=display13FBPower;uint32_t expected=0;
+    adlnEDPTrace(false,0xFFFF0002,line,status,8);
     if(__atomic_compare_exchange_n(&c.firstFaultLine,&expected,line,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
         uint64_t r[32] {1,line,status,c.sequence},ticks;
         clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,r+4);
@@ -5113,25 +5115,122 @@ static uint64_t adlnEDPRemapRegister(bool write,uint64_t reg,uint32_t value,uint
     return mapped;
 }
 static uint32_t adlnEDPClockSelect(uint32_t value,uint64_t rva) {
-    const auto kept=Display13EDP::clockSelect(value,display13FBPower.bridge.bootPort);
+    const auto kept=Display13EDP::enableSelectWrite(rva) ? Display13EDP::clockSelect(value,display13FBPower.bridge.bootPort) : value;
     const auto n=__atomic_fetch_add(&adlnEDPRemap.clockWrites,1,__ATOMIC_RELAXED);
     if(n<4) {adlnEDPRemap.clock[n][0]=value;adlnEDPRemap.clock[n][1]=kept;adlnEDPRemap.clock[n][2]=rva;}
     if(kept!=value)__atomic_fetch_add(&adlnEDPRemap.clockKept,1,__ATOMIC_RELAXED);
     return kept;
 }
+static bool adlnEDPTraceSerialize(void *,void *,OSSerialize *serializer);
 static void adlnPublishEDPRemap() {
     uint64_t r[60] {1,adlnEDPRemap.reads,adlnEDPRemap.writes,adlnEDPRemap.clockWrites,adlnEDPRemap.clockKept};
     for(unsigned i=0;i<8;++i)for(unsigned j=0;j<3;++j)r[5+3*i+j]=adlnEDPRemap.firstWrite[i][j];
     for(unsigned i=0;i<8;++i)for(unsigned j=0;j<2;++j)r[29+2*i+j]=adlnEDPRemap.firstRead[i][j];
     for(unsigned i=0;i<4;++i)for(unsigned j=0;j<3;++j)r[45+3*i+j]=adlnEDPRemap.clock[i][j];
     r[57]=display13FBPower.bridge.bootPort;r[58]=display13FBPower.bridge.begun;
-    IORegistryEntry::getRegistryRoot()->setProperty("N97FBEDPRemap",r,sizeof(r));
+    auto root=IORegistryEntry::getRegistryRoot();root->setProperty("N97FBEDPRemap",r,sizeof(r));
+    if(!root->getProperty("N97FBEDPTrace"))if(auto trace=OSSerializer::forTarget(nullptr,adlnEDPTraceSerialize)) {
+        root->setProperty("N97FBEDPTrace",trace);trace->release();
+    }
+}
+// Every register access of the panel path through the hooked access manager, with its
+// uptime, caller and remap flags, in a ring (repeated identical accesses are counted, not
+// stored), plus a frozen copy of the accesses leading up to each of the first plane-disable
+// writes, and the display state read at serialization time. Recording is plain memory and
+// atomics (any context); the serializer runs in the reader's thread (ioreg).
+struct AlderLakeNEDPTrace {
+    static constexpr unsigned Entries=1024,Keep=256,Disables=4;
+    struct Entry {uint64_t ticks,reg,value,rva;uint32_t flags,repeats;};
+    volatile uint64_t next {};Entry ring[Entries] {};
+    volatile uint64_t disables {};
+    struct {uint64_t ticks,count,trigger;Entry entries[Keep];} snapshot[Disables] {};
+};
+static AlderLakeNEDPTrace adlnEDPTraceRing;
+// flags: 1 write, 2 remapped, 4 value changed by the hook, 8 plugin event (reg 0xFFFF00xx).
+static void adlnEDPTrace(bool write,uint64_t reg,uint64_t value,uint64_t rva,uint32_t flags) {
+    auto &t=adlnEDPTraceRing;if(write)flags|=1;
+    const auto n=__atomic_load_n(&t.next,__ATOMIC_ACQUIRE);
+    if(n) {
+        auto &last=t.ring[(n-1)%AlderLakeNEDPTrace::Entries];
+        if(last.reg==reg && last.value==value && last.rva==rva && last.flags==flags) {__atomic_fetch_add(&last.repeats,1,__ATOMIC_RELAXED);return;}
+    }
+    const auto i=__atomic_fetch_add(&t.next,1,__ATOMIC_ACQ_REL)%AlderLakeNEDPTrace::Entries;
+    auto &e=t.ring[i];uint64_t ticks=0;clock_get_uptime(&ticks);
+    e.ticks=ticks;e.reg=reg;e.value=value;e.rva=rva;e.flags=flags;e.repeats=0;
+}
+static void adlnEDPTraceDisable(uint64_t trigger) {
+    auto &t=adlnEDPTraceRing;const auto d=__atomic_fetch_add(&t.disables,1,__ATOMIC_ACQ_REL);
+    if(d>=AlderLakeNEDPTrace::Disables)return;
+    auto &s=t.snapshot[d];uint64_t ticks=0;clock_get_uptime(&ticks);s.ticks=ticks;s.trigger=trigger;
+    const auto n=__atomic_load_n(&t.next,__ATOMIC_ACQUIRE);const auto count=n<AlderLakeNEDPTrace::Keep ? n : AlderLakeNEDPTrace::Keep;
+    for(uint64_t i=0;i<count;++i)s.entries[i]=t.ring[(n-count+i)%AlderLakeNEDPTrace::Entries];
+    s.count=count;
+}
+// The pipe's timing, clock path and link state, 48 words: [4..15] HTOTAL, VTOTAL, PIPE_SRC,
+// TRANSCONF, TRANS_DDI_FUNC_CTL, DATA_M/N, LINK_M/N, frame counter, PLANE_CTL, PLANE_STRIDE
+// (+ the refused register in the high word of [15]); [16..18] DPLL0/1_ENABLE, DPCLKA_CFGCR0;
+// [19] sequence; [20] TRANS_CLK_SEL; [21..24] DPLL0/1 CFGCR0/1; [25] DDI_BUF_CTL_A; [26..27]
+// DP_TP_CTL/STATUS; [28..30] PIPEDSL twice 2 ms apart, frame counter; [31..34] PSR1/2 ctl/status;
+// [35..36] PP_CONTROL/STATUS; [37] PIPE_MISC; [38] TRANS_VRR_CTL; [39] DSSM; [40..42] DSB 0
+// ctl/head/tail; [43] DDI_BUF_CTL_B; [44] power wells; [45] CDCLK_PLL_ENABLE; [46] CDCLK_CTL;
+// [47] uptime us. Pipe-bank reads only while the pipe's well is powered. Sleeps 2 ms.
+static void adlnDisplaySnapshot(uint64_t *t,unsigned pipe,uint32_t lastReg,uint64_t sequence) {
+    auto &c=display13FBPower;if(!c.map || !c.map->getVirtualAddress() || pipe>=3)return;
+    Display13FBDBUFIO readout {c.map};
+    const uint32_t bank=0x1000*pipe;const bool powered=Display13FBIRQ::powered(readout.read(0x45404),pipe);
+    const uint32_t regs[] {0x60000,0x6000C,0x6001C,0x70008,0x60400,0x60030,0x60034,0x60040,0x60044,0x70040,0x70180,0x70188};
+    if(powered)for(unsigned i=0;i<arrsize(regs);++i)t[4+i]=readout.read(regs[i]+bank);
+    t[15]|=uint64_t(lastReg)<<32;
+    t[16]=readout.read(0x46010);t[17]=readout.read(0x46014);t[18]=readout.read(0x164280);t[19]=sequence;
+    t[20]=readout.read(0x46140+4*pipe);
+    t[21]=readout.read(0x164284);t[22]=readout.read(0x164288);t[23]=readout.read(0x16428C);t[24]=readout.read(0x164290);
+    t[25]=readout.read(0x64000);t[43]=readout.read(0x64100);t[44]=readout.read(0x45404);
+    t[35]=readout.read(0xC7204);t[36]=readout.read(0xC7200);t[39]=readout.read(0x51004);
+    t[45]=readout.read(0x46070);t[46]=readout.read(0x46000);
+    if(powered) {
+        t[26]=readout.read(0x60540+bank);t[27]=readout.read(0x60544+bank);
+        t[28]=readout.read(0x70000+bank);IOSleep(2);t[29]=readout.read(0x70000+bank);t[30]=readout.read(0x70040+bank);
+        t[31]=readout.read(0x60800+bank);t[32]=readout.read(0x60840+bank);t[33]=readout.read(0x60900+bank);t[34]=readout.read(0x60940+bank);
+        t[37]=readout.read(0x70030+bank);t[38]=readout.read(0x60420+bank);
+        t[40]=readout.read(0x70B08+bank);t[41]=readout.read(0x70B0C+bank);t[42]=readout.read(0x70B10+bank);
+    }
+    {uint64_t ticks=0,ns=0;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);t[47]=ns/1000;}
+}
+// N97FBEDPTrace, read at ioreg time: [0..7] version 3, accesses recorded, ring capacity, disable
+// snapshots taken, live state valid, uptime us, bootPort, begun; [8..55] the live display state
+// (word 1 = 0xFF); then 4 x {uptime us, count, trigger, 0} + 256 entries; then {count,0,0,0} + 1024
+// ring entries, oldest first. Entry: uptime us << 8 | flags, reg | repeats << 32, value, caller rva.
+static bool adlnEDPTraceSerialize(void *,void *,OSSerialize *serializer) {
+    auto &t=adlnEDPTraceRing;auto &c=display13FBPower;
+    uint64_t header[8] {3,__atomic_load_n(&t.next,__ATOMIC_ACQUIRE),AlderLakeNEDPTrace::Entries,__atomic_load_n(&t.disables,__ATOMIC_ACQUIRE),0,0,c.bridge.bootPort,c.bridge.begun};
+    uint64_t live[48] {1,0xFF};
+    if(c.map && c.bridge.begun) {adlnDisplaySnapshot(live,0,0,c.sequence);header[4]=1;}
+    {uint64_t ticks=0,ns=0;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);header[5]=ns/1000;}
+    auto data=OSData::withCapacity(sizeof(uint64_t)*(8+48+4*(4+4*AlderLakeNEDPTrace::Keep)+4+4*AlderLakeNEDPTrace::Entries));if(!data)return false;
+    bool ok=data->appendBytes(header,sizeof(header)) && data->appendBytes(live,sizeof(live));
+    auto emit=[&](const AlderLakeNEDPTrace::Entry &e) {
+        uint64_t ns=0;absolutetime_to_nanoseconds(e.ticks,&ns);
+        const uint64_t q[4] {(ns/1000)<<8|e.flags,e.reg|(uint64_t(e.repeats)<<32),e.value,e.rva};
+        ok=ok && data->appendBytes(q,sizeof(q));
+    };
+    const AlderLakeNEDPTrace::Entry empty {};
+    for(unsigned d=0;d<AlderLakeNEDPTrace::Disables && ok;++d) {
+        const auto &sn=t.snapshot[d];uint64_t ns=0;if(sn.ticks)absolutetime_to_nanoseconds(sn.ticks,&ns);
+        const uint64_t q[4] {ns/1000,sn.count,sn.trigger,0};ok=data->appendBytes(q,sizeof(q));
+        for(unsigned i=0;i<AlderLakeNEDPTrace::Keep && ok;++i)emit(i<sn.count ? sn.entries[i] : empty);
+    }
+    const auto n=header[1];const auto count=n<AlderLakeNEDPTrace::Entries ? n : AlderLakeNEDPTrace::Entries;
+    const uint64_t q[4] {count,0,0,0};ok=ok && data->appendBytes(q,sizeof(q));
+    for(uint64_t i=0;i<AlderLakeNEDPTrace::Entries && ok;++i)emit(i<count ? t.ring[(n-count+i)%AlderLakeNEDPTrace::Entries] : empty);
+    if(ok)ok=data->serialize(serializer);data->release();return ok;
 }
 uint32_t XE::wrapDisplay13GMBusRead(void *access,uint64_t reg) {
     const auto caller=reinterpret_cast<uintptr_t>(__builtin_return_address(0));
     const auto start=callbackXE->adlnGMBusFunction;
-    if(adlnEDPRemapActive(access))reg=adlnEDPRemapRegister(false,reg,0,caller-start);
+    const bool traced=adlnEDPRemapActive(access);const auto original=reg;
+    if(traced)reg=adlnEDPRemapRegister(false,reg,0,caller-start);
     auto value=FunctionCast(wrapDisplay13GMBusRead,callbackXE->orgDisplay13GMBusRead)(access,reg);
+    if(traced)adlnEDPTrace(false,reg,value,caller-start,reg!=original ? 2 : 0);
     adlnObserveGMBus(false,reg,value,caller,start);
     if(reg==0xC5108 && caller>=start && caller-start==0x7E8 && access==display13FBPower.access) {
         const auto thread=reinterpret_cast<uintptr_t>(current_thread());
@@ -5357,8 +5456,11 @@ void XE::wrapAlderLakeNGamma10(void *path,void *transaction,uint32_t control) {
 void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
     if(adlnEDPRemapActive(access)) {
         const auto rva=reinterpret_cast<uintptr_t>(__builtin_return_address(0))-callbackXE->adlnGMBusFunction;
+        const auto original=reg;const auto requested=value;
         reg=adlnEDPRemapRegister(true,reg,value,rva);
         if(Display13EDP::clockSelectRegister(reg,0))value=adlnEDPClockSelect(value,rva);
+        adlnEDPTrace(true,reg,value,rva,(reg!=original ? 2 : 0)|(value!=requested ? 4 : 0));
+        if(reg==0x70180 && !(value&0x80000000U))adlnEDPTraceDisable(rva);
     }
     // This route also carries direct native cursor writes, outside the WM
     // trigger queue. Apply Display 13's slot WA only to our proven owner.
@@ -7112,37 +7214,18 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	record[8]=result.lastReg;record[9]=result.expected;record[10]=result.observed;
 	record[11]=static_cast<uint32_t>(retired);record[12]=old;record[13]=c.dbuf.unretired;
 	record[14]=c.dbuf.owned;record[15]=c.pipe[pipe].watermarkClockHz;
-	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable) {
+	adlnEDPTrace(false,0xFFFF0001,static_cast<uint32_t>(result.status)|(pipe<<8),c.sequence,8);
+	if(result.status!=Display13WM::Status::Complete) {
 		// The pipe's timing, clock source and link ratio at this arm, kept from the first
 		// result of each kind: the next capture shows whether the native path then programmed
 		// the target mode (line time 0x45270 follows the pixel clock of the live timing).
-		uint64_t timing[48] {1,static_cast<uint32_t>(result.status)|(pipe<<8),result.expected,result.observed};Display13FBDBUFIO readout {c.map};
-		const uint32_t bank=0x1000*pipe;const bool powered=Display13FBIRQ::powered(readout.read(0x45404),pipe);
-		const uint32_t regs[] {0x60000,0x6000C,0x6001C,0x70008,0x60400,0x60030,0x60034,0x60040,0x60044,0x70040,0x70180,0x70188};
-		if(powered)for(unsigned i=0;i<arrsize(regs);++i)timing[4+i]=readout.read(regs[i]+bank);
-		timing[16]=readout.read(0x46010);timing[17]=readout.read(0x46014);timing[18]=readout.read(0x164280);timing[19]=c.sequence;
-		timing[15]|=uint64_t(result.lastReg)<<32; // PLANE_STRIDE in the low word, the refused register above it.
-		// The pipe's clock path and link state at this arm: transcoder clock select, DPLL0/1
-		// dividers, DDI A buffer, transcoder DP_TP control/status, two scanline reads 2 ms apart
-		// with the frame counter, PSR1/2, the panel power sequencer, pipe misc, VRR, the
-		// reference strap, DSB 0 control/head/tail, DDI B, power wells, CDCLK and the uptime.
-		timing[20]=readout.read(0x46140+4*pipe);
-		timing[21]=readout.read(0x164284);timing[22]=readout.read(0x164288);timing[23]=readout.read(0x16428C);timing[24]=readout.read(0x164290);
-		timing[25]=readout.read(0x64000);timing[43]=readout.read(0x64100);timing[44]=readout.read(0x45404);
-		timing[35]=readout.read(0xC7204);timing[36]=readout.read(0xC7200);timing[39]=readout.read(0x51004);
-		timing[45]=readout.read(0x46070);timing[46]=readout.read(0x46000);
-		if(powered) {
-			timing[26]=readout.read(0x60540+bank);timing[27]=readout.read(0x60544+bank);
-			timing[28]=readout.read(0x70000+bank);IOSleep(2);timing[29]=readout.read(0x70000+bank);timing[30]=readout.read(0x70040+bank);
-			timing[31]=readout.read(0x60800+bank);timing[32]=readout.read(0x60840+bank);timing[33]=readout.read(0x60900+bank);timing[34]=readout.read(0x60940+bank);
-			timing[37]=readout.read(0x70030+bank);timing[38]=readout.read(0x60420+bank);
-			timing[40]=readout.read(0x70B08+bank);timing[41]=readout.read(0x70B0C+bank);timing[42]=readout.read(0x70B10+bank);
-		}
-		{uint64_t ticks=0,ns=0;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);timing[47]=ns/1000;}
+		uint64_t timing[48] {1,static_cast<uint32_t>(result.status)|(pipe<<8),result.expected,result.observed};
+		adlnDisplaySnapshot(timing,pipe,result.lastReg,c.sequence);
 		auto root=IORegistryEntry::getRegistryRoot();root->setProperty("N97FBWMLatchTiming",timing,sizeof(timing));
 		const char *first=result.status==Display13WM::Status::Timing ? "N97FBWMLatchTimingFirst" :
 			result.status==Display13WM::Status::Inactive ? "N97FBWMLatchInactiveFirst" :
-			result.status==Display13WM::Status::Stalled ? "N97FBWMLatchStalledFirst" : "N97FBWMLatchConflictFirst";
+			result.status==Display13WM::Status::Stalled ? "N97FBWMLatchStalledFirst" :
+			result.status==Display13WM::Status::Unavailable ? "N97FBWMLatchUnavailableFirst" : "N97FBWMLatchConflictFirst";
 		if(!root->getProperty(first))root->setProperty(first,timing,sizeof(timing));
 	}
 	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && !inFlight) {

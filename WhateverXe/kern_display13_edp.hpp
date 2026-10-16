@@ -18,5 +18,10 @@ inline bool clockSelectRegister(uint64_t reg,unsigned pipe) {return pipe<3 && re
 // clocked implicitly) leaves this transcoder without a clock; keep the panel's DDI.
 // An explicit select is left alone.
 inline uint32_t clockSelect(uint32_t value,unsigned ddi) {return (value>>28) || ddi>=3 ? value : (value&0x0FFFFFFFU)|((ddi+1U)<<28);}
+// The light-up path's own clock-select write (the only zero select to keep on the DDI;
+// the shutdown path's zero is a real clock disconnect): its return address relative to
+// the hooked GMBUS request function in this exact donor image (0x50731 - 0x53A7C).
+constexpr int64_t EnableSelectDelta=-0x334B;
+inline bool enableSelectWrite(uint64_t rva) {return static_cast<int64_t>(rva)==EnableSelectDelta;}
 }
 #endif

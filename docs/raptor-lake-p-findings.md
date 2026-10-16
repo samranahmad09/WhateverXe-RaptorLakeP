@@ -313,3 +313,23 @@ Change: on the panel path the register read/write hooks redirect legacy-bank tra
 transcoder's `TRANS_CLK_SEL` keeps the panel's DDI (TGL encoding, DDI + 1 in bits 31:28). Counters and the
 first redirected accesses are published as `N97FBEDPRemap`. The DBUF layout wrapper keeps old slices pending
 without a fault while the latch is in flight. Pending hardware validation.
+
+### Native boot: the pipe runs at 60 Hz; the driver tears it down (2026-10-16)
+
+With the legacy-bank remap and the clock select kept, the native driver's mode change reached the hardware:
+75 redirected writes and 31 reads, beginning with the disable path's PIPECONF-off write and poll, the DDI
+function off, then the pipe enable path's MSA misc and timing writes. The disable-time snapshots show
+transcoder A clocked from DDI A (`TRANS_CLK_SEL_A` 0x10000000), the driver's own `TRANS_DDI_FUNC_CTL_A`
+(0x8A010102, two lanes), link M/N at the 60 Hz values (0x44836 / 0x80000 = 144.52 MHz on HBR), the scanline
+advancing 157 lines in 2 ms, and CDCLK raised to 652.8 MHz as the driver had asked. Nine clock-select
+writes alternated between the shutdown path's clear and the light-up path's write: four complete cycles, each
+enabling a correctly timed pipe on a trained two-lane link and then disabling it again, with the panel power
+sequencer's backlight enable bit clear, while no plugin fault occurred at all. What the driver checks after
+pipe enable, and why it fails, is not in any record yet.
+
+Change: a trace of every register access of the panel path through the hooked access manager (uptime, caller,
+remap flags; repeated identical accesses counted), frozen copies of the accesses leading up to each of the
+first four plane-disable writes, and the 48-word display state read at capture time, served lazily as
+`N97FBEDPTrace`; arm results and faults are stamped into the same trace. The clock-select translation is
+narrowed to the light-up path's own write (the shutdown path's zero select is a real clock disconnect and
+stays one). The arm snapshot is now kept for Unavailable results too. Pending hardware validation.

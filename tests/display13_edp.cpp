@@ -18,5 +18,7 @@ int main() {
     assert(clockSelect(0x10000000,0)==0x10000000 && clockSelect(0x20000000,0)==0x20000000 && clockSelect(0xF0000000,0)==0xF0000000);
     assert(clockSelect(0x0000000F,0)==0x1000000F);
     assert(clockSelect(0,3)==0 && clockSelect(5,4)==5);
+    // Only the light-up path's write is a zero select to keep; shutdown's zero stays a disconnect.
+    assert(enableSelectWrite(static_cast<uint64_t>(-0x334B)) && !enableSelectWrite(static_cast<uint64_t>(-0x60EC)) && !enableSelectWrite(0));
     return 0;
 }
