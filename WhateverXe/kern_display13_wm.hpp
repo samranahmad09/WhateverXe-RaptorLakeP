@@ -26,6 +26,9 @@ enum class Status : uint32_t {Unavailable,Complete,Input,WM0,SAGV,MailboxBusy,Ma
     Queue,    // Wrapper side: the native path still counts queued packets; observed = that count.
     Binding,  // Wrapper side: path binding, scaler or framebuffer state refused; observed = condition bits.
     Stalled}; // No new frame and a scanline that never moved for the whole budget: the pipe is not running (in flight).
+// A result that verified nothing and faulted nothing: the native mode change has not run the pipe
+// yet, and the next arm verifies again. Pending plans behind such a result are not conflicts.
+inline bool inFlight(Status s) {return s==Status::Unavailable || s==Status::Timing || s==Status::Inactive || s==Status::Stalled;}
 // CPU certificates are prerequisites only. The caller still owns each active
 // FB mutex and validates hardware at current/target Hz before a shared crawl.
 template<class Pipe,unsigned N> bool clockConsumersReady(const Pipe (&pipes)[N],uint32_t active,uint64_t hz) {

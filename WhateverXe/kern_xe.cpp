@@ -21,6 +21,7 @@
 #include "kern_display13_fb_sysmem.hpp"
 #include "kern_display13_fb_topology.hpp"
 #include "kern_display13_panel_timing.hpp"
+#include "kern_display13_edp.hpp"
 #include "kern_tgl_fb_binding.hpp"
 #include "kern_display13_fb_irq.hpp"
 #include "kern_display13_cursor.hpp"
@@ -5083,10 +5084,54 @@ uint32_t XE::wrapDisplay13GMBus(IOService *controller,uint32_t bus,uint32_t spee
     return result;
 }
 
+// Display 13 panel path: the donor addresses the panel's transcoder/pipe through the
+// legacy dedicated-eDP bank (index 15) in its pipe enable/disable and transcoder-offset
+// paths, and leaves the transcoder clock select at zero (the implicit eDP clock of the
+// old dedicated transcoder). Neither exists on this hardware: that traffic is redirected
+// to the panel's own bank, and a zero clock select keeps the panel's DDI. Counters only
+// here (the register writer may run with preemption disabled); the arm and DBUF layout
+// wrappers publish them as N97FBEDPRemap.
+struct AlderLakeNEDPRemap {
+    volatile uint64_t reads {},writes {},clockWrites {},clockKept {};
+    uint64_t firstWrite[8][3] {},firstRead[8][2] {},clock[4][3] {};
+};
+static AlderLakeNEDPRemap adlnEDPRemap;
+static bool adlnEDPRemapActive(void *access) {
+    auto &c=display13FBPower;
+    return xelpPanelPolicy() && callbackXE->xeProfile.display==XELP::Display::XeLPD && access && access==c.access && c.bridge.begun;
+}
+static uint64_t adlnEDPRemapRegister(bool write,uint64_t reg,uint32_t value,uint64_t rva) {
+    const auto mapped=Display13EDP::remap(reg,0);
+    if(mapped==reg)return reg;
+    if(write) {
+        const auto n=__atomic_fetch_add(&adlnEDPRemap.writes,1,__ATOMIC_RELAXED);
+        if(n<8) {adlnEDPRemap.firstWrite[n][0]=reg;adlnEDPRemap.firstWrite[n][1]=value;adlnEDPRemap.firstWrite[n][2]=rva;}
+    } else {
+        const auto n=__atomic_fetch_add(&adlnEDPRemap.reads,1,__ATOMIC_RELAXED);
+        if(n<8) {adlnEDPRemap.firstRead[n][0]=reg;adlnEDPRemap.firstRead[n][1]=rva;}
+    }
+    return mapped;
+}
+static uint32_t adlnEDPClockSelect(uint32_t value,uint64_t rva) {
+    const auto kept=Display13EDP::clockSelect(value,display13FBPower.bridge.bootPort);
+    const auto n=__atomic_fetch_add(&adlnEDPRemap.clockWrites,1,__ATOMIC_RELAXED);
+    if(n<4) {adlnEDPRemap.clock[n][0]=value;adlnEDPRemap.clock[n][1]=kept;adlnEDPRemap.clock[n][2]=rva;}
+    if(kept!=value)__atomic_fetch_add(&adlnEDPRemap.clockKept,1,__ATOMIC_RELAXED);
+    return kept;
+}
+static void adlnPublishEDPRemap() {
+    uint64_t r[60] {1,adlnEDPRemap.reads,adlnEDPRemap.writes,adlnEDPRemap.clockWrites,adlnEDPRemap.clockKept};
+    for(unsigned i=0;i<8;++i)for(unsigned j=0;j<3;++j)r[5+3*i+j]=adlnEDPRemap.firstWrite[i][j];
+    for(unsigned i=0;i<8;++i)for(unsigned j=0;j<2;++j)r[29+2*i+j]=adlnEDPRemap.firstRead[i][j];
+    for(unsigned i=0;i<4;++i)for(unsigned j=0;j<3;++j)r[45+3*i+j]=adlnEDPRemap.clock[i][j];
+    r[57]=display13FBPower.bridge.bootPort;r[58]=display13FBPower.bridge.begun;
+    IORegistryEntry::getRegistryRoot()->setProperty("N97FBEDPRemap",r,sizeof(r));
+}
 uint32_t XE::wrapDisplay13GMBusRead(void *access,uint64_t reg) {
     const auto caller=reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-    auto value=FunctionCast(wrapDisplay13GMBusRead,callbackXE->orgDisplay13GMBusRead)(access,reg);
     const auto start=callbackXE->adlnGMBusFunction;
+    if(adlnEDPRemapActive(access))reg=adlnEDPRemapRegister(false,reg,0,caller-start);
+    auto value=FunctionCast(wrapDisplay13GMBusRead,callbackXE->orgDisplay13GMBusRead)(access,reg);
     adlnObserveGMBus(false,reg,value,caller,start);
     if(reg==0xC5108 && caller>=start && caller-start==0x7E8 && access==display13FBPower.access) {
         const auto thread=reinterpret_cast<uintptr_t>(current_thread());
@@ -5310,6 +5355,11 @@ void XE::wrapAlderLakeNGamma10(void *path,void *transaction,uint32_t control) {
 }
 
 void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
+    if(adlnEDPRemapActive(access)) {
+        const auto rva=reinterpret_cast<uintptr_t>(__builtin_return_address(0))-callbackXE->adlnGMBusFunction;
+        reg=adlnEDPRemapRegister(true,reg,value,rva);
+        if(Display13EDP::clockSelectRegister(reg,0))value=adlnEDPClockSelect(value,rva);
+    }
     // This route also carries direct native cursor writes, outside the WM
     // trigger queue. Apply Display 13's slot WA only to our proven owner.
     if(reg==0x70080 || reg==0x71080 || reg==0x72080) {
@@ -7116,6 +7166,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
         IORegistryEntry::getRegistryRoot()->setProperty(key,pixels,sizeof(pixels));
     }
 	trigger[10]=static_cast<uint32_t>(result.status);trigger[11]=pipe;
+	adlnPublishEDPRemap();
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBWMTriggerSurfaces",trigger,sizeof(trigger));
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBWMLatch",record,sizeof(record));
 	auto root=IORegistryEntry::getRegistryRoot();char property[48];
@@ -7492,7 +7543,7 @@ void XE::adlnSetupDBUFPipe(IOService *controller,IOService *fb,unsigned pipe,boo
 	if(pipe>=3 || !fb || fb->getMetaClass()->getClassSize()<0x4B90)return;
 	auto mutex=Display13FBMemory::field<IORecursiveLock *>(fb,0x4220);if(!mutex)return;
 	IORecursiveLockLock(mutex);IOLockLock(c.lock);
-	Display13DBUF::Layout layout;Display13DBUF::Range relativePrimary;OSObject *plane=nullptr;uint64_t record[18] {},resume[6] {};
+	Display13DBUF::Layout layout;Display13DBUF::Range relativePrimary;OSObject *plane=nullptr;uint64_t record[18] {},resume[6] {};bool pendingInFlight=false;
 	auto path=Display13FBMemory::singlePath<OSObject *>(fb);
 	const auto binding=adlnInspectPathBinding(fb,path,callbackXE->adlnPlatform,callbackXE->adlnHDMIWiring);
 	const bool associated=Display13FBMemory::boundPipe(c.pipe,fb)==pipe &&
@@ -7547,16 +7598,22 @@ void XE::adlnSetupDBUFPipe(IOService *controller,IOService *fb,unsigned pipe,boo
 		// arm it after this allocation; keep its old slices pending until then.
 		IOLockLock(c.lock);
 		if(!allocated || c.watermarkFaulted)layout.status=Display13DBUF::Status::Faulted;
-		else if(layout.active && (c.pipe[pipe].wmPending || c.pipe[pipe].wmLatch.status!=Display13WM::Status::Complete))layout.status=Display13DBUF::Status::Conflict;
+		else if(layout.active && (c.pipe[pipe].wmPending || c.pipe[pipe].wmLatch.status!=Display13WM::Status::Complete)) {
+			// The allocation is written and the old slices stay pending. A latch still in
+			// flight (the native mode change has not run the pipe yet) is not a fault: the
+			// next arm verifies the new plan. Only a failed latch faults here.
+			layout.status=Display13DBUF::Status::Conflict;pendingInFlight=Display13WM::inFlight(c.pipe[pipe].wmLatch.status);
+		}
 		if(layout.status==Display13DBUF::Status::Complete && !optimized)
 			reinterpret_cast<uint8_t *>(controller)[0x1AFA]=0;
 	}
-	if(layout.status!=Display13DBUF::Status::Complete)adlnFault(c.dbuf.faulted,__LINE__,static_cast<uint32_t>(layout.status));
+	if(layout.status!=Display13DBUF::Status::Complete && !pendingInFlight)adlnFault(c.dbuf.faulted,__LINE__,static_cast<uint32_t>(layout.status));
 	record[0]=2;record[1]=optimized;record[2]=static_cast<uint32_t>(layout.status);record[3]=associated;record[4]=layout.active;
 	record[5]=c.dbuf.pipe[pipe].primary.start;record[6]=c.dbuf.pipe[pipe].primary.end;record[7]=c.dbuf.pipe[pipe].cursor.start;record[8]=c.dbuf.pipe[pipe].cursor.end;
 	record[9]=c.dbuf.consumers;record[10]=c.dbuf.unretired;record[11]=c.dbuf.requested;record[12]=c.dbuf.powered;
 	record[13]=c.pipe[pipe].wmPending;record[14]=c.pipe[pipe].watermarkClockHz;record[15]=static_cast<uint32_t>(c.pipe[pipe].wmLatch.status);record[16]=pipe;record[17]=binding.ddi;
 	IOLockUnlock(c.lock);IORecursiveLockUnlock(mutex);
+	adlnPublishEDPRemap();
 	adlnPublishMemory("N97FBDBUFLayout",pipe,record,sizeof(record));
 	if(resume[0])adlnPublishMemory("N97FBDBUFColdResume",pipe,resume,sizeof(resume));
 }

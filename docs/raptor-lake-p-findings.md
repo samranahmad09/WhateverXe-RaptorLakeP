@@ -292,3 +292,24 @@ with the frame counter, PSR1/PSR2 control/status, PP_CONTROL/PP_STATUS, PIPE_MIS
 control/head/tail, power wells, CDCLK_PLL_ENABLE, CDCLK_CTL and the uptime, with the pipe-bank reads taken
 only while the pipe's power well is on. A Stalled result keeps `N97FBWMLatchStalledFirst`. Pending
 hardware validation.
+
+### Native boot: the transcoder has no clock; the legacy eDP bank (2026-10-16)
+
+The wide snapshot at every arm of the 04fa17a boot reads `TRANS_CLK_SEL_A` (0x46140) as 0, `PIPEDSL_A` frozen
+at line 1104 and the frame counter standing, while `DPLL0_CFGCR0/1` are 0x01C001A5/0x88 (8100 MHz DCO, PDIV 3,
+KDIV 2 = 1350 MHz, HBR), `DDI_BUF_CTL_A` 0x80000002 (enabled, two lanes) and the transcoder `DP_TP_CTL`
+(0x60540) 0x80000300 (normal operation). The boot handoff had required the firmware's select to name DDI A.
+So the native driver re-sources and re-trains the panel link correctly, then leaves transcoder A without a
+port clock, the convention of the dedicated eDP transcoder of older display generations, which was clocked
+implicitly. Its pipe enable, pipe disable and transcoder-offset paths likewise address that dedicated bank
+(0x6F000 transcoder, 0x7F008 PIPECONF), which does not exist on Display 13, so `TRANSCONF_A` kept reading
+the firmware's 0xC0000000, link M/N stayed at the firmware's 144 Hz values, and the driver's PIPECONF polls
+never saw a change. The last arm (46.6 s) shows the driver's teardown: DDI A disabled, DPLL0 off, the DDI A
+clock gated, the backlight enable bit cleared. The first fault of that boot came only then, from the DBUF
+layout wrapper refusing a layout while the watermark latch was merely in flight.
+
+Change: on the panel path the register read/write hooks redirect legacy-bank traffic (0x6F000..0x6FFFF and
+0x7F000..0x7FFFF) to the panel's own transcoder/pipe bank, and a write of a zero port select to the panel
+transcoder's `TRANS_CLK_SEL` keeps the panel's DDI (TGL encoding, DDI + 1 in bits 31:28). Counters and the
+first redirected accesses are published as `N97FBEDPRemap`. The DBUF layout wrapper keeps old slices pending
+without a fault while the latch is in flight. Pending hardware validation.
