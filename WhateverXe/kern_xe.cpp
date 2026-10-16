@@ -5098,7 +5098,7 @@ struct AlderLakeNEDPRemap {
 static AlderLakeNEDPRemap adlnEDPRemap;
 static bool adlnEDPRemapActive(void *access) {
     auto &c=display13FBPower;
-    return xelpPanelPolicy() && callbackXE->xeProfile.display==XELP::Display::XeLPD && access && access==c.access && c.bridge.begun;
+    return xelpPanelPolicy() && access && access==c.access && c.bridge.begun;
 }
 static uint64_t adlnEDPRemapRegister(bool write,uint64_t reg,uint32_t value,uint64_t rva) {
     const auto mapped=Display13EDP::remap(reg,0);
