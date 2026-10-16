@@ -20,5 +20,23 @@ int main() {
     assert(clockSelect(0,3)==0 && clockSelect(5,4)==5);
     // Only the light-up path's write is a zero select to keep; shutdown's zero stays a disconnect.
     assert(enableSelectWrite(static_cast<uint64_t>(-0x334B)) && !enableSelectWrite(static_cast<uint64_t>(-0x60EC)) && !enableSelectWrite(0));
+    // Combo PHY A tuning words: group and per-lane DW2/DW4/DW5/DW7 only; the firmware's values are
+    // inherited field by field, keeping the driver's loadgen and training-enable bits.
+    unsigned dword=0,lane=9;
+    assert(phyTuningRegister(0x162688,dword,lane) && dword==2 && lane==4);
+    assert(phyTuningRegister(0x162690,dword,lane) && dword==4 && lane==4);
+    assert(phyTuningRegister(0x162694,dword,lane) && dword==5 && lane==4);
+    assert(phyTuningRegister(0x16269C,dword,lane) && dword==7 && lane==4);
+    assert(phyTuningRegister(0x162888,dword,lane) && dword==2 && lane==0);
+    assert(phyTuningRegister(0x162990,dword,lane) && dword==4 && lane==1);
+    assert(phyTuningRegister(0x162A94,dword,lane) && dword==5 && lane==2);
+    assert(phyTuningRegister(0x162B9C,dword,lane) && dword==7 && lane==3);
+    assert(!phyTuningRegister(0x162884,dword,lane) && !phyTuningRegister(0x162804,dword,lane) && !phyTuningRegister(0x162028,dword,lane));
+    assert(!phyTuningRegister(0x16210C,dword,lane) && !phyTuningRegister(0x162C88,dword,lane) && !phyTuningRegister(0x6C888,dword,lane));
+    PHYTuning fw;for(unsigned l=0;l<4;++l) {fw.dw2[l]=0x2098+l;fw.dw4[l]=0x80120345+(l<<4);fw.dw5[l]=0xA0080030+l;fw.dw7[l]=0x7A001111+l;}
+    assert(phyInherit(fw,2,1,0x3098)==0x2099 && phyInherit(fw,2,4,0x3098)==0x2098);
+    assert(phyInherit(fw,4,2,0x00007038)==(0x00020000|0x00000365) && phyInherit(fw,4,1,0x80287038)==(0x80280000|0x00020355));
+    assert(phyInherit(fw,5,0,0x00390030)==0x20080030 && phyInherit(fw,5,4,0x80390030)==0xA0080030 && phyInherit(fw,5,3,0x80390030)==0xA0080033);
+    assert(phyInherit(fw,7,0,0x00FFFFFF)==0x7AFFFFFF && phyInherit(fw,7,2,0x81000000)==0xFA000000);
     return 0;
 }

@@ -5153,8 +5153,42 @@ static uint32_t adlnEDPClockSelect(uint32_t value,uint64_t rva) {
     if(kept!=value)__atomic_fetch_add(&adlnEDPRemap.clockKept,1,__ATOMIC_RELAXED);
     return kept;
 }
+// The firmware's combo PHY A tuning, read at the boot handoff before the native driver's
+// first training, and the overrides applied to the driver's later tuning writes.
+static Display13EDP::PHYTuning adlnPHYBoot;
+static uint64_t adlnPHYBootRecord[32];
+struct AlderLakeNPHYOverride {volatile uint64_t count {};uint64_t first[8][3] {};};
+static AlderLakeNPHYOverride adlnPHYOverride;
+template<class IO> static void adlnPHYBootSnapshot(IO &io) {
+    using namespace Display13EDP;
+    uint64_t &r=adlnPHYBootRecord[0];r=1;bool valid=true;
+    auto take=[&](uint32_t reg,unsigned slot) {const auto v=io.read(reg);adlnPHYBootRecord[slot]=v;if(v==UINT32_MAX)valid=false;return v;};
+    for(unsigned l=0;l<4;++l) {
+        adlnPHYBoot.dw2[l]=take(PHYA+0x888+0x100*l,1+l);adlnPHYBoot.dw4[l]=take(PHYA+0x890+0x100*l,5+l);
+        adlnPHYBoot.dw5[l]=take(PHYA+0x894+0x100*l,9+l);adlnPHYBoot.dw7[l]=take(PHYA+0x89C+0x100*l,13+l);
+    }
+    take(PHYA+0x804,17);take(PHYA+0x014,18);take(PHYA+0x028,19);take(PHYA+0x030,20);
+    take(PHYA+0x100,21);take(PHYA+0x104,22);take(PHYA+0x10C,23);take(PHYA+0x120,24);take(PHYA+0x124,25);take(PHYA+0x128,26);
+    take(0x64000,27);take(0x60540,28);
+    adlnPHYBoot.valid=valid;adlnPHYBootRecord[31]=valid;
+    IORegistryEntry::getRegistryRoot()->setProperty("N97FBPHYBoot",adlnPHYBootRecord,sizeof(adlnPHYBootRecord));
+}
+static uint32_t adlnPHYInherit(uint64_t reg,uint32_t value) {
+    unsigned dword=0,lane=0;
+    if(!adlnPHYBoot.valid || display13FBPower.bridge.bootPort!=0 || !Display13EDP::phyTuningRegister(reg,dword,lane))return value;
+    const auto inherited=Display13EDP::phyInherit(adlnPHYBoot,dword,lane,value);
+    if(inherited==value)return value;
+    const auto n=__atomic_fetch_add(&adlnPHYOverride.count,1,__ATOMIC_RELAXED);
+    if(n<8) {adlnPHYOverride.first[n][0]=reg;adlnPHYOverride.first[n][1]=value;adlnPHYOverride.first[n][2]=inherited;}
+    return inherited;
+}
 static bool adlnEDPTraceSerialize(void *,void *,OSSerialize *serializer);
 static void adlnPublishEDPRemap() {
+    {
+        uint64_t o[28] {1,adlnPHYOverride.count,adlnPHYBoot.valid,display13FBPower.bridge.bootPort};
+        for(unsigned i=0;i<8;++i)for(unsigned j=0;j<3;++j)o[4+3*i+j]=adlnPHYOverride.first[i][j];
+        IORegistryEntry::getRegistryRoot()->setProperty("N97FBPHYOverride",o,sizeof(o));
+    }
     uint64_t r[60] {1,adlnEDPRemap.reads,adlnEDPRemap.writes,adlnEDPRemap.clockWrites,adlnEDPRemap.clockKept};
     for(unsigned i=0;i<8;++i)for(unsigned j=0;j<3;++j)r[5+3*i+j]=adlnEDPRemap.firstWrite[i][j];
     for(unsigned i=0;i<8;++i)for(unsigned j=0;j<2;++j)r[29+2*i+j]=adlnEDPRemap.firstRead[i][j];
@@ -5458,6 +5492,7 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
         const auto original=reg;const auto requested=value;
         reg=adlnEDPRemapRegister(true,reg,value,rva);
         if(Display13EDP::clockSelectRegister(reg,0))value=adlnEDPClockSelect(value,rva);
+        value=adlnPHYInherit(reg,value);
         adlnEDPTrace(true,reg,value,rva,(reg!=original ? 2 : 0)|(value!=requested ? 4 : 0));
         if(reg==0x70180 && !(value&0x80000000U))adlnEDPTraceDisable(rva);
     }
@@ -7737,6 +7772,8 @@ void XE::wrapAlderLakeNPowerInit(void *power,void *controller) {
 			}
 			if(boot)result=c.bridge.begin(io,bootPort,Display13FBTopology::policyPorts(callbackXE->adlnHDMIWiring,xelpPanelPolicy()));
 			else {result.status=Display13Power::Status::InvalidDomains;adlnFault(c.bridge.state.faulted,__LINE__);}
+			// The firmware's PHY tuning for the panel, before the native driver's first link training.
+			if(result.status==Display13Power::Status::Complete && bootPort==0 && xelpPanelPolicy())adlnPHYBootSnapshot(io);
 			if(result.status==Display13Power::Status::Complete && !Display13Power::publishObject(c.bridge,power,0x80,controller,0xC60)) {
 				result.status=Display13Power::Status::NotReady;adlnFault(c.bridge.state.faulted,__LINE__);
 			}

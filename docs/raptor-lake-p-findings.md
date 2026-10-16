@@ -333,3 +333,23 @@ first four plane-disable writes, and the 48-word display state read at capture t
 `N97FBEDPTrace`; arm results and faults are stamped into the same trace. The clock-select translation is
 narrowed to the light-up path's own write (the shutdown path's zero select is a real clock disconnect and
 stays one). The arm snapshot is now kept for Unavailable results too. Pending hardware validation.
+
+### Native boot: link training never reaches clock recovery (2026-10-16)
+
+The access trace explains the four cycles. Each one runs DisplayPort link training on DDI A at two lanes, HBR: five
+rounds, 130 ms apart, each programming combo PHY A's tuning words (PORT_TX DW2 group 0x3098, DW4 per lane 0x7038 with
+loadgen on lanes 1 and 2, DW5 group 0x00390030 then 0x80390030, PORT_CL_DW10 0x000300c0 with lanes 2 and 3 powered
+down), writing DPCD 0x103..0x106 = 0x07 (swing 3, max swing reached, no pre-emphasis) and reading DPCD 0x202..0x207 =
+00 00 00 00 33 00: no clock recovery on any lane and the sink requesting swing 3 again. The driver then clears the
+training pattern, finishes the light-up anyway (transcoder on with the 60 Hz timing and M/N, panel power on, backlight
+PWM on) and within 10 ms disables the display: that 10 ms of backlight is the flicker. The firmware trained the same
+panel at four lanes, and the machine's VBT selects the low-swing eDP table. The donor's tuning at the sink's requested
+level carries the DW4 coefficients of Linux's ADL-P low-swing entry for 350 mV (cursor 0x38, post-cursor 0x07) but a
+different DW2 swing select (0x6 against 0x4), and it never writes DW7 N_SCALAR, which carries the drive strength on this
+PHY generation.
+
+Change (an experiment): at the boot handoff, before the driver's first training, the plugin reads the firmware's combo
+PHY A tuning (DW2, DW4, DW5, DW7 for each lane, plus PCS, CL and COMP words) into `N97FBPHYBoot`, and during training it
+replaces the driver's writes to those four words with the firmware's: DW2 whole, DW4 bits 17:0, DW5 all but the
+training-enable bit, DW7 bits 30:24. Lane power, loadgen and the sequence stay the driver's. Substitutions are counted in
+`N97FBPHYOverride` and flagged in the trace. Pending hardware validation.
