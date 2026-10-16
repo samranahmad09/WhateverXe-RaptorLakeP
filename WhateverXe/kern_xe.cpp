@@ -3429,7 +3429,39 @@ static Display13FBSysMem::Result adlnInspectSysMem(IOService *controller,IOServi
 
 // Preserve the initiating display-resource failure, before later power calls
 // report only NotReady. This is a CPU-only snapshot; no new MMIO or retry.
-static void adlnEDPTrace(bool write,uint64_t reg,uint64_t value,uint64_t rva,uint32_t flags);
+// Every register access of the panel path through the hooked access manager, with its
+// uptime, caller and remap flags, in a ring (repeated identical accesses are counted, not
+// stored), plus a frozen copy of the accesses leading up to each of the first plane-disable
+// writes, and the display state read at serialization time. Recording is plain memory and
+// atomics (any context); the serializer runs in the reader's thread (ioreg).
+struct AlderLakeNEDPTrace {
+    static constexpr unsigned Entries=1024,Keep=256,Disables=4;
+    struct Entry {uint64_t ticks,reg,value,rva;uint32_t flags,repeats;};
+    volatile uint64_t next {};Entry ring[Entries] {};
+    volatile uint64_t disables {};
+    struct {uint64_t ticks,count,trigger;Entry entries[Keep];} snapshot[Disables] {};
+};
+static AlderLakeNEDPTrace adlnEDPTraceRing;
+// flags: 1 write, 2 remapped, 4 value changed by the hook, 8 plugin event (reg 0xFFFF00xx).
+static void adlnEDPTrace(bool write,uint64_t reg,uint64_t value,uint64_t rva,uint32_t flags) {
+    auto &t=adlnEDPTraceRing;if(write)flags|=1;
+    const auto n=__atomic_load_n(&t.next,__ATOMIC_ACQUIRE);
+    if(n) {
+        auto &last=t.ring[(n-1)%AlderLakeNEDPTrace::Entries];
+        if(last.reg==reg && last.value==value && last.rva==rva && last.flags==flags) {__atomic_fetch_add(&last.repeats,1,__ATOMIC_RELAXED);return;}
+    }
+    const auto i=__atomic_fetch_add(&t.next,1,__ATOMIC_ACQ_REL)%AlderLakeNEDPTrace::Entries;
+    auto &e=t.ring[i];uint64_t ticks=0;clock_get_uptime(&ticks);
+    e.ticks=ticks;e.reg=reg;e.value=value;e.rva=rva;e.flags=flags;e.repeats=0;
+}
+static void adlnEDPTraceDisable(uint64_t trigger) {
+    auto &t=adlnEDPTraceRing;const auto d=__atomic_fetch_add(&t.disables,1,__ATOMIC_ACQ_REL);
+    if(d>=AlderLakeNEDPTrace::Disables)return;
+    auto &s=t.snapshot[d];uint64_t ticks=0;clock_get_uptime(&ticks);s.ticks=ticks;s.trigger=trigger;
+    const auto n=__atomic_load_n(&t.next,__ATOMIC_ACQUIRE);const auto count=n<AlderLakeNEDPTrace::Keep ? n : AlderLakeNEDPTrace::Keep;
+    for(uint64_t i=0;i<count;++i)s.entries[i]=t.ring[(n-count+i)%AlderLakeNEDPTrace::Entries];
+    s.count=count;
+}
 static void adlnFault(bool &flag,uint32_t line,uint32_t status=UINT32_MAX) {
     auto &c=display13FBPower;uint32_t expected=0;
     adlnEDPTrace(false,0xFFFF0002,line,status,8);
@@ -5132,39 +5164,6 @@ static void adlnPublishEDPRemap() {
     if(!root->getProperty("N97FBEDPTrace"))if(auto trace=OSSerializer::forTarget(nullptr,adlnEDPTraceSerialize)) {
         root->setProperty("N97FBEDPTrace",trace);trace->release();
     }
-}
-// Every register access of the panel path through the hooked access manager, with its
-// uptime, caller and remap flags, in a ring (repeated identical accesses are counted, not
-// stored), plus a frozen copy of the accesses leading up to each of the first plane-disable
-// writes, and the display state read at serialization time. Recording is plain memory and
-// atomics (any context); the serializer runs in the reader's thread (ioreg).
-struct AlderLakeNEDPTrace {
-    static constexpr unsigned Entries=1024,Keep=256,Disables=4;
-    struct Entry {uint64_t ticks,reg,value,rva;uint32_t flags,repeats;};
-    volatile uint64_t next {};Entry ring[Entries] {};
-    volatile uint64_t disables {};
-    struct {uint64_t ticks,count,trigger;Entry entries[Keep];} snapshot[Disables] {};
-};
-static AlderLakeNEDPTrace adlnEDPTraceRing;
-// flags: 1 write, 2 remapped, 4 value changed by the hook, 8 plugin event (reg 0xFFFF00xx).
-static void adlnEDPTrace(bool write,uint64_t reg,uint64_t value,uint64_t rva,uint32_t flags) {
-    auto &t=adlnEDPTraceRing;if(write)flags|=1;
-    const auto n=__atomic_load_n(&t.next,__ATOMIC_ACQUIRE);
-    if(n) {
-        auto &last=t.ring[(n-1)%AlderLakeNEDPTrace::Entries];
-        if(last.reg==reg && last.value==value && last.rva==rva && last.flags==flags) {__atomic_fetch_add(&last.repeats,1,__ATOMIC_RELAXED);return;}
-    }
-    const auto i=__atomic_fetch_add(&t.next,1,__ATOMIC_ACQ_REL)%AlderLakeNEDPTrace::Entries;
-    auto &e=t.ring[i];uint64_t ticks=0;clock_get_uptime(&ticks);
-    e.ticks=ticks;e.reg=reg;e.value=value;e.rva=rva;e.flags=flags;e.repeats=0;
-}
-static void adlnEDPTraceDisable(uint64_t trigger) {
-    auto &t=adlnEDPTraceRing;const auto d=__atomic_fetch_add(&t.disables,1,__ATOMIC_ACQ_REL);
-    if(d>=AlderLakeNEDPTrace::Disables)return;
-    auto &s=t.snapshot[d];uint64_t ticks=0;clock_get_uptime(&ticks);s.ticks=ticks;s.trigger=trigger;
-    const auto n=__atomic_load_n(&t.next,__ATOMIC_ACQUIRE);const auto count=n<AlderLakeNEDPTrace::Keep ? n : AlderLakeNEDPTrace::Keep;
-    for(uint64_t i=0;i<count;++i)s.entries[i]=t.ring[(n-count+i)%AlderLakeNEDPTrace::Entries];
-    s.count=count;
 }
 // The pipe's timing, clock path and link state, 48 words: [4..15] HTOTAL, VTOTAL, PIPE_SRC,
 // TRANSCONF, TRANS_DDI_FUNC_CTL, DATA_M/N, LINK_M/N, frame counter, PLANE_CTL, PLANE_STRIDE
