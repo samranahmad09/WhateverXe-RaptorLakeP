@@ -5950,7 +5950,7 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
 				auto lanePort=Display13FBMemory::field<OSObject *>(path,0x3648);
 				if(lanePort && lanePort->getMetaClass()->getClassSize()>=0x5C0) {
 					auto &keep=*(reinterpret_cast<uint8_t *>(lanePort)+0x117);
-					const uint64_t lanes[6] {1,keep,Display13FBMemory::field<uint8_t>(lanePort,0x11),Display13FBMemory::field<uint8_t>(lanePort,0x116),
+					uint64_t lanes[6] {1,keep,Display13FBMemory::field<uint8_t>(lanePort,0x11),Display13FBMemory::field<uint8_t>(lanePort,0x116),
 						Display13FBMemory::field<uint32_t>(lanePort,0x124),Display13FBMemory::field<uint32_t>(lanePort,0x128)};
 					keep=1;
 					IORegistryEntry::getRegistryRoot()->setProperty("N97FBLanePolicy",lanes,sizeof(lanes));
