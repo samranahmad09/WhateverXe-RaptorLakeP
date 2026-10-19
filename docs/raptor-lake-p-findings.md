@@ -386,3 +386,18 @@ Change: before any DP_TP_CTL enable on the panel's transcoder, if the function w
 as the pre-training configuration (DDI A, DP SST, the enabled DDI buffer's width, enable clear, other bits kept) and
 records it in `N97FBDDIAssociate`. The capability-lane-count flag is re-applied at every AUX transaction, and the trace's
 lead-up windows grow to 1024 entries so a whole light-up is visible. Pending hardware validation.
+
+### Revision before the boot: the whole pre-training boundary (2026-10-19)
+
+Three corrections from a closer look at the donor, before the association change was ever booted. The port byte used as
+a lane policy is the donor's MST state flag: a mode-set step resets it, and the training-pattern helper turns it into
+DP_TP_CTL's MST mode bit, so forcing it would have trained in MST mode under an SST function word. Those writes are gone.
+The disable path also clears the transcoder's clock select, and the panel path restores it only after training, so the
+pattern generator was unclocked as well as unrouted. And the first training pattern is written before the DDI buffer is
+enabled, so the function word's width must come from the lane count the driver resolved, not from the buffer.
+
+Change: at every DP_TP_CTL enable write on the panel's transcoder, in Linux's pre-training order, the plugin selects the
+transcoder clock from DDI A when the select is empty, configures the function word (DDI A, DP SST, the resolved lane
+count's width, enable clear) when it differs, and carries the sink's negotiated enhanced framing into the training
+control word. Readbacks of the clock select, function word, DP_TP_CTL, DDI buffer and the port's lane, rate, MST and
+framing fields are recorded at each boundary (`N97FBDDIAssociate`). Pending hardware validation.
