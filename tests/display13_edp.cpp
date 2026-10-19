@@ -35,7 +35,12 @@ int main() {
     assert(!phyTuningRegister(0x16210C,dword,lane) && !phyTuningRegister(0x162C88,dword,lane) && !phyTuningRegister(0x6C888,dword,lane));
     PHYTuning fw;for(unsigned l=0;l<4;++l) {fw.dw2[l]=0x2098+l;fw.dw4[l]=0x80120345+(l<<4);fw.dw5[l]=0xA0080030+l;fw.dw7[l]=0x7A001111+l;}
     assert(phyInherit(fw,2,1,0x3098)==0x2099 && phyInherit(fw,2,4,0x3098)==0x2098);
-    assert(phyInherit(fw,4,2,0x00007038)==(0x00020000|0x00000365) && phyInherit(fw,4,1,0x80287038)==(0x80280000|0x00020355));
+    assert(loadgenLane(1,2) && loadgenLane(2,2) && !loadgenLane(0,2) && !loadgenLane(3,2) && loadgenLane(1,1) && !loadgenLane(3,1));
+    assert(!loadgenLane(0,4) && loadgenLane(1,4) && loadgenLane(2,4) && loadgenLane(3,4) && !loadgenLane(4,4));
+    // DW4: the firmware's whole word, loadgen re-derived for the active lane count (the donor clears it).
+    assert(phyInherit(fw,4,0,0x80007038,2)==0x00120345 && phyInherit(fw,4,1,0x00007038,2)==0x80120355);
+    assert(phyInherit(fw,4,2,0x00007038,2)==0x80120365 && phyInherit(fw,4,3,0x80287038,2)==0x00120375);
+    assert(phyInherit(fw,4,3,0x00287038,4)==0x80120375 && phyInherit(fw,4,0,0x80007038,4)==0x00120345 && phyInherit(fw,4,4,0x80007038,4)==0x00120345);
     assert(phyInherit(fw,5,0,0x00390030)==0x20080030 && phyInherit(fw,5,4,0x80390030)==0xA0080030 && phyInherit(fw,5,3,0x80390030)==0xA0080033);
     assert(phyInherit(fw,7,0,0x00FFFFFF)==0x7AFFFFFF && phyInherit(fw,7,2,0x81000000)==0xFA000000);
     return 0;

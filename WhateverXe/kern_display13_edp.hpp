@@ -40,11 +40,17 @@ inline bool phyTuningRegister(uint64_t reg,unsigned &dword,unsigned &lane) {
     if(block==6)lane=4;else if(block>=8 && block<=0xB)lane=block-8;else return false;
     return true;
 }
-inline uint32_t phyInherit(const PHYTuning &fw,unsigned dword,unsigned lane,uint32_t value) {
+// LOADGEN_SELECT (DW4 bit 31) at or below 6 GHz: lanes 1..3 with four lanes, lanes 1 and 2 with
+// one or two (Linux icl_combo_phy_loadgen_select). The donor clears it on the active lanes when
+// it ORs its coefficient operand into DW4, so it is re-derived here on every DW4 write.
+inline bool loadgenLane(unsigned lane,unsigned lanes) {return lane<4 && (lanes==4 ? lane>=1 : (lane==1 || lane==2));}
+// The firmware's word, with the driver's training-enable toggle on DW5 and the loadgen rule on DW4.
+// A group write (lane 4) takes lane 0's word; the caller expands the other lanes itself.
+inline uint32_t phyInherit(const PHYTuning &fw,unsigned dword,unsigned lane,uint32_t value,unsigned lanes=2) {
     const auto l=lane<4 ? lane : 0;
     switch(dword) {
     case 2: return fw.dw2[l];
-    case 4: return (value&~0x3FFFFU)|(fw.dw4[l]&0x3FFFFU);
+    case 4: return (fw.dw4[l]&0x7FFFFFFFU)|(loadgenLane(lane,lanes) ? 0x80000000U : 0U);
     case 5: return (fw.dw5[l]&0x7FFFFFFFU)|(value&0x80000000U);
     case 7: return (value&~0x7F000000U)|(fw.dw7[l]&0x7F000000U);
     }

@@ -3442,7 +3442,8 @@ struct AlderLakeNEDPTrace {
     struct {uint64_t ticks,count,trigger;Entry entries[Keep];} snapshot[Disables] {};
 };
 static AlderLakeNEDPTrace adlnEDPTraceRing;
-// flags: 1 write, 2 remapped, 4 value changed by the hook, 8 plugin event (reg 0xFFFF00xx).
+// flags: 1 write, 2 remapped, 4 value changed by the hook, 8 plugin event (reg 0xFFFF00xx),
+// 16 extra write issued by the hook, 32 a group tuning write redirected to lane 0.
 static void adlnEDPTrace(bool write,uint64_t reg,uint64_t value,uint64_t rva,uint32_t flags) {
     auto &t=adlnEDPTraceRing;if(write)flags|=1;
     const auto n=__atomic_load_n(&t.next,__ATOMIC_ACQUIRE);
@@ -5156,7 +5157,7 @@ static uint32_t adlnEDPClockSelect(uint32_t value,uint64_t rva) {
 // The firmware's combo PHY A tuning, read at the boot handoff before the native driver's
 // first training, and the overrides applied to the driver's later tuning writes.
 static Display13EDP::PHYTuning adlnPHYBoot;
-static uint64_t adlnPHYBootRecord[32];
+static uint64_t adlnPHYBootRecord[40];
 struct AlderLakeNPHYOverride {volatile uint64_t count {};uint64_t first[8][3] {};};
 static AlderLakeNPHYOverride adlnPHYOverride;
 template<class IO> static void adlnPHYBootSnapshot(IO &io) {
@@ -5170,17 +5171,38 @@ template<class IO> static void adlnPHYBootSnapshot(IO &io) {
     take(PHYA+0x804,17);take(PHYA+0x014,18);take(PHYA+0x028,19);take(PHYA+0x030,20);
     take(PHYA+0x100,21);take(PHYA+0x104,22);take(PHYA+0x10C,23);take(PHYA+0x120,24);take(PHYA+0x124,25);take(PHYA+0x128,26);
     take(0x64000,27);take(0x60540,28);
+    for(unsigned l=0;l<4;++l)take(PHYA+0x8A0+0x100*l,32+l); // TX_DW8 (ODCC clock/divider), for the record
     adlnPHYBoot.valid=valid;adlnPHYBootRecord[31]=valid;
     IORegistryEntry::getRegistryRoot()->setProperty("N97FBPHYBoot",adlnPHYBootRecord,sizeof(adlnPHYBootRecord));
 }
-static uint32_t adlnPHYInherit(uint64_t reg,uint32_t value) {
-    unsigned dword=0,lane=0;
-    if(!adlnPHYBoot.valid || display13FBPower.bridge.bootPort!=0 || !Display13EDP::phyTuningRegister(reg,dword,lane))return value;
-    const auto inherited=Display13EDP::phyInherit(adlnPHYBoot,dword,lane,value);
-    if(inherited==value)return value;
-    const auto n=__atomic_fetch_add(&adlnPHYOverride.count,1,__ATOMIC_RELAXED);
-    if(n<8) {adlnPHYOverride.first[n][0]=reg;adlnPHYOverride.first[n][1]=value;adlnPHYOverride.first[n][2]=inherited;}
-    return inherited;
+// A tuning write under the override: the main write (a group write becomes lane 0's word) and
+// the extra lane writes to issue first: the other three lanes of a group write with their own
+// firmware words, and, on each DW2 write (once per training round), DW7 of every lane, which the
+// donor never programs, so N_SCALAR does not depend on surviving the port power cycle.
+struct AlderLakeNPHYPlan {uint64_t reg {};uint32_t value {};unsigned extra {};uint64_t extraReg[8] {};uint32_t extraValue[8] {};bool redirected {};};
+static bool adlnPHYPlanWrite(uint64_t reg,uint32_t value,AlderLakeNPHYPlan &p) {
+    using namespace Display13EDP;unsigned dword=0,lane=0;
+    auto &c=display13FBPower;
+    if(!adlnPHYBoot.valid || c.bridge.bootPort!=0 || !c.map || !phyTuningRegister(reg,dword,lane))return false;
+    Display13FBDBUFIO readout {c.map};
+    const auto buf=readout.read(0x64000);const auto width=buf==UINT32_MAX ? 1U : (buf>>1)&7U;
+    const unsigned lanes=width==3 ? 4 : width==1 ? 2 : 1;
+    p.extra=0;p.redirected=false;
+    const auto low=dword==2 ? 0x88U : dword==4 ? 0x90U : dword==5 ? 0x94U : 0x9CU;
+    if(lane<4) {p.reg=reg;p.value=phyInherit(adlnPHYBoot,dword,lane,value,lanes);}
+    else {
+        for(unsigned l=1;l<4;++l) {p.extraReg[p.extra]=PHYA+0x800+low+0x100*l;p.extraValue[p.extra]=phyInherit(adlnPHYBoot,dword,l,value,lanes);++p.extra;}
+        p.reg=PHYA+0x800+low;p.value=phyInherit(adlnPHYBoot,dword,0,value,lanes);p.redirected=true;
+    }
+    if(dword==2 && (lane==0 || lane==4))for(unsigned l=0;l<4;++l) {
+        const auto r7=PHYA+0x89C+0x100*l;const auto current=readout.read(r7);
+        p.extraReg[p.extra]=r7;p.extraValue[p.extra]=phyInherit(adlnPHYBoot,7,l,current==UINT32_MAX ? adlnPHYBoot.dw7[l] : current,lanes);++p.extra;
+    }
+    if(p.value!=value || p.redirected) {
+        const auto n=__atomic_fetch_add(&adlnPHYOverride.count,1,__ATOMIC_RELAXED);
+        if(n<8) {adlnPHYOverride.first[n][0]=reg;adlnPHYOverride.first[n][1]=value;adlnPHYOverride.first[n][2]=p.value|(uint64_t(lanes)<<32);}
+    }
+    return true;
 }
 static bool adlnEDPTraceSerialize(void *,void *,OSSerialize *serializer);
 static void adlnPublishEDPRemap() {
@@ -5492,8 +5514,15 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
         const auto original=reg;const auto requested=value;
         reg=adlnEDPRemapRegister(true,reg,value,rva);
         if(Display13EDP::clockSelectRegister(reg,0))value=adlnEDPClockSelect(value,rva);
-        value=adlnPHYInherit(reg,value);
-        adlnEDPTrace(true,reg,value,rva,(reg!=original ? 2 : 0)|(value!=requested ? 4 : 0));
+        uint32_t phyFlags=0;AlderLakeNPHYPlan phy;
+        if(adlnPHYPlanWrite(reg,value,phy)) {
+            for(unsigned i=0;i<phy.extra;++i) {
+                FunctionCast(wrapDisplay13GMBusWrite,callbackXE->orgDisplay13GMBusWrite)(access,phy.extraReg[i],phy.extraValue[i]);
+                adlnEDPTrace(true,phy.extraReg[i],phy.extraValue[i],rva,16);
+            }
+            reg=phy.reg;value=phy.value;phyFlags=phy.redirected ? 32 : 0;
+        }
+        adlnEDPTrace(true,reg,value,rva,(reg!=original && !phyFlags ? 2 : 0)|(value!=requested ? 4 : 0)|phyFlags);
         if(reg==0x70180 && !(value&0x80000000U))adlnEDPTraceDisable(rva);
     }
     // This route also carries direct native cursor writes, outside the WM
@@ -5914,6 +5943,19 @@ void XE::wrapAlderLakeNSetupWorkLoop(IOService *controller,IOWorkLoop *workLoop)
 		if(valid) {
 			if(!c.bridge.bootAdopted)result=c.bridge.adoptBootPath(reinterpret_cast<uintptr_t>(path),0,c.bridge.bootPort);
 			else if(c.bridge.bootPath==reinterpret_cast<uintptr_t>(path))result.status=Display13Power::Status::Complete;
+			// The donor's ordinary mode set takes the bandwidth-minimum lane count (two here). Its
+			// own port flag keeps the sink's capability count instead: four lanes, the firmware's
+			// proven link, so the inherited PHY tuning is applied to the configuration it was made for.
+			if(result.status==Display13Power::Status::Complete && xelpPanelPolicy()) {
+				auto lanePort=Display13FBMemory::field<OSObject *>(path,0x3648);
+				if(lanePort && lanePort->getMetaClass()->getClassSize()>=0x5C0) {
+					auto &keep=*(reinterpret_cast<uint8_t *>(lanePort)+0x117);
+					const uint64_t lanes[6] {1,keep,Display13FBMemory::field<uint8_t>(lanePort,0x11),Display13FBMemory::field<uint8_t>(lanePort,0x116),
+						Display13FBMemory::field<uint32_t>(lanePort,0x124),Display13FBMemory::field<uint32_t>(lanePort,0x128)};
+					keep=1;
+					IORegistryEntry::getRegistryRoot()->setProperty("N97FBLanePolicy",lanes,sizeof(lanes));
+				}
+			}
 			if(result.status==Display13Power::Status::Complete &&
 				!Display13Power::publishObject(c.bridge,c.power,0x80,controller,0x1C20))result.status=Display13Power::Status::NotReady;
 		}

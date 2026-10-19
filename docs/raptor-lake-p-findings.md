@@ -353,3 +353,18 @@ PHY A tuning (DW2, DW4, DW5, DW7 for each lane, plus PCS, CL and COMP words) int
 replaces the driver's writes to those four words with the firmware's: DW2 whole, DW4 bits 17:0, DW5 all but the
 training-enable bit, DW7 bits 30:24. Lane power, loadgen and the sequence stay the driver's. Substitutions are counted in
 `N97FBPHYOverride` and flagged in the trace. Pending hardware validation.
+
+### Correction and revision before the next boot (2026-10-19)
+
+A closer look at the donor's signal-level routine corrects the previous note: its DW4 write ORs a small table operand
+into the register's existing bits 17:0, so the 0x7038 coefficients seen in the trace were the firmware's, not a table's,
+and the same write clears bits 31:18 of the active lanes, dropping LOADGEN on lanes 0 and 1. Its DW2 (swing select 6,
+RCOMP 0x98) and DW5 (scaling mode 6, TAP3 enabled) differ from Linux's values for this PHY (swing select 4; scaling 2,
+TAP3 disabled), and it never writes DW7. Two lanes come from a bandwidth-minimum rule, with a port flag that keeps the
+sink's capability count instead.
+
+Revised experiment: DW4 takes the firmware's whole word with LOADGEN re-derived for the active lane count (lanes 1 to 3
+with four lanes, lanes 1 and 2 with fewer); DW7 is written for every lane on each training round with the firmware's
+N_SCALAR; group writes are expanded into per-lane firmware words; TX_DW8 joins the handoff record; and the port flag is
+set at boot-path adoption so the driver keeps four lanes, the firmware's proven link, computing DPCD, DDI width, lane
+power, loadgen and M/N for that count itself (`N97FBLanePolicy`). Pending hardware validation.
