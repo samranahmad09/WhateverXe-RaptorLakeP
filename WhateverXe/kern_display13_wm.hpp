@@ -306,7 +306,15 @@ inline bool clockFits(const Snapshot &s,uint64_t nativeHz) {
 struct Latch {
     Status status {Status::Unavailable};
     uint32_t frameBefore {},frameAfter {},waitUs {},budgetUs {},lastReg {},expected {},observed {};
+    uint32_t pipe {3},wrapped {}; // wrapped: this latch counted a scanline wrap as its new frame.
 };
+// Retirement evidence from this pipe's qualified latch: forward frame-counter progress, or the
+// scanline wrap the latch observed while the counter stood still. Display13DBUF::retire takes
+// the wrap explicitly; nobody fabricates a counter step, and a backward counter is never evidence.
+inline bool retireEvidence(const Latch &l,unsigned pipe) {
+    return l.status==Status::Complete && l.pipe==pipe && uint32_t(l.frameAfter-l.frameBefore)<0x80000000U &&
+        (l.frameAfter!=l.frameBefore || l.wrapped);
+}
 template<class IO> bool compare(IO &io,Latch &r,uint32_t reg,uint32_t expected) {
     if(!io.readable(reg)) {r.status=Status::Unavailable;return false;}
     r.lastReg=reg;r.expected=expected;r.observed=io.read(reg);
@@ -330,7 +338,7 @@ template<class IO> bool verifyWM(IO &io,Latch &r,const Plan &p,bool cursor,bool 
 template<class IO> Latch latch(IO &io,const Snapshot &s) {
     Latch r;
     if(s.pipeIndex>=3) {r.status=Status::Input;return r;}
-    const uint32_t bank=s.pipeIndex*0x1000;
+    const uint32_t bank=s.pipeIndex*0x1000;r.pipe=s.pipeIndex;
     if(!s.primary || s.primary->status!=Status::Complete || !s.primary->normal[0].enable ||
        !s.primary->sagv.enable || !clockFits(s,s.nativeClockHz) || !s.pipeLineTime || s.pipeLineTime>511 ||
        (s.cursorActive && (!s.cursor || s.cursor->status!=Status::Complete || !s.cursor->sagv.enable)))return r;
@@ -400,7 +408,12 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
         if(scan) {
             const auto line=io.read(0x70000+bank)&0xFFFFF;
             if(line!=scanPrev)scanMoved=true;
-            if(line<scanPrev)scanWrapped=true;
+            if(line<scanPrev) {
+                // The counter may step after the wrap: read it once more so that a latch completed
+                // on the wrap carries the stepped counter whenever the hardware shows it.
+                scanWrapped=true;r.frameAfter=io.read(0x70040+bank);
+                if(r.frameAfter==UINT32_MAX) {r.status=Status::Readback;return r;}
+            }
             scanPrev=line;
         }
         if(r.frameAfter!=r.frameBefore || scanWrapped) {
@@ -412,7 +425,7 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
             // mismatch at the existing deadline remains a Readback failure.
             const bool live=compare(io,r,0x701AC+bank,s.primarySurface) &&
                 (!s.cursorActive || compare(io,r,0x700AC+bank,s.cursorSurface));
-            if(live) {r.status=Status::Complete;return r;}
+            if(live) {r.wrapped=scanWrapped;r.status=Status::Complete;return r;}
             if(r.waitUs>=r.budgetUs)return r;
         }
         if(r.waitUs>=r.budgetUs) {

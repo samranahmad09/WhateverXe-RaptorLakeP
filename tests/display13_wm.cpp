@@ -1,4 +1,5 @@
 #include "kern_display13_wm.hpp"
+#include "kern_display13_dbuf.hpp"
 #include <assert.h>
 #include <map>
 #include <stdio.h>
@@ -37,7 +38,7 @@ struct DisplayIO {
 };
 struct LatchIO : DisplayIO {
     uint64_t elapsed {},clock {614400000};
-    bool frozen {},losePower {},oldSurface {},changeClock {},resetFrame {},advanceForeign {},scanning {},scanWrap {};
+    bool frozen {},losePower {},oldSurface {},changeClock {},resetFrame {},advanceForeign {},scanning {},scanWrap {},stepOnWrap {};
     uint32_t frameAdvance {1},surface {0x100000},cursorSurface {0x200000};
     unsigned pipeIndex {};
     void moveToPipe(unsigned index) {
@@ -75,7 +76,11 @@ struct LatchIO : DisplayIO {
     uint64_t nowUs() {return elapsed;}
     void delayUs(unsigned us) {
         const auto before=elapsed;elapsed+=us;
-        if(scanning) {auto &line=regs[0x70000+pipeIndex*0x1000];line=(line+(scanWrap ? 400 : 1))%1158;}
+        if(scanning) {
+            auto &line=regs[0x70000+pipeIndex*0x1000];const auto next=(line+(scanWrap ? 400 : 1))%1158;
+            if(stepOnWrap && next<line)++regs[0x70040+pipeIndex*0x1000];
+            line=next;
+        }
         if(advanceForeign && pipeIndex)++regs[0x70040];
         if(before<2000 && elapsed>=2000) {
             const auto bank=pipeIndex*0x1000;
@@ -332,6 +337,53 @@ int main() {
     LatchIO wrapping(p);wrapping.frozen=true;wrapping.scanning=true;wrapping.scanWrap=true;
     const auto wrapProof=latch(wrapping,wrapping.snapshot(p));
     assert(wrapProof.status==Status::Complete && wrapProof.frameAfter==wrapProof.frameBefore && wrapProof.waitUs==3000);
+    // The wrap is the latch's retirement evidence (DBUF retire takes it explicitly). A latch without a
+    // counter step or a wrap, another pipe's latch, or a backward counter is none.
+    assert(wrapProof.wrapped && wrapProof.pipe==0 && retireEvidence(wrapProof,0) && !retireEvidence(wrapProof,1));
+    assert(!retireEvidence(stalledProof,0) && !retireEvidence(timeoutProof,0));
+    LatchIO counted(p);
+    const auto countedProof=latch(counted,counted.snapshot(p));
+    assert(countedProof.status==Status::Complete && countedProof.frameAfter==countedProof.frameBefore+1 && !countedProof.wrapped && retireEvidence(countedProof,0));
+    auto backward=countedProof;backward.frameAfter=backward.frameBefore-1;backward.wrapped=1;
+    assert(!retireEvidence(backward,0));
+    // A counter that steps right after the wrap is read again: the completed latch carries the step.
+    LatchIO stepped(p);stepped.frozen=true;stepped.scanning=true;stepped.scanWrap=true;stepped.stepOnWrap=true;
+    const auto steppedProof=latch(stepped,stepped.snapshot(p));
+    assert(steppedProof.status==Status::Complete && steppedProof.wrapped && steppedProof.frameAfter==steppedProof.frameBefore+1);
+    // Integrated: the same IO carries a DBUF state whose previous S1 waits for a qualified new-frame
+    // latch of the shrunk allocation. A stationary scanline retires nothing; a wrap with a frozen
+    // counter retires it; the same counters without the proof, or a DDB mismatch, are refused.
+    {
+        struct RetireIO : LatchIO {
+            RetireIO(const Plan &p) : LatchIO(p) {
+                for(unsigned i=0;i<4;++i)regs[Display13DBUF::regs[i]]=0x40C000|(i==0 ? Display13DBUF::Request|Display13DBUF::On : 0);
+                regs[0x4438C]=0x1C000700;regs[0x7027C]=0x03FF0000;
+            }
+            void write(uint32_t reg,uint32_t value) {
+                for(unsigned i=0;i<4;++i)if(reg==Display13DBUF::regs[i]) {regs[reg]=(value&~Display13DBUF::On)|((value&Display13DBUF::Request)>>1);return;}
+                LatchIO::write(reg,value);
+            }
+        };
+        using DS=Display13DBUF::Status;
+        RetireIO io(p);Display13DBUF::State s;
+        assert(Display13DBUF::begin(io,s)==DS::Complete && s.initialRequests==1 && s.pipe[0].consumers==1);
+        assert(Display13DBUF::preparePrimary(io,s,0,2047)==DS::Complete && s.owned==2);
+        io.regs[0x7027C]=0x07FF0000;assert(Display13DBUF::finishPrimary(io,s)==DS::Complete);
+        assert(Display13DBUF::preparePrimary(io,s,0,1023)==DS::Complete);
+        io.regs[0x7027C]=0x03FF0000;assert(Display13DBUF::finishPrimary(io,s)==DS::Complete && s.pipe[0].unretired==3 && !s.updating);
+        io.frozen=true;io.writes.clear();
+        const auto stalled=latch(io,io.snapshot(p));
+        assert(stalled.status==Status::Stalled && !retireEvidence(stalled,0) && io.writes.empty() && s.pipe[0].unretired==3);
+        io.scanning=true;io.scanWrap=true;
+        const auto wrapped=latch(io,io.snapshot(p));
+        assert(wrapped.status==Status::Complete && wrapped.wrapped && wrapped.frameAfter==wrapped.frameBefore && retireEvidence(wrapped,0) && !retireEvidence(wrapped,1));
+        {auto state=s;auto bare=io;
+         assert(Display13DBUF::retire(bare,state,bare.regs[0x7027C],0,wrapped.frameBefore,wrapped.frameAfter,0)==DS::Conflict && state.faulted && state.pipe[0].unretired==3 && bare.writes.empty());}
+        {auto state=s;auto ddb=io;ddb.regs[0x7027C]=0x07FF0000;
+         assert(Display13DBUF::retire(ddb,state,0x03FF0000,0,wrapped.frameBefore,wrapped.frameAfter,0,wrapped.wrapped!=0)==DS::Conflict && state.faulted && state.pipe[0].unretired==3 && ddb.writes.empty());}
+        assert(Display13DBUF::retire(io,s,io.regs[0x7027C],io.regs[0x7017C],wrapped.frameBefore,wrapped.frameAfter,0,wrapped.wrapped!=0)==DS::Complete);
+        assert(!s.pipe[0].unretired && !s.owned && s.requested==1 && !s.faulted && !(io.regs[Display13DBUF::regs[1]]&Display13DBUF::Request));
+    }
     LatchIO staleSurface(p);staleSurface.oldSurface=true;
     assert(latch(staleSurface,staleSurface.snapshot(p)).status==Status::Readback);
     LatchIO poweredOff(p);poweredOff.losePower=true;

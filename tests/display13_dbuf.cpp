@@ -148,6 +148,14 @@ int main() {
     assert(retire(retirement,noProgress,0x03FF0000,0,10,10)==Status::Conflict && noProgress.unretired==3 && rt.owned==2);
     auto wrongRange=rt;
     assert(retire(retirement,wrongRange,0x07FF0000,0,10,11)==Status::Conflict && wrongRange.unretired==3);
+    // Equal counters retire only with the latch's scanline-wrap proof; a backward counter or a wrong
+    // range never does, proof or not.
+    {auto io=retirement;auto wrapped=rt;
+     assert(retire(io,wrapped,0x03FF0000,0,10,10,0,true)==Status::Complete && !wrapped.unretired && !wrapped.owned && wrapped.requested==1);}
+    {auto io=retirement;auto backward=rt;const auto w=io.writes;
+     assert(retire(io,backward,0x03FF0000,0,10,9,0,true)==Status::Conflict && backward.faulted && backward.unretired==3 && io.writes==w);}
+    {auto io=retirement;auto wrongRangeWrapped=rt;const auto w=io.writes;
+     assert(retire(io,wrongRangeWrapped,0x07FF0000,0,10,10,0,true)==Status::Conflict && wrongRangeWrapped.unretired==3 && io.writes==w);}
     assert(retire(retirement,rt,0x03FF0000,0,0xFFFFFFFE,0)==Status::Complete && !rt.unretired && !rt.owned && rt.requested==1);
     IO cursor;State cs;assert(begin(cursor,cs)==Status::Complete);
     assert(prepareCursor(cursor,cs)==Status::Range && !cursor.writes); // GOP primary overlaps native cursor reservation.

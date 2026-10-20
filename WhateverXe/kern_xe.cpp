@@ -8462,7 +8462,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 		IORegistryEntry::getRegistryRoot()->setProperty(key,color,sizeof(color));
 	}
 	if(!owner) {if(mutex)IORecursiveLockUnlock(mutex);return;}
-	uint64_t record[16] {};IOLockLock(c.lock);
+	uint64_t record[17] {};IOLockLock(c.lock);
 	Display13WM::Latch result;Display13DBUF::Status retired=Display13DBUF::Status::Unavailable;
 	const auto pending=c.pipe[pipe].wmPending,old=c.dbuf.unretired;
 	Display13FBClockIO clockIO {c.map};const auto actualHz=Display13Clock::read(clockIO).nativeHz();
@@ -8474,7 +8474,10 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 		Display13FBDBUFIO readout {c.map};
 		const auto primary=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].primary);
 		const auto cursor=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].cursor);
-		retired=Display13DBUF::retire(readout,c.dbuf,primary,cursor,result.frameBefore,result.frameAfter,pipe);
+		// The latch's own evidence decides retirement: forward counter progress, or the scanline wrap it
+		// counted as the new frame while the counter stood still (the first picture's 48 s refusal).
+		if(Display13WM::retireEvidence(result,pipe))
+			retired=Display13DBUF::retire(readout,c.dbuf,primary,cursor,result.frameBefore,result.frameAfter,pipe,result.wrapped!=0);
 		if(retired==Display13DBUF::Status::Complete) {c.pipe[pipe].watermarkClockHz=actualHz;c.pipe[pipe].wmPending=0;}
 		else {	// A verified latch whose DBUF retire refused: named by the DDB register and the retire status.
 			result.status=Display13WM::Status::Conflict;result.lastReg=0x7027C+0x1000*pipe;
@@ -8490,7 +8493,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	record[4]=result.frameBefore;record[5]=result.frameAfter;record[6]=result.waitUs;record[7]=result.budgetUs;
 	record[8]=result.lastReg;record[9]=result.expected;record[10]=result.observed;
 	record[11]=static_cast<uint32_t>(retired);record[12]=old;record[13]=c.dbuf.unretired;
-	record[14]=c.dbuf.owned;record[15]=c.pipe[pipe].watermarkClockHz;
+	record[14]=c.dbuf.owned;record[15]=c.pipe[pipe].watermarkClockHz;record[16]=result.wrapped|(uint64_t(result.pipe)<<8);
 	adlnEDPTrace(false,0xFFFF0001,static_cast<uint32_t>(result.status)|(pipe<<8),c.sequence,8);
 	if(result.status!=Display13WM::Status::Complete) {
 		// The pipe's timing, clock source and link ratio at this arm, kept from the first

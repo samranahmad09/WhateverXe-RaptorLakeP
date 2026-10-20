@@ -505,14 +505,17 @@ template<class IO> Status finishCursor(IO &io,State &s,unsigned index=0) {
     a.cursor=next;a.consumers=slices(a.primary)|slices(a.cursor);s.updating&=~bit;syncMasks(s);return Status::Complete;
 }
 // Caller passes HARDWARE-relative raw entries and a qualified WM/live latch
-// for this exact pipe. One
+// for this exact pipe: forward frame-counter progress, or the latch's own
+// scanline-wrap proof with the counter unchanged (wrapped). A backward
+// counter is refused with or without it. One
 // pipe's ACK never retires another pipe's old/pending allocation or slice.
 template<class IO> Status retire(IO &io,State &s,uint32_t primaryRaw,uint32_t cursorRaw,
-                                 uint32_t frameBefore,uint32_t frameAfter,unsigned index=0) {
+                                 uint32_t frameBefore,uint32_t frameAfter,unsigned index=0,bool wrapped=false) {
     if(s.faulted)return Status::Faulted;
     if(!s.begun || index>=3 || !(s.selected&(1U<<index)))return Status::Unavailable;
     const auto bit=1U<<index,bank=0x1000*index;auto &a=s.pipe[index];
-    if((s.updating&bit) || frameBefore==frameAfter || uint32_t(frameAfter-frameBefore)>=0x80000000U)return fail(s,Status::Conflict);
+    const bool advanced=uint32_t(frameAfter-frameBefore)<0x80000000U && (frameAfter!=frameBefore || wrapped);
+    if((s.updating&bit) || !advanced)return fail(s,Status::Conflict);
     if(!Display13FBIRQ::powered(io.read(0x45404),index))return fail(s,Status::Power);
     if(primaryRaw==UINT32_MAX || cursorRaw==UINT32_MAX || primaryRaw!=hardwareRaw(s,index,a.primary) || cursorRaw!=hardwareRaw(s,index,a.cursor) || io.read(0x7027C+bank)!=primaryRaw ||
        io.read(0x7017C+bank)!=cursorRaw || io.read(0x4438C)!=s.mbus)return fail(s,Status::Conflict);
