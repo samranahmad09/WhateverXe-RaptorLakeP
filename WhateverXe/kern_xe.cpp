@@ -28,6 +28,7 @@
 #include "kern_display13_cursor.hpp"
 #include "kern_display13_dbuf.hpp"
 #include "kern_display13_wm.hpp"
+#include "kern_display13_backlight.hpp"
 #include "kern_tgl_training_scope.hpp"
 #include "kern_tgl_port_map.hpp"
 #include "kern_tgl_pcode_gate.hpp"
@@ -8370,6 +8371,27 @@ static bool adlnObserveScanoutPixels(unsigned pipe,uint64_t (&q)[88]) {
     return true;
 }
 
+// R4 probe (opt-in: -wex-rplp-pwm=<10..100>, Raptor Lake-P only): one write of the backlight PWM duty from the
+// firmware-enabled controller's own period, at the first completed watermark retire of the desktop. It answers
+// whether the display engine's PWM pin reaches this panel; Linux reports the embedded controller owns it.
+static struct {volatile uint64_t attempted,applied,percent,ctl,freq,before,written,after;} adlnBacklight;
+static void adlnBacklightProbe(Display13FBPowerContext &c) {
+	auto &b=adlnBacklight;if(b.attempted || !c.map || c.map->getLength()!=0x1000000 || !c.map->getVirtualAddress())return;
+	if(xelpSelectedProfile.family!=XELP::Family::RaptorLakeP)return;
+	uint32_t percent=0;if(!PE_parse_boot_argn("wex-rplp-pwm",&percent,sizeof(percent)))return;
+	b.attempted=1;b.percent=percent;
+	const auto base=c.map->getVirtualAddress();
+	auto reg=[&](uint32_t offset)->volatile uint32_t & {return *reinterpret_cast<volatile uint32_t *>(base+offset);};
+	b.ctl=reg(Display13Backlight::CTL1);b.freq=reg(Display13Backlight::FREQ1);b.before=reg(Display13Backlight::DUTY1);
+	const auto plan=Display13Backlight::plan(static_cast<uint32_t>(b.ctl),static_cast<uint32_t>(b.freq),percent);
+	if(!plan.valid)return;
+	reg(Display13Backlight::DUTY1)=plan.duty;b.written=plan.duty;b.after=reg(Display13Backlight::DUTY1);b.applied=b.after==plan.duty;
+}
+static void adlnPublishBacklightProbe() {
+	auto &b=adlnBacklight;if(!b.attempted)return;
+	uint64_t r[9] {1,b.attempted,b.applied,b.percent,b.ctl,b.freq,b.before,b.written,b.after};
+	IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPBacklightProbe",r,sizeof(r));
+}
 void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	auto &c=display13FBPower;bool owner=false;
 	const auto pipe=Display13FBMemory::boundPipe(c.pipe,fb);
@@ -8496,7 +8518,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 		// counted as the new frame while the counter stood still (the first picture's 48 s refusal).
 		if(Display13WM::retireEvidence(result,pipe))
 			retired=Display13DBUF::retire(readout,c.dbuf,primary,cursor,result.frameBefore,result.frameAfter,pipe,result.wrapped!=0);
-		if(retired==Display13DBUF::Status::Complete) {c.pipe[pipe].watermarkClockHz=actualHz;c.pipe[pipe].wmPending=0;}
+		if(retired==Display13DBUF::Status::Complete) {c.pipe[pipe].watermarkClockHz=actualHz;c.pipe[pipe].wmPending=0;adlnBacklightProbe(c);}
 		else {	// A verified latch whose DBUF retire refused: named by the DDB register and the retire status.
 			result.status=Display13WM::Status::Conflict;result.lastReg=0x7027C+0x1000*pipe;
 			result.expected=static_cast<uint32_t>(Display13DBUF::Status::Complete);result.observed=static_cast<uint32_t>(retired);
@@ -8542,6 +8564,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
     uint64_t pixels[88] {};
     const bool pixelsRecorded=result.status==Display13WM::Status::Complete && adlnObserveScanoutPixels(pipe,pixels);
 	IOLockUnlock(c.lock);IORecursiveLockUnlock(mutex);
+	adlnPublishBacklightProbe();
     if(pixelsRecorded) {
         char key[64];snprintf(key,sizeof(key),"N97FBScanoutPixelsPipe%uSample%u",pipe,static_cast<unsigned>(pixels[1]));
         IORegistryEntry::getRegistryRoot()->setProperty(key,pixels,sizeof(pixels));
