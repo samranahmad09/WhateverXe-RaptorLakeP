@@ -6,12 +6,15 @@ A fork of [WhateverXe](https://github.com/b00t0x/WhateverXe) working toward macO
 **Raptor Lake-P** integrated graphics: the UHD and Iris Xe GPUs in 13th-generation Core H, P and U laptop
 processors, including the laptop's internal (eDP) panel.
 
-> **Status: the internal panel lights natively; no acceleration yet.**
+> **Status: the internal panel lights natively and the GPU accelerator runs on it (Metal); validation continues.**
 > - Since 2026-10-20 the native Display 13 framebuffer path drives the reference machine's eDP panel (link
->   training, 60 Hz mode, cursor, WindowServer desktop, software rendered) with the `-wex-rplp-gt` boot
->   argument. The GPU accelerator does not start yet; that is the next milestone.
-> - The `rplp-accel` branch merges upstream 0.3.0 (one binary for Big Sur through Tahoe; the MMIO cache bridges
->   on the 20G1443 kernel bound to the BAR page range) as the base for the accelerator work. Not booted yet.
+>   training, 60 Hz mode, cursor, WindowServer desktop) with the `-wex-rplp-gt` boot argument, and the native
+>   accelerator starts on it: the Metal, OpenGL and video plugins attach, WindowServer renders through the GPU,
+>   and About This Mac reports 1536 MB for the iGPU.
+> - That build is `rplp-accel`: upstream 0.3.0 merged (one binary for Big Sur through Tahoe; the MMIO cache
+>   bridges on the 20G1443 kernel bound to the BAR page range) plus the fork's panel path. `main` follows it.
+> - Not validated yet: Metal workloads beyond the desktop, sleep/wake, brightness control, 144 Hz, external
+>   outputs. The findings describe what the first accelerated boot showed.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
 > - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.
@@ -53,10 +56,10 @@ every hardware rule.
 | Stage | Goal | Done when | Status |
 | --- | --- | --- | --- |
 | R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Done: on the reference machine the macOS readout matches the Linux capture (all five fuses, 64 EU, 4 DSS) |
-| R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | In progress: the BCS self-test (`-wex-rplp-gpu`) passes on the reference machine. The accelerator start depends on R3, because the donor's accelerator registers only after a Display 13 framebuffer controller starts |
-| R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Experimental implementation; native desktop operation is not yet validated |
+| R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | Done on the reference machine: the BCS self-test passes and, since 2026-10-20, the native accelerator starts on the internal panel (branch `rplp-accel`) |
+| R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Done on the reference machine (2026-10-20): native desktop on the panel at 1920x1080, 60 Hz. Power sequencing, backlight and retraining are R4 |
 | R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
-| R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | Not started |
+| R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | In progress: WindowServer is accelerated on the panel since 2026-10-20; stability, sleep/wake and workloads are unverified |
 
 The hardware inputs for R2-R4 are measured on the reference machine and listed in
 [docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md):
@@ -287,7 +290,7 @@ Alder Lake-N / Twin Lake.
 | `-wex-noaccel` | Tiger Lake framebuffer-only mode; blocks accelerator probing. |
 | `-wex-rplp-observe` | Raptor Lake-P only: publish the read-only R1 diagnostic described above. The GPU stays unsupported. |
 | `-wex-rplp-gpu` | Raptor Lake-P only, with `-wex-rplp-observe`: run the one-shot R2 BCS self-test described above. The GPU stays unsupported. |
-| `-wex-rplp-gt` | Raptor Lake-P A7A8 revision 4 only: admit the device to the in-development backend (native panel path; no acceleration yet). |
+| `-wex-rplp-gt` | Raptor Lake-P A7A8 revision 4 only: admit the device to the in-development backend (native panel path and accelerator). |
 
 ### Tested features and known issues
 

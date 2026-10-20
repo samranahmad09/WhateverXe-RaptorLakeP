@@ -457,3 +457,25 @@ unaffected but later watermark updates are refused until the cause is found.
 The accelerator does not start: its kext loads, no accelerator object is created, the native probe is blocked and native
 start is not allowed, because the strong-uncacheable MMIO mapping is reported not ready even though all nine of its
 preflight conditions pass. That is the next milestone.
+
+### Native boot: the accelerator starts (2026-10-20)
+
+The merge of upstream 0.3.0 (branch `rplp-accel`) changed the outcome of the strong-uncacheable MMIO mapping on the
+20G1443 kernel: its page-table bridges are now bound to the GPU's BAR page range, and the plugin's own check of the
+resulting mapping passes (all nine preflight conditions, then the mapping itself). On this boot the firmware placed
+the 16 MiB register BAR at 0x4010000000; an earlier boot of the same machine had it at 0x622e000000, so the plugin
+takes the address from BAR0 instead of assuming one.
+
+With that gate open the native accelerator probed the device (A7A8, revision 4), was allowed to start, and attached:
+the Metal, OpenGL and video plugin names are published, WindowServer created its device, context and command-queue
+objects, and the accelerator reports 1536 MB. The values it consumed for this GT are the measured ones: 64 EU, 8 native
+subslices, 1 slice, 6 L3 banks, 8 EU per subslice. In the 50-second capture the host scheduler recorded about 1500
+submissions and 2600 context-status events, no hang recovery ran, and the user reports a visibly smoother desktop.
+
+The display path is unchanged from the first picture: 1920x1080 at 60 Hz, pixel clock 144.52 MHz, and the watermark
+arm retired its allocation cleanly. The earlier refusal after the first picture is explained and fixed on this branch:
+the latch had completed on a scanline wrap while the frame counter stood still, and retirement refused the equal
+counters; the wrap is now an explicit retirement input, and a backward counter is still refused.
+
+Not validated yet: Metal workloads beyond the desktop, sleep/wake, panel power sequencing, brightness control, 144 Hz,
+external outputs, and whether the revision-4 workaround table the driver applies suits this GT C0 stepping.
