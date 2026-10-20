@@ -44,7 +44,8 @@ constexpr uint32_t DSBInterrupt(unsigned pipe,unsigned dsb) {return 0x70B28+0x10
 // Linux intel_dsb_regs.h: HEAD +0, TAIL +4, CTRL +8, INTERRUPT +0x28.
 // Only CTRL contains ENABLE/BUSY; a nonzero HEAD is not execution state.
 constexpr uint32_t DSBControl(unsigned pipe,unsigned dsb) {return DSBInterrupt(pipe,dsb)-0x20;}
-enum class Status : uint32_t {Unavailable,Complete,Power,ForeignIRQ,Topology,Readback,Faulted};
+enum class Status : uint32_t {Unavailable,Complete,Power,ForeignIRQ,Topology,Readback,Faulted,
+    Pending}; // The expected pipe is powered but not running yet: re-armed at the VBL configure boundary, no fault.
 struct State {
     bool begun {},enabled {},faulted {};
     Status firstFailure {Status::Unavailable};
@@ -150,6 +151,12 @@ template<class IO> Status enable(IO &io,State &s,uint32_t excludedPCH=0,uint32_t
         if(!(s.configured&(1U<<p))) {s.priorIER[p]=ier;s.priorIMR[p]=imr;}
         configured|=1U<<p;
     }
+    // A running pipe nobody expects, or a partial set, is a topology fault. No running pipe at all while
+    // the expected one is powered is the native order at a mode set or a display wake (interrupts are
+    // enabled before the pipe): nothing is written, nothing faults, and the VBL configure boundary
+    // re-arms the bank once the pipe runs.
+    if(active&~expectedPipes)return fail(io,s,Status::Topology);
+    if(!active)return Status::Pending;
     if(active!=expectedPipes)return fail(io,s,Status::Topology);
     const uint32_t excludedHPD=hpdExcluded(excludedPCH);
     constexpr uint32_t otherBanks[] {0x44448,0x44468,HPDBank,0x44488};

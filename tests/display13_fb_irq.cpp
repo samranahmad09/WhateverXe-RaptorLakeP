@@ -278,6 +278,21 @@ int main() {
     assert(enable(guc,gucState,0,NativeGT)==Status::ForeignIRQ);
     IO badGT;State badGTState;
     assert(enable(badGT,badGTState,0,1U<<30)==Status::Topology);
+    // The expected pipe powered but not running: Pending, nothing written, nothing faulted; it enables once
+    // the pipe runs. A running pipe nobody expects stays a Topology fault.
+    {IO off;State os;off.r[0x70008]=0;
+     assert(enable(off,os)==Status::Pending && !os.faulted && !os.enabled && !os.begun && off.writes.empty());
+     off.r[0x70008]=0xC0000000;assert(enable(off,os)==Status::Complete && os.enabled && os.active==1 && (off.r[Master]&Enable));}
+    {IO other;State ot;other.r[0x70008]=0;other.r[0x71008]=0xC0000000;assert(enable(other,ot)==Status::Topology && ot.faulted);}
+    // Display wake: VBL off, disable, the native re-enable arrives before the pipe is back (Pending, no
+    // fault), then the pipe runs and the VBL configure boundary re-arms: enable, then the VBL bit.
+    {IO io;State s;assert(enable(io,s)==Status::Complete && vblank(io,s,0,false)==Status::Complete && disable(io,s)==Status::Complete);
+     io.r[0x70008]=0;io.writes.clear();
+     assert(enable(io,s)==Status::Pending && !s.faulted && !s.enabled && s.begun && io.writes.empty() && !(io.r[Master]&Enable));
+     assert(vblank(io,s,0,true)!=Status::Faulted && !s.faulted);
+     io.r[0x70008]=0xC0000000;
+     assert(enable(io,s)==Status::Complete && s.enabled && s.active==1 && (io.r[Master]&Enable) && (io.r[GfxMaster]&Enable));
+     assert(vblank(io,s,0,true)==Status::Complete && (io.r[PipeIIR(0)+4]&1) && !(io.r[PipeIIR(0)-4]&1));}
     IO io;State s;assert(enable(io,s)==Status::Complete && s.enabled && s.active==1);
     assert(io.r[DDIControl]==0x3388); // Unhandled port C/D status survives enable.
     io.r[Master]|=1U<<16;io.r[PipeIIR(0)]=1|8|(1U<<21)|(1U<<22);

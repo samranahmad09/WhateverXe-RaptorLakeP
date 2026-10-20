@@ -5448,6 +5448,19 @@ bool XE::processDisplay13FramebufferIRQ(KernelPatcher &patcher,size_t index,mach
 	patcher.clearError();return swRouted;
 }
 
+// hwConfigureVBLInterrupt calls, kept as plain counters: the hook may run under the native simple lock
+// with interrupts disabled. Published as N97FBIRQVBL by the thread-context wrappers.
+static struct {volatile uint64_t calls,enables,disables,rearms,lastPipe,lastEnabled,lastStatus,lastRearmStatus;} adlnVBLConfigure;
+static void adlnNoteVBLConfigure(unsigned pipe,bool enabled,Display13FBIRQ::Status status,bool rearmed,Display13FBIRQ::Status rearm) {
+	auto &v=adlnVBLConfigure;++v.calls;if(enabled)++v.enables;else ++v.disables;
+	if(rearmed) {++v.rearms;v.lastRearmStatus=static_cast<uint32_t>(rearm);}
+	v.lastPipe=pipe;v.lastEnabled=enabled;v.lastStatus=static_cast<uint32_t>(status);
+}
+static void adlnPublishVBLConfigure() {
+	auto &v=adlnVBLConfigure;
+	uint64_t r[9] {1,v.calls,v.enables,v.disables,v.rearms,v.lastPipe,v.lastEnabled,v.lastStatus,v.lastRearmStatus};
+	IORegistryEntry::getRegistryRoot()->setProperty("N97FBIRQVBL",r,sizeof(r));
+}
 IOReturn XE::wrapDisplay13FBEnableIRQ(IOService *controller) {
 	if(!callbackXE->display13FBIRQReady || !adlnIRQOwner(controller))return kIOReturnNotReady;
 	auto &c=display13FBIRQ;uint64_t record[32] {},check[42] {3};Display13FBIRQIO io {c.base};
@@ -5487,7 +5500,7 @@ IOReturn XE::wrapDisplay13FBEnableIRQ(IOService *controller) {
 	check[39]=excluded;check[40]=io.read(0xC400C);check[41]=io.read(0xC4004);
 	const bool enabled=c.status==Display13FBIRQ::Status::Complete;
 	IOSimpleLockUnlockEnableInterrupt(c.lock,saved);
-	controller->setProperty("N97FBIRQ",record,sizeof(record));
+	controller->setProperty("N97FBIRQ",record,sizeof(record));adlnPublishVBLConfigure();
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBIRQEnableCheck",check,sizeof(check));
 	if(!check[3])IORegistryEntry::getRegistryRoot()->setProperty("N97FBIRQFirstEnableCheck",check,sizeof(check));
 	return enabled ? kIOReturnSuccess : kIOReturnNotReady;
@@ -5499,12 +5512,13 @@ IOReturn XE::wrapDisplay13FBDisableIRQ(IOService *controller) {
 	c.status=Display13FBIRQ::disable(io,c.state);adlnIRQCache(controller,io);adlnIRQRecord(record,2);
 	const bool disabled=c.status==Display13FBIRQ::Status::Complete;
 	IOSimpleLockUnlockEnableInterrupt(c.lock,saved);
-	controller->setProperty("N97FBIRQ",record,sizeof(record));
+	controller->setProperty("N97FBIRQ",record,sizeof(record));adlnPublishVBLConfigure();
 	return disabled ? kIOReturnSuccess : kIOReturnNotReady;
 }
 void XE::wrapDisplay13FBConfigureVBL(IOService *controller,IOService *fb,OSObject *path,bool enabled,bool getLock) {
 	if(!adlnIRQOwner(controller) || !fb || !path)return;
 	auto &c=display13FBIRQ;Display13FBIRQIO io {c.base};
+	bool rearmed=false;auto rearm=Display13FBIRQ::Status::Unavailable;
 	const auto saved=getLock ? IOSimpleLockLockDisableInterrupt(c.lock) : 0;
 	// getLock=false means hwSetInterruptForTransaction already holds the
 	// same native simple lock. Never recurse or overwrite its saved IRQ state.
@@ -5522,19 +5536,23 @@ void XE::wrapDisplay13FBConfigureVBL(IOService *controller,IOService *fb,OSObjec
 			if(c.status!=Display13FBIRQ::Status::Complete) {adlnIRQCache(controller,io);if(getLock)IOSimpleLockUnlockEnableInterrupt(c.lock,saved);return;}
 		}
 		// Native enablePipe enables PIPECONF before this VBL callback. Re-arm
-		// the full pipe bank only at that real activation boundary after idle HPD.
-		if(!Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring) && enabled && c.state.begun && c.state.enabled && !c.state.active && !c.state.faulted &&
+		// the full pipe bank only at that real activation boundary: after idle HPD
+		// (enabled, no active pipe) and after a disable whose re-enable came while
+		// the pipe was still off (display wake: EnableIRQ returned Pending).
+		if(!Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring) && enabled && c.state.begun && (!c.state.enabled || !c.state.active) && !c.state.faulted &&
 			Display13FBIRQ::powered(io.read(Display13FBIRQ::Driver),pipe) && (io.read(0x70008+0x1000*pipe)&Display13FBIRQ::Enable)) {
 			const auto excluded=controller==callbackXE->adlnTopologyController ?
 				Display13FBTopology::policyExcludedTypeC(callbackXE->adlnPlatform,sizeof(callbackXE->adlnPlatform),
 					callbackXE->adlnHDMIWiring,xelpPanelPolicy()) : 0;
 			c.status=Display13FBIRQ::enable(io,c.state,excluded,adlnSharedGT(controller),1,
 				Display13FBTopology::policyPorts(callbackXE->adlnHDMIWiring,xelpPanelPolicy()));
+			rearmed=true;rearm=c.status;
 		}
 		if(!c.state.faulted)c.status=Display13FBIRQ::vblank(io,c.state,pipe,enabled);
 	}
 	else c.status=Display13FBIRQ::fail(io,c.state,Display13FBIRQ::Status::Topology);
 	adlnIRQCache(controller,io);
+	adlnNoteVBLConfigure(pipe,enabled,c.status,rearmed,rearm);
 	if(getLock)IOSimpleLockUnlockEnableInterrupt(c.lock,saved);
 }
 bool XE::wrapDisplay13FBProcessIRQ(IOService *controller) {
@@ -8535,6 +8553,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	auto root=IORegistryEntry::getRegistryRoot();char property[48];
 	snprintf(property,sizeof(property),"N97FBPipe%uWMTriggerSurfaces",pipe);root->setProperty(property,trigger,sizeof(trigger));
 	snprintf(property,sizeof(property),"N97FBPipe%uWMLatch",pipe);root->setProperty(property,record,sizeof(record));
+	adlnPublishVBLConfigure();
 }
 
 void XE::wrapAlderLakeNEngineEnable(void *power) {
