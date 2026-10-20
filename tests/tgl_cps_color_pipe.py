@@ -5,7 +5,7 @@ import hashlib,re,subprocess,sys,tempfile,struct
 s=(Path(__file__).resolve().parents[1]/'WhateverXe/kern_xe.cpp').read_text()
 d=Path(sys.argv[1]).read_bytes()
 assert hashlib.sha256(d).hexdigest()=='bd1a21f5e622aadabdab6441f6b5c38ed73fa3053c783fdf0fb7e4b309f273d0'
-for name,at in [('cpsAllocHead',0x10924),('cpsCPUHead',0x10b60),('cpsGPUHead',0x13e7c),('cpsPointer',0x7c208),('cpsRelease',0x26683),('cpsRestoreHead',0x7c392),('cpsRestoreCall',0x7c129)]:
+for name,at in [('cpsAllocHead',0x10924),('cpsCPUHead',0x10b60),('cpsGPUHead',0x13e7c),('cpsPointer',0x7c208),('cpsRelease',0x26683),('cpsRestoreHead',0x7c392),('cpsRestoreCall',0x7c129),('contextCacheHead',0x7b9d4)]:
  vals=re.search(r'const uint8_t '+name+r'\[\] \{([^}]+)',s)[1]
  b=bytes(int(v.strip(),0) for v in vals.split(','));assert b==d[at:at+len(b)],name
 assert struct.unpack_from('<I',d,0xc04a0+0x48)[0]==0x21c0
@@ -13,7 +13,9 @@ assert '&& ffModeOK && cpsOK && flushOK' in s
 assert s.index('const uint8_t cpsAllocHead') < s.index('KernelPatcher::RouteRequest gucRequests[]')
 assert 'cpsOK=cpsOK && hostOK && gucOK;' in s
 helper=s[s.index('uintptr_t tglCPSAllocate'):s.index('bool tglCPSSerialize')]
-code=r"""#include <stdint.h>
+helper+=s[s.index('static bool tglContextCacheInit(void'):s.index('// r150:')]
+code=r"""#include "kern_tgl_context_cache.hpp"
+#include <stdint.h>
 #include <sys/mman.h>
 #include <cassert>
 #include <cstring>
@@ -25,14 +27,18 @@ static unsigned released=0;
 struct OSObject {void release(){++released;}};
 #define FunctionCast(fn,addr) reinterpret_cast<decltype(&fn)>(addr)
 HELPER
+static void adlnCaptureOwnedGolden(void*){assert(false && "ADL-N path outside this fixture");}
+static bool tglAlderLakeNGoldenRestore(void*){assert(false && "ADL-N path outside this fixture");return false;}
 alignas(4096) static uint8_t page[0x40000];
 static uint8_t saved[0x40000],descriptor[8];static void *descriptorVT[100];
 static void *savedAddress(void *d){assert(d==descriptor);return saved;}
 static uint8_t buffer[0x48],map[0x100];static void *vtable[64];
 static uint64_t addr=0x34567000;static unsigned allocations=0;static bool allocFail=false,cpuFail=false;static void *expectedTask;
-static void *alloc(void *task,size_t n,unsigned options,unsigned fill){assert(task==expectedTask&&n==4096&&options==3&&fill==0);++allocations;return allocFail?nullptr:buffer;}
+static void *alloc(void *task,size_t n,unsigned options,unsigned fill){assert(task==expectedTask&&n==(tglContextCacheEnabled?8192U:4096U)&&options==3&&fill==0);++allocations;return allocFail?nullptr:buffer;}
 static void *cpu(void *b){assert(b==buffer);return cpuFail?nullptr:page;}
 static uint64_t gpu(void *m){assert(m==map);return addr;}
+static bool initOK=true;
+static bool fakeInit(void*,void*,const void*,uint8_t){return initOK;}
 extern "C" void consume(void*,void*,void*);
 asm(".text\n_globl_dummy:\n.globl _consume\n_consume:\npushq %r13\npushq %r15\nsubq $8,%rsp\nmovq %rdi,%r13\nmovq %rsi,%r15\ncallq *%rdx\naddq $8,%rsp\npopq %r15\npopq %r13\nretq\n");
 static void put(void *base,size_t off,void *p){memcpy((char*)base+off,&p,8);}
@@ -81,11 +87,25 @@ int main(int argc,char**argv){
  for(uint32_t old:{0U,0x800U,0xffffU}){auto word=payload[3],mask=word>>16;assert(((old&~mask)|(word&mask))==(old|0x200));}
  assert((payload[1]&0xff)+2==7 && payload[8]==0x05000000); // 3 LRI pairs + batch end
  for(uint32_t old=0;old<65536;++old){auto word=payload[7],mask=word>>16;assert(((old&~mask)|(word&mask))==(old|0x4000));}
+ tglContextCacheEnabled=true;put(owner,0x13f8,nullptr);memset(page,0xA5,sizeof(page));assert(tglCPSPrepare(owner));
+ assert(!memcmp(page,payload,sizeof(payload)));const uint32_t indirect[]={0x11000001,0x20D8,0x00400040};
+ assert(!memcmp(page+4096,indirect,sizeof(indirect)));for(unsigned i=4108;i<8192;++i)assert(!page[i]);
+ for(unsigned i=8192;i<sizeof(page);++i)assert(page[i]==0xA5);
+ const auto allocBefore=allocations;page[4200]=0x73;assert(tglCPSPrepare(owner));assert(allocations==allocBefore&&page[4200]==0x73);
+ tglContextCacheInitOriginal=(uintptr_t)fakeInit;const uint32_t fields[]={0x21c0,uint32_t(addr|5),0x21c4,0,0x21c8,0};
+ memcpy(page+0x1048,fields,sizeof(fields));assert(tglContextCacheInit(ctx,task,nullptr,0));
+ assert(*(uint32_t*)(page+0x1054)==(addr+4096+1));assert(*(uint32_t*)(page+0x105c)==0x340);
+ before.assign(page,page+sizeof(page));assert(tglContextCacheInit(ctx,task,nullptr,0));assert(!memcmp(page,before.data(),sizeof(page)));
+ *(uint32_t*)(page+0x1054)=0x12345678;before.assign(page,page+sizeof(page));assert(!tglContextCacheInit(ctx,task,nullptr,0));assert(!memcmp(page,before.data(),sizeof(page)));
+ ctx[0x6c]=1;assert(tglContextCacheInit(ctx,task,nullptr,0));assert(!memcmp(page,before.data(),sizeof(page)));ctx[0x6c]=0;
+ initOK=false;assert(!tglContextCacheInit(ctx,task,nullptr,0));initOK=true;tglContextCacheEnabled=false;
+ assert(tglContextCacheInit(ctx,task,nullptr,0));assert(!memcmp(page,before.data(),sizeof(page)));
+ puts("PASS: optional 8KiB allocation keeps native batch, separate indirect page, immutable reuse, constructor failure/non-RCS/no-op paths");
  puts("PASS: native per-context pointer consumer; GGTT prerequisite, 4KiB extent, valid/force bits, reuse and failure release; CPS plus early-read masked bit14, FF timer and 3-pair LRI extent");
 }
 """.replace('HELPER',helper)
 with tempfile.TemporaryDirectory(prefix='tgl-cps-context-') as t:
  p=Path(t);(p/'test.cpp').write_text(code)
- subprocess.run(['clang++','-arch','x86_64','-std=c++14','-O2',str(p/'test.cpp'),'-o',str(p/'test')],check=True)
+ subprocess.run(['clang++','-arch','x86_64','-std=c++14','-O2','-I'+str(Path(__file__).resolve().parents[1]/'WhateverXe'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test'),sys.argv[1]],check=True)
 print('CPU contract validation; GPU execution and pixel effects are not established by this test.')

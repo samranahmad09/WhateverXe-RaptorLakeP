@@ -29,14 +29,18 @@ jobs:
           ref: 05094e5e88cec7caedbfb35e8449ed0db94bf95b
           path: MacKernelSDK
           persist-credentials: false
-      - name: Fetch Lilu development files
+      - uses: actions/checkout@v4
+        with:
+          repository: acidanthera/Lilu
+          ref: 1.7.2
+          path: build/dependencies/Lilu
+          persist-credentials: false
+      - name: Prepare Lilu development files
         shell: bash
         run: |
-          curl -fL --retry 3 -o "$RUNNER_TEMP/Lilu.zip" \
-            https://github.com/acidanthera/Lilu/releases/download/1.7.0/Lilu-1.7.0-DEBUG.zip
-          echo "2adf2425286aba87e9b50c6992724be057a89caa5884464b1adc00154c2fd012  $RUNNER_TEMP/Lilu.zip" | shasum -a 256 -c -
-          unzip -q "$RUNNER_TEMP/Lilu.zip" -d "$RUNNER_TEMP/lilu"
-          cp -R "$RUNNER_TEMP/lilu/Lilu.kext" Lilu.kext
+          mkdir -p Lilu.kext/Contents/Resources
+          ln -s "$GITHUB_WORKSPACE/build/dependencies/Lilu/Lilu/Headers" Lilu.kext/Contents/Resources/Headers
+          ln -s "$GITHUB_WORKSPACE/build/dependencies/Lilu/Lilu/Library" Lilu.kext/Contents/Resources/Library
       - name: CPU tests
         run: python3 tools/test.py
       - name: Build DEBUG
@@ -103,12 +107,14 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          python3 tools/release_notes.py "$RELEASE_TAG" > release-notes.md
           cd dist
           sha256sum -c SHA256SUMS
           if gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft > release-state; then
             test "$(cat release-state)" = true
           else
             gh release create "$RELEASE_TAG" --verify-tag --draft \
-              --title "$RELEASE_TAG" --notes-file ../.github/release-notes.md
+              --title "$RELEASE_TAG" --notes-file ../release-notes.md
           fi
+          gh release edit "$RELEASE_TAG" --notes-file ../release-notes.md
           gh release upload "$RELEASE_TAG" ./*.zip SHA256SUMS --clobber

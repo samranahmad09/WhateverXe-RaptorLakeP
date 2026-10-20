@@ -3,7 +3,7 @@
 from pathlib import Path
 import re,subprocess,tempfile
 r=Path(__file__).resolve().parents[1];s=(r/'WhateverXe/kern_xe.cpp').read_text()
-bodies='\n'.join(re.search(p,s,re.S).group() for p in [r'void tglAUXRecord\(.*?\n\}',r'static bool tglAUXControlSerialize\(.*?\n\}'])
+bodies='\n'.join(re.search(p,s,re.S).group() for p in [r'void tglAUXRecord\(.*?\n\}',r'static bool tglAUXControlSerialize\(.*?\n\}',r'void tglDPCDRecord\(.*?\n\}',r'static bool tglDPCDSerialize\(.*?\n\}',r'static bool tglAUXLiveSerialize\(.*?\n\}'])
 f=r'''#include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -13,19 +13,25 @@ f=r'''#include <cstdint>
 struct TGLAUXRecord { uint64_t ns,thread;uint32_t word[28]; };
 TGLAUXRecord tglAUXFirst[9][256]{},tglAUXLast[9][128]{},tglAUXControl[9][64]{};
 uint32_t tglAUXCounts[9]{},tglAUXControlCounts[9]{};
+struct TGLDPCDRecord {uint64_t ns,thread;uint32_t word[16];};
+TGLDPCDRecord tglDPCDFirst[1024]{},tglDPCDLast[128]{};
+uint32_t tglDPCDCount{};
+template<class T,size_t N> constexpr size_t arrsize(const T (&)[N]){return N;}
+uint32_t tglConnectionCaller(void*){return 0x1234;}
+bool quiet=false,failAlloc=false,failData=false;
 int lock,*tglAUXLock=&lock;bool held=false;
 void IOSimpleLockLock(int*) {assert(!held);held=true;}
 void IOSimpleLockUnlock(int*) {assert(held);held=false;}
-bool tglQuietTraining(){return false;}
+bool tglQuietTraining(){return quiet;}
 void clock_get_uptime(uint64_t*p){static uint64_t t=0;*p=++t;}
 void absolutetime_to_nanoseconds(uint64_t a,uint64_t*p){*p=a;}
 void *current_thread(){return reinterpret_cast<void*>(1);}
-void *IOMalloc(size_t n){assert(!held);return malloc(n);}
+void *IOMalloc(size_t n){assert(!held);return failAlloc?nullptr:malloc(n);}
 void IOFree(void*p,size_t){assert(!held);free(p);}
 struct OSSerialize {std::vector<uint8_t> bytes;};
 struct OSData {
  std::vector<uint8_t> bytes;
- static OSData *withBytes(void*p,size_t n){assert(!held);auto d=new OSData;d->bytes.assign((uint8_t*)p,(uint8_t*)p+n);return d;}
+ static OSData *withBytes(void*p,size_t n){assert(!held);if(failData)return nullptr;auto d=new OSData;d->bytes.assign((uint8_t*)p,(uint8_t*)p+n);return d;}
  bool serialize(OSSerialize *s){assert(!held);s->bytes=bytes;return true;}
  void release(){assert(!held);delete this;}
 };
@@ -51,7 +57,43 @@ int main(){
   assert(v.word[0]==i*5+1&&v.word[1]==7&&v.word[5]==i&&v.word[7]==i&&v.word[27]==0x4d454d31);
  }
  assert(!tglAUXControlSerialize(nullptr,reinterpret_cast<void*>(9),&s));
- tglAUXLock=nullptr;assert(!tglAUXControlSerialize(nullptr,ref,&s));
+ // DPCD remains visible during quiet training without a publish/return.
+ quiet=true;
+ tglAUXRecord(port,0,false,0,1,8,0x80010303,0x01010101);
+ tglAUXRecord(port,0,true,0,1,8,0x80010303,0);
+ assert(tglAUXLiveSerialize(nullptr,ref,&s));
+ assert(s.bytes.size()==16+128*128);memcpy(h,s.bytes.data(),16);
+ assert(h[0]==1&&h[1]==4&&h[2]==402&&h[3]==128);
+ for(unsigned i=400;i<402;++i){TGLAUXRecord v;memcpy(&v,s.bytes.data()+16+(i%128)*128,128);
+  assert(v.word[0]==i+1&&v.word[1]==0&&v.word[2]==i-400&&v.word[27]==0x4d454d31);
+ }
+ assert(!tglAUXLiveSerialize(nullptr,reinterpret_cast<void*>(9),&s));
+ assert(tglDPCDSerialize(nullptr,nullptr,&s));
+ assert(s.bytes.size()==16+128*80);
+ uint8_t payload[32];for(unsigned i=0;i<32;++i)payload[i]=i;
+ for(unsigned i=0;i<80;++i){
+  tglDPCDRecord(port,0x202,noRead,32,false,false,0,nullptr);
+  tglDPCDRecord(port,0x202,payload,32,false,true,0,nullptr);
+ }
+ assert(tglDPCDSerialize(nullptr,nullptr,&s));memcpy(h,s.bytes.data(),16);
+ assert(h[0]==1&&h[1]==160&&h[2]==128&&h[3]==80);
+ for(unsigned i=32;i<160;++i){TGLDPCDRecord v;memcpy(&v,s.bytes.data()+16+(i%128)*80,80);
+  assert(v.word[0]==i+1&&v.word[1]==0x202&&v.word[2]==32&&v.word[4]==(i%2));
+  assert(v.word[6]==(i%2?16:0)&&v.word[7]==0x1234&&v.word[12]==4&&v.word[13]==1);
+  if(i%2)assert(!memcmp(v.word+8,payload,16));
+ }
+ tglDPCDRecord(port,0x600,payload,1,true,false,0,nullptr);
+ assert(tglDPCDCount==161&&tglDPCDLast[32].word[6]==1);
+ tglDPCDRecord(port,0x202,noRead,32,false,true,1,nullptr);
+ assert(tglDPCDLast[33].word[6]==0);
+ tglDPCDRecord(port,0x221,noRead,32,true,false,0,nullptr);
+ tglDPCDRecord(nullptr,0x202,noRead,32,true,false,0,nullptr);
+ config[0]=9;tglDPCDRecord(port,0x202,noRead,32,true,false,0,nullptr);
+ assert(tglDPCDCount==162);
+ failAlloc=true;assert(!tglAUXLiveSerialize(nullptr,ref,&s));assert(!tglDPCDSerialize(nullptr,nullptr,&s));failAlloc=false;
+ failData=true;assert(!tglAUXLiveSerialize(nullptr,ref,&s));assert(!tglDPCDSerialize(nullptr,nullptr,&s));failData=false;
+ tglAUXLock=nullptr;assert(!tglAUXLiveSerialize(nullptr,ref,&s));assert(!tglDPCDSerialize(nullptr,nullptr,&s));
+ assert(!tglAUXControlSerialize(nullptr,ref,&s));
  munmap(noRead,4096);
 }
 '''.replace('// BODIES',bodies)
@@ -59,4 +101,4 @@ with tempfile.TemporaryDirectory(prefix='tgl-aux-live-') as d:
  d=Path(d);(d/'check.cpp').write_text(f)
  subprocess.run(['clang++','-std=c++14','-O1','-g','-fsanitize=address,undefined',str(d/'check.cpp'),'-o',str(d/'check')],check=True)
  subprocess.run([str(d/'check')],check=True)
-print('PASS: actual live serializer, 80 control/320 bulk records, ring wrap, protected MMIO, no allocation under lock')
+print('PASS: actual live serializer, 80 control/320 bulk records, ring wrap, live quiet-training DPCD ring, protected MMIO, no allocation under lock')

@@ -1,3 +1,4 @@
+template<class... T>void tglTransitionRecord(T...){ }
 // Native boundaries are mocks; LEASE_FUNCTIONS is extracted unchanged from production.
 #include <algorithm>
 #include <cassert>
@@ -102,15 +103,24 @@ void enablePG(void *p, uint32_t pg) { std::lock_guard<std::mutex> lock(refLock);
 void disablePG(void *p, uint32_t pg) { std::lock_guard<std::mutex> lock(refLock); assert(p==power.data() && pg<8 && pgRefs[pg]>0); --pgRefs[pg]; if (protectOnPowerDrop && pgRefs[pg]==0) assert(mprotect(protectedMMIO, sizeof(mmio), PROT_NONE)==0); }
 uint32_t disablePort(void *p) {
  ++portDisables;
- for (unsigned ddi=0; ddi<9; ++ddi) if (p==ports[ddi].data()) mmio.at<uint32_t>(0x64000+0x100*ddi)=bufferIdlePending?0:0x80;
+ for (unsigned ddi=0; ddi<9; ++ddi) if (p==ports[ddi].data()) {
+  auto &buffer=mmio.at<uint32_t>(0x64000+0x100*ddi);
+  buffer=(buffer & ~0x80000080u) | (bufferIdlePending?0:0x80);
+ }
+ // The donor port disable clears transport enable; it does not clear FUNC.
+ for (unsigned pipe=0; pipe<3; ++pipe) if (paths[pipe].at<void *>(0x3648)==p)
+  mmio.at<uint32_t>(0x60540+0x1000*pipe)&=~0x80000000u;
  return 0;
 }
+std::function<void(unsigned)> clockBoundary;
 void disableClocks(void *, void *port, void *) {
  ++clockDisables;
  std::lock_guard<IORecursiveLock> lock(poolLock);
  for (unsigned pipe=0; pipe<3; ++pipe) if (paths[pipe].at<void *>(0x3648)==port) {
-  mmio.at<uint32_t>(0x60400+0x1000*pipe)=0;
-  mmio.at<uint32_t>(0x60540+0x1000*pipe)=0;
+  // Model the qualified clock wrapper/native boundary, not an imagined FUNC
+  // cleanup. Native disableClocks does not clear FUNC or TP configuration.
+  mmio.at<uint32_t>(0x46140+4*pipe)=0;
+  if(clockBoundary) clockBoundary(pipe);
  }
 }
 void nativeStop(void *, IOService *) { stopCalled=true; }
@@ -138,7 +148,7 @@ void setup() {
  obj.orgTGLTraining=(uintptr_t)train; obj.orgTGLAllocatePathResources=(uintptr_t)allocateResources;
  ctl={}; access={}; power={}; mmio={};
  existingPath=badPipe=failAdoption=stopCalled=false; nativeCalls=0; nativeEndResult=0;
- nativeBoundary={}; protectedMMIO=nullptr; protectOnPowerDrop=bufferIdlePending=false;portDisables=clockDisables=0;
+ nativeBoundary={}; clockBoundary={}; protectedMMIO=nullptr; protectOnPowerDrop=bufferIdlePending=false;portDisables=clockDisables=0;
  std::fill(std::begin(used),std::end(used),false); std::fill(std::begin(pgRefs),std::end(pgRefs),0);
  ctl.at<void *>(0xd40)=obj.tglNoPanelPlatform; ctl.at<void *>(0xc40)=access.data(); ctl.at<void *>(0xc8)=power.data();
  access.at<void *>(0x50)=mmio.data(); access.at<uint32_t>(0x60)=sizeof(mmio);
@@ -233,6 +243,37 @@ void shutdownStatus() {
  mmio.at<uint32_t>(0x64400)=0x80;assert(XE::tglReleaseTrainingLease(end,false));clean();
  puts("shutdown status: buffer idle missing / pipe enable or active / allones retain resources; no premature clock teardown; explicit retry succeeds on all 3 pipes");
 }
+void trainingRouteRestoration() {
+ // Exercise warm, inactive routes on every pipe. The native mocks must leave
+ // the training route present at clock teardown, so only production lease
+ // restoration can put the original configuration back. This tests cleanup
+ // ownership, not physical power sequencing or absence of hardware hangs.
+ for(unsigned pipe=0;pipe<3;++pipe) {
+  setup();for(unsigned i=0;i<pipe;++i)used[i]=true;
+  const auto func=0x60400+0x1000*pipe,tp=0x60540+0x1000*pipe;
+  mmio.at<uint32_t>(func)=0x02030006;
+  mmio.at<uint32_t>(tp)=0x00040300;
+  auto &lease=reserve(4);assert(lease.pipe==pipe);lease.clocksActive=true;
+  mmio.at<uint32_t>(func)=0x2a030006;
+  mmio.at<uint32_t>(tp)=0x80040300;
+  mmio.at<uint32_t>(0x46140+4*pipe)=0x50000000;
+  mmio.at<uint32_t>(0x64400)=0x80003606;
+  unsigned boundaryCalls=0;
+  clockBoundary=[&](unsigned actualPipe) {
+   ++boundaryCalls;assert(actualPipe==pipe);
+   assert(mmio.at<uint32_t>(func)==0x2a030006);
+   assert(mmio.at<uint32_t>(tp)==0x00040300);
+   assert(mmio.at<uint32_t>(0x64400)==0x00003686);
+  };
+  release(4);
+  assert(boundaryCalls==1 && portDisables==1 && clockDisables==1);
+  assert(mmio.at<uint32_t>(func)==0x02030006);
+  assert(mmio.at<uint32_t>(tp)==0x00040300);
+  assert(mmio.at<uint32_t>(0x46140+4*pipe)==0);
+  for(unsigned i=0;i<pipe;++i)used[i]=false;clean();
+ }
+ puts("route restoration: native mocks preserve FUNC; production lease restores saved configuration on all 3 pipes (no hardware ordering claim)");
+}
 void wiringAdmission() {
  setup();
  obj.tglTCWiring=TGLTCWiring::fromMasks((1u<<3)|(1u<<4)|(1u<<5),0,0);
@@ -309,7 +350,7 @@ int main(int argc, char **argv) {
   if(!strcmp(argv[1],"arbitration")) { samePortArbitration(); return 0; }
   return 2;
  }
- observerPowerDrop(); samePortArbitration(); shutdownStatus(); endCompletion(); wiringAdmission();
+ observerPowerDrop(); samePortArbitration(); shutdownStatus(); endCompletion(); trainingRouteRestoration(); wiringAdmission();
  unsigned orders=0;
  int in[3]={3,4,5};
  do {

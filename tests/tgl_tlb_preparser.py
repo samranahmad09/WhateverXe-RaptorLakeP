@@ -11,7 +11,7 @@ assert hashlib.sha256(b).hexdigest()=='bd1a21f5e622aadabdab6441f6b5c38ed73fa3053
 for name,at in [('tlbSpaceBody',0x8507c),('tlbWriteHead',0x8509c),('tlbReserveCall',0x4177c),('tlbPendingCall',0x41eca)]:
  vals=re.search(r'const uint8_t '+name+r'\[\] \{([^}]+)',s)[1]
  want=bytes(int(v.strip(),0) for v in vals.split(',')); assert b[at:at+len(want)]==want,name
-assert '&& flushOK && tlbPreparserOK && hangOK' in s
+assert '&& flushOK && tlbPreparserOK && semaphoreTLBOK && hangOK' in s
 helpers=s[s.index('uintptr_t tglOrigRCSTLBSpace'):s.index('bool tglRCSTLBSerialize')]
 code=r'''#include <stdint.h>
 #include <sys/mman.h>

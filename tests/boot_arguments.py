@@ -41,6 +41,7 @@ fixture = r'''
 #include <string>
 #include <initializer_list>
 #include "kern_xelp_platform.hpp"
+#include "kern_xelp_os.hpp"
 static const char *qualified = "Darwin Kernel Version 20.6.0: Thu Jul  6 22:12:47 PDT 2023; root:xnu-7195.141.49.702.12~1/RELEASE_X86_64";
 static const char *version = qualified;
 static std::set<std::string> args;
@@ -95,6 +96,32 @@ int main() {
  xe=boot({"-wex-nopanel","-wex-tgl-prog-off"},0x9A408086);
  assert(xe.tglRequested && xe.tglNoPanel && !xe.tglProgramEnabled);
  xe=boot({"-wex-tgl-off"},0x9A498086);assert(!xe.tglRequested);
+ xe=boot({"-wex-noaccel"},0x9A498086);assert(xe.tglRequested && !xe.tglAcceleratorRequested);
+ const char *allKernels[]={
+ "Darwin Kernel Version 24.6.1: future servicing; root:xnu-future/RELEASE_X86_64",
+ "Darwin Kernel Version 25.7.0: future update; root:xnu-future/RELEASE_X86_64",
+ "Darwin Kernel Version 20.6.0: Thu Jul  6 22:12:47 PDT 2023; root:xnu-7195.141.49.702.12~1/RELEASE_X86_64",
+ "Darwin Kernel Version 21.6.0: Mon Jun 24 00:56:10 PDT 2024; root:xnu-8020.240.18.709.2~1/RELEASE_X86_64",
+ "Darwin Kernel Version 22.6.0: Tue Jul 15 08:22:28 PDT 2025; root:xnu-8796.141.3.713.2~2/RELEASE_X86_64",
+ "Darwin Kernel Version 23.6.0: Tue Jul 21 21:56:37 PDT 2026; root:xnu-10063.141.1.713.39~1/RELEASE_X86_64",
+ "Darwin Kernel Version 24.6.0: Sun Aug 23 20:30:56 PDT 2026; root:xnu-11417.140.69.712.69~1/RELEASE_X86_64",
+ "Darwin Kernel Version 25.6.0: Tue Aug 18 17:46:40 PDT 2026; root:xnu-12377.161.15.700.19~2/RELEASE_X86_64",
+};
+ for(auto kernel:allKernels) for(unsigned id:{0x9A40U,0x9A49U,0x9A78U,0x46D0U,0x46D1U,0x46D2U,0x46D3U,0x46D4U}) {
+  version=kernel;xe=boot({},(id<<16)|0x8086);
+  assert(xe.tglRequested && xe.tglAcceleratorRequested);
+  assert(xe.currentGraphics==&kextIntelTGL && xe.currentFramebuffer==&kextIntelTGLFb);
+  if(id<0x9000)assert(xe.adlnKernelReady && xe.adlnNativeRequested && xe.display13FramebufferRequested);
+  assert(tglStart(nullptr,nullptr)==KERN_SUCCESS);
+ }
+ version="Darwin Kernel Version 21.6.0: Mon Jun 24 00:56:10 PDT 2024; root:xnu-8020.240.18.709.2~1/RELEASE_X86_64";
+ xe=boot({},0x9A498086);assert(xe.tglRequested && xe.tglAcceleratorRequested);
+ xe=boot({"-wex-noaccel"},0x9A498086);
+ assert(xe.tglRequested && !xe.tglAcceleratorRequested && xe.currentFramebuffer==&kextIntelTGLFb);
+ // The existing noaccel diagnostic is a Display12 option.
+ xe=boot({"-wex-noaccel"},0x46D28086);assert(xe.adlnNativeRequested);
+ version=qualified;
+
  xe=boot({},0x12348086,0x46D28086);
  assert(xe.adlnRequested && xe.adlnNativeRequested && xe.xeProfile.identity==0x12348086);
  xe=boot({},0x12348086,0x9A498086);assert(xe.tglRequested);

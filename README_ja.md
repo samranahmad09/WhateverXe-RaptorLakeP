@@ -7,11 +7,12 @@
 
 > **現状：内蔵パネルはネイティブに点灯します。アクセラレーションは未対応です。**
 > - 2026-10-20以降、ネイティブのDisplay 13フレームバッファ経路が検証機のeDPパネルを駆動します（リンクトレーニング、60 Hzモード、カーソル、WindowServerデスクトップ、ソフトウェア描画。起動引数`-wex-rplp-gt`）。GPUアクセラレータはまだ起動しません。これが次の目標です。
+> - `rplp-accel`ブランチはupstream 0.3.0（Big Sur〜Tahoe対応の単一バイナリ。20G1443カーネル向けのMMIOキャッシュ用ブリッジはBARのページ範囲に束縛）を取り込み、アクセラレータ作業の土台にします。起動検証はまだです。
 > - Raptor Lake-P対応は実験段階で、1台の機種でのみ検証しています。読み取り専用の`-wex-rplp-observe`と単発の`-wex-rplp-gpu`セルフテストは引き続き利用できます。
 > - upstreamが対応する機種（Tiger Lake、Alder Lake-N / Twin Lake）の動作はupstreamと変わりません。
 > - これまでのハードウェア調査結果：[docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md)（英語）。
 
-本forkは個人が趣味で運営する独立したforkであり、upstreamの作者とは関係ありません。実機で検証できた成果はupstreamへ提案する予定です。そのため`rplp-*`ブランチにはfork固有の変更を含めず、`main`ではこのREADMEを追加しています。
+本forkは個人が趣味で運営する独立したforkであり、upstreamの作者とは関係ありません。実機で検証できた成果はupstreamへ提案する予定です。`main`は最新の`rplp-*`ブランチに追従します。
 
 ## 対象ハードウェア
 
@@ -110,68 +111,79 @@ sudo dmesg | grep -E 'RaptorLakeP|WhateverXe' > ~/Desktop/rplp-dmesg.txt
 
 WhateverXeは、一部のIntel Xe-LP内蔵GPU向けにAppleのグラフィックスドライバを適応させるLiluプラグインです。WhateverGreenを基に開発されています。
 
-実験段階のプロジェクトであり、[OpenCore Legacy Patcherのfork](https://github.com/b00t0x/OpenCore-Legacy-Patcher)が提供するXe root patchを必要とします。
+本プロジェクトは実験段階であり、[WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics)の署名済みグラフィックスpkgが必要です。資材を`/Library`へ配置してAuxiliary Kernel Collection（AuxKC）を更新し、Systemファイルやsnapshotにはパッチを適用しません。WEXとグラフィックスpkgは、それぞれ独立したバージョンでリリースします。
 
 以下はupstreamのドキュメントで、このforkと異なる箇所のみ修正しています。Appleのドライバを読み込む段階（R2以降）に適用されます。
 
 ### 対応範囲
 
-現在の対象は **macOS Big Sur build 20G1443** です。
+単一のWEXバイナリと1つのグラフィックスpkgで、以下のmacOSに対応します。
+
+| macOS | 必要バージョン |
+| --- | --- |
+| Big Sur | 11.7.11 |
+| Monterey | 12.7.6 |
+| Ventura | 13.7.8 |
+| Sonoma | 14.8.9 |
+| Sequoia | 15.8.x |
+| Tahoe | 26.7以上 |
+
+Big Sur〜Sonomaは検証済みカーネルの識別を必要とします。SequoiaとTahoeでは、実行時の命令列・ABI検査を維持した上で、同じOS系列内の更新を受け付けます。将来の更新が検証済みという意味ではありません。
+
+WEXはOSのABIとGPUバックエンドを独立して選択します。OS別のグラフィックス資材と共通のAppleIntelTGLCompatはWhateverXe Graphicsが導入し、GPU世代・コネクタ配線への対応はWEXが担います。
 
 | GPUファミリー | バックエンド実装があるdevice ID |
 | --- | --- |
 | Tiger Lake | `9A40`、`9A49`、`9A78` |
 | Alder Lake-N / Twin Lake | `46D0`–`46D4` |
 
-Raptor Lake-Pには、このforkでもまだバックエンドがありません。上記の[計画](#計画)を参照してください。
+Raptor Lake-P（`A7A8`のrevision 4）は`-wex-rplp-gt`を指定した場合にのみ組み込まれます。上記の[計画](#計画)を参照してください。
 
 対応状況は機種やコネクタ構成によって異なります。この表はバックエンドの実装範囲を示すもので、すべての機種での動作を保証するものではありません。詳細な選択条件と上書き設定は[デバイス選択](docs/device-selection.md)を参照してください。
 
-**upstreamで確認済みの内容。**
-- Tiger LakeとAlder Lake-N：外部2画面の1920×1080・60Hz出力、Metal/OpenGL、ハードウェアHEVC、画面の消灯／復帰。
-- Tiger Lake：ハードウェアH.264のエンコード／デコードも確認済み。
-- 追加検証が必要なもの：3画面同時出力、システムスリープ、より高い解像度、他のコネクタ構成。
-- USB-Cと内蔵ディスプレイへの対応は、upstreamのロードマップに含まれています。
-
-upstreamのリリースは[b00t0x/WhateverXeのReleases](https://github.com/b00t0x/WhateverXe/releases)にあります。このforkは上記のとおりCIビルドのみを公開しています。
-
 ### 必須構成
+
+[Releases](https://github.com/b00t0x/WhateverXe/releases)から **RELEASE** ZIPをダウンロードしてください。DEBUG ZIPは問題調査用です。各ZIPには`WhateverXe.kext`と対応するdSYMのみを収録し、両ZIPのチェックサムは`SHA256SUMS`で配布します。各版の変更点は[CHANGELOG](CHANGELOG.md)を参照してください。
+
+このforkは上記のとおりCIビルドのみを公開しています。upstreamのリリースは[b00t0x/WhateverXeのReleases](https://github.com/b00t0x/WhateverXe/releases)にあります。署名済みグラフィックスpkgは検証機ではまだ試していません。検証機は従来のOCLP forkによるXe root patchのままです。
 
 | コンポーネント | 役割 |
 | --- | --- |
 | Lilu | WhateverXeの動作に必要なランタイム |
 | WhateverXe.kext | OpenCoreでLiluより後に読み込む |
-| [OpenCore Legacy Patcherのfork](https://github.com/b00t0x/OpenCore-Legacy-Patcher) | Xe root patchを適用してグラフィックス構成を導入する |
-| [AMFIPass v1.4.1 Mod](https://github.com/b00t0x/OpenCore-Legacy-Patcher/blob/mod/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-Mod-RELEASE.zip) | 改変されたroot patchのグラフィックス構成に必要。OpenCoreで導入する |
+| [WhateverXe Graphics pkg](https://github.com/b00t0x/WhateverXe-Graphics/releases) | 署名済み資材を`/Library`へ導入しAuxKCを更新する |
+| [AMFIPass v1.4.1 Mod](https://github.com/b00t0x/WhateverXe-Graphics/blob/main/extras/AMFIPass-v1.4.1-Mod-RELEASE.zip) | 改変されたグラフィックス構成に必要。OpenCoreで導入する |
 
-OCLP forkは[Releasesページ](https://github.com/b00t0x/OpenCore-Legacy-Patcher/releases)からダウンロードしてください。rootの構成要素の導入とkernel collectionの更新はOCLPが行います。
+SIPは`csr-active-config=03080000`（値`0x803`）に設定してください。SIPの全面有効化には対応していません。署名済みグラフィックスpkgとリンク先のMod AMFIPassを使用する場合、`amfi=0x80`と`ipc_control_port_options=0`は不要です。
 
-リンク先の **Mod版** アーカイブから`AMFIPass.kext`を展開し、`EFI/OC/Kexts`へ配置して、`Kernel > Add`で有効にしてください。既存のAMFIPassがある場合はこのMod版へ置き換え、両方を同時に読み込まないでください。
+Tahoeでは`CoreMedia / AllowOnePassMetalScaling`の無効化が必要です。WhateverXe Graphicsのインストーラーが設定します。
+
+グラフィックスpkgはWEX **0.3.0以上**を読み込んだ対象OSから実行してください。旧Xe System patchがある場合は、先に元の復元手順で戻してください。pkgはEFI・Systemファイル・snapshot・SIP設定を変更しません。pkgの使用方法と単独のアンインストールスクリプトは[導入と削除](https://github.com/b00t0x/WhateverXe-Graphics/blob/main/README_ja.md#インストール)を参照してください。
+
+リンク先の **Mod版** アーカイブから`AMFIPass.kext`を展開し、`EFI/OC/Kexts`へ配置して、`Kernel > Add`で有効にしてください。既存のAMFIPassがある場合はこのMod版へ置き換え、両方を同時に読み込まないでください。upstreamのAMFIPassはMod版の署名チェーンに対応していません。
+
+他のroot patchにOCLPを併用する場合は、同じMod版の署名チェーンを使用する[独自ビルド版OCLP](https://github.com/b00t0x/OpenCore-Legacy-Patcher)を使用してください。Xeグラフィックスの導入自体はOCLPに依存せず、WhateverXe Graphicsを使用します。
 
 複数GPUの構成を含め、WhateverGreenとWhateverXeは同時に有効にしないでください。
 
 ### 設定
 
-GPUはPCI device IDから自動選択します。
-- 対応範囲内では、ファームウェアのVBTから配線を読み取ります。
-- 固定HDMI／固定DisplayPort構成では、通常、配線propertyの手動指定は不要です。
-- 高度な設定としての`device-id`上書きは[デバイス選択](docs/device-selection.md)で説明しています。
+GPUはPCI device IDから自動選択します。対応範囲内ではファームウェアのVBTから配線を読み取るため、固定HDMI／固定DisplayPort構成は通常、配線propertyの手動指定が不要です。高度な設定としての`device-id`上書きは[デバイス選択](docs/device-selection.md)で説明しています。
+
+対応GPUでは、WhateverGreenと同様に、検出されたIntel Management Engineのデバイス名も`IMEI`へ統一します。`HECI`や`MEI`から`IMEI`へのACPI renameを別途追加する必要はありません。
 
 #### DVMT
 
 BIOS/UEFIで変更できる場合は、**DVMT Pre-Allocatedを96MBに設定することを推奨します**。
 
-**60MBから変更できない場合**は、`boot-args`に`-igfxdvmt`を追加してください。あわせて、OpenCoreの`DeviceProperties > Add`にあるiGPUの項目（通常は`PciRoot(0x0)/Pci(0x2,0x0)`）へ以下の2つを設定してください。
+**60MBから変更できない場合**は、`boot-args`に`-igfxdvmt`を追加し、OpenCoreの`DeviceProperties > Add`にあるiGPUの項目（通常は`PciRoot(0x0)/Pci(0x2,0x0)`）へ以下の2つを設定してください。
 
 | Property | 型 | 値（16進数） |
 | --- | --- | --- |
 | `framebuffer-patch-enable` | Data | `01000000` |
 | `framebuffer-stolenmem` | Data | `0000C003` |
 
-- Data値はリトルエンディアンです。
-- `-igfxdvmt`は容量計算を補正し、DevicePropertiesは表示用メモリ領域を60MB内に収めます。
-- どちらもファームウェアが確保したメモリを増やす設定ではありません。
-- 96MBの場合、これらのDVMT用設定は不要です。
+Data値はリトルエンディアンです。`-igfxdvmt`は容量計算を補正し、DevicePropertiesは表示用メモリ領域を60MB内に収めます。ファームウェアが確保したメモリを増やす設定ではありません。96MBの場合、これらのDVMT用設定は不要です。
 
 #### 必須ブート引数
 
@@ -198,15 +210,26 @@ Alder Lake-N / Twin Lakeで世代選択や個別機能の有効化引数を追�
 | `-wexoff` | WhateverXeを無効にする。 |
 | `-wexbeta` | プラグインのOSバージョンチェックを回避する。kernel／driverの一致条件は維持する。 |
 | `-wex-tgl-off` | Tiger Lakeの処理を無効にする。 |
+| `-wex-noaccel` | Tiger LakeのFramebuffer単独モード。Acceleratorのprobeを停止します。 |
 | `-wex-rplp-observe` | Raptor Lake-Pのみ。上記の読み取り専用R1診断を公開する。GPUは非対応のまま。 |
 | `-wex-rplp-gpu` | Raptor Lake-Pのみ。`-wex-rplp-observe`と併用し、上記のR2 BCSセルフテストを1回実行する。GPUは非対応のまま。 |
-| `-wex-rplp-gt` | Raptor Lake-PのA7A8（revision 4）のみ。開発中のバックエンドへの組み込みを許可する。開発用で、まだGPUは駆動しない。 |
+| `-wex-rplp-gt` | Raptor Lake-PのA7A8（revision 4）のみ。開発中のバックエンドへの組み込みを許可する（ネイティブの内蔵パネル経路。アクセラレーションは未対応）。 |
+
+### 動作確認済みの機能と既知の問題
+
+Tiger LakeとAlder Lake-Nで、全6 OSにわたり、外部2画面の1920×1080・60Hz出力、Metal/MPS、OpenGL、OpenCL、ハードウェアH.264エンコード／デコード、ハードウェアHEVCデコード、画面の消灯／復帰、Safariのハードウェア動画デコード、Widevine再生を確認しています。共通TGLCompatビルドも、Alder Lake-Nの全6 OSで導入と機能を確認しています。すべてのcodec・アプリケーション・表内のGPUでの互換性を確認したものではありません。
+
+#### 既知の問題と制限
+
+- VA画像変換でnull参照によるクラッシュが発生することがあります。
+- Sequoia・Tahoeなどで、DisplayPortの再接続により黒画面やシステムハングが発生することがあります。
+- Safariでは少数のフレーム落ちを確認しています。
+- 3画面同時出力、システムスリープ、より高い解像度や他のコネクタ構成は追加検証が必要です。USB-Cと内蔵ディスプレイへの対応は下記ロードマップに含まれます。
 
 ### upstreamのロードマップ
 
 #### Planned
 
-- OCLPの機能を利用したmacOS Monterey〜Tahoe対応
 - Alder Lake／Raptor LakeのS/H/P/U対応
 - USB-C画面出力対応
 - 内蔵ディスプレイ対応
@@ -218,18 +241,15 @@ Alder Lake-N / Twin Lakeで世代選択や個別機能の有効化引数を追�
 
 ### ビルドとテスト
 
-macOS、Xcode command-line tools、Python 3.9以降、MacKernelSDK、Liluの開発用ヘッダ／ライブラリを使用します。`MacKernelSDK/`と`Lilu.kext/`をリポジトリ直下に配置するか、`--sdk`と`--lilu`でパスを指定してください。
+macOS、Xcode command-line tools、Python 3.9以降、MacKernelSDK、Liluの開発用ヘッダ／ライブラリを使用します。CIではTahoeのkernel定義を含むLiluの[1.7.2リリースタグ](https://github.com/acidanthera/Lilu/tree/1.7.2)を使用します。`MacKernelSDK/`と`Lilu.kext/`をリポジトリ直下に配置するか、`--sdk`と`--lilu`でパスを指定してください。
 
 ```sh
 python3 tools/build.py --release
 python3 tools/test.py
 ```
 
-- kextとソースのmanifestは`build/`に出力されます。
-- 任意のdonor再生試験には`--donor /path/to/AppleIntelTGLGraphicsFramebuffer`と`--accelerator /path/to/AppleIntelTGLGraphics`を指定します。各試験が受け付ける正確なバイナリが必要です。
-- CPUテストだけで実GPUの互換性が確認できるわけではありません。
-- ビルドにWhateverGreenのソースは不要です。
-- このforkのCIは、`main`へのpushごとに同じコマンドを実行し、パッケージ化したビルドをアップロードします。
+WhateverXeとAppleIntelTGLCompatのkext、およびソースのmanifestは`build/`に出力されます。TGLCompatのソースと共有ヘッダーはこのリポジトリで管理し、署名済みバイナリはWhateverXe Graphicsで配布します。WEXのRelease ZIPに含まれるkextはOpenCore用プラグインのみで、グラフィックスpkgは含みません。任意のdonor再生試験には`--donor /path/to/AppleIntelTGLGraphicsFramebuffer`と`--accelerator /path/to/AppleIntelTGLGraphics`を指定します。各試験が受け付ける正確なバイナリが必要です。CPUテストだけで実GPUの互換性が確認できるわけではありません。ビルドにWhateverGreenのソースは不要です。
+このforkのCIは、`main`へのpushごと、および`rplp-*`ブランチでの手動実行で同じコマンドを実行し、パッケージ化したビルドをアップロードします。
 
 ### ライセンスとクレジット
 

@@ -22,6 +22,8 @@ experimental procedures and live machine evidence in the maintainer's private
 project documentation, outside this repository. Do not link public instructions
 to private files or require access to private history to use or test the source.
 Source attribution, licenses and reproducible test fixtures remain here.
+Keep release notes in CHANGELOG.md under an exact version heading. Release CI
+extracts that section; do not maintain a separate release-note template.
 
 ## Build and test
 

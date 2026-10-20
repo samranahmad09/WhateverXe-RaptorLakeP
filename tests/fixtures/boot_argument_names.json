@@ -139,5 +139,6 @@
   ],
   "-wexbeta": [
     "-wxebeta"
-  ]
+  ],
+  "-wex-noaccel": []
 }

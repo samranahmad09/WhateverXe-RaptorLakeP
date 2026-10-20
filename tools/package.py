@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the OpenCore plugin and symbols; root components are supplied by OCLP."""
+"""Package the OpenCore plugin and symbols; the graphics stack is supplied by WhateverXe Graphics."""
 import argparse
 import hashlib
 import json
@@ -49,7 +49,9 @@ def main():
         shutil.copytree(source, bundle)
         exe = bundle / 'Contents/MacOS/WhateverXe'
         symbols = stage / 'WhateverXe.kext.dSYM'
-        run('xcrun', 'dsymutil', source_exe, '-o', symbols)
+        shutil.copytree(build / 'WhateverXe.kext.dSYM', symbols)
+        dwarf = symbols / 'Contents/Resources/DWARF/WhateverXe'
+        assert 'DW_TAG_compile_unit' in run('xcrun', 'dwarfdump', '--debug-info', dwarf), 'missing DWARF information'
         for relocation in symbols.rglob('*.yml'):
             text = relocation.read_text()
             text = re.sub(r'(?m)^binary-path:.*$',
@@ -61,20 +63,6 @@ def main():
             run('xcrun', 'strip', '-x', exe)
         macho_uuid = re.search(r'UUID: ([A-F0-9-]+)', run('xcrun', 'dwarfdump', '--uuid', exe)).group(1)
         assert macho_uuid in run('xcrun', 'dwarfdump', '--uuid', symbols), 'symbol UUID mismatch'
-        for name in ['README.md', 'README_ja.md', 'LICENSE.txt', 'docs/device-selection.md']:
-            dest = stage / name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT / name, dest)
-        provenance = {
-            'source_commit': run('git', 'rev-parse', 'HEAD'),
-            'version': version,
-            'configuration': args.configuration,
-            'architecture': 'x86_64',
-            'uuid': macho_uuid,
-            'executable_sha256': sha(exe),
-            'build': manifest,
-        }
-        (stage / 'BUILD.json').write_text(json.dumps(provenance, indent=2) + '\n')
         # Neither local account paths nor Apple driver inputs belong in release assets.
         for path in stage.rglob('*'):
             assert not path.is_symlink(), 'unexpected packaging symlink'
@@ -87,7 +75,9 @@ def main():
                     package.write(path, path.relative_to(stage))
         with zipfile.ZipFile(archive) as package:
             assert package.testzip() is None
-            assert not any('AppleIntelTGL' in name for name in package.namelist())
+            assert {name.split('/')[0] for name in package.namelist()} == {
+                'WhateverXe.kext', 'WhateverXe.kext.dSYM'
+            }, 'unexpected archive contents'
     print(json.dumps({'archive': archive.name, 'sha256': sha(archive), 'uuid': macho_uuid}))
 
 

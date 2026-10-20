@@ -17,7 +17,7 @@ def main():
  base+=['-fdebug-compilation-dir=.', '-ffile-prefix-map='+str(ROOT)+'=/WhateverXe',
         '-ffile-prefix-map='+str(sdk)+'=/MacKernelSDK', '-ffile-prefix-map='+str(lilu)+'=/Lilu']
  manifest={}
- for name,version,sources in [('WhateverXe','0.2.3',sorted((ROOT/'WhateverXe').glob('*.cpp'))+[lilu/'Library/plugin_start.cpp']),('AppleIntelTGLCompat','0.5.0',[ROOT/'AppleIntelTGLCompat/AppleIntelTGLCompat.cpp'])]:
+ for name,version,sources in [('WhateverXe','0.3.0',sorted((ROOT/'WhateverXe').glob('*.cpp'))+[lilu/'Library/plugin_start.cpp']),('AppleIntelTGLCompat','0.5.0',[ROOT/'AppleIntelTGLCompat/AppleIntelTGLCompat.cpp'])]:
   bundle=out/(name+'.kext')/'Contents';(bundle/'MacOS').mkdir(parents=True,exist_ok=True);objdir=out/name;objdir.mkdir(exist_ok=True)
   objects=[]
   for source in sources:
@@ -38,6 +38,9 @@ def main():
    libs['as.vit9696.Lilu']='1.2.0'
    info['IOKitPersonalities']={ident:dict(CFBundleIdentifier=ident,IOClass=name,IOMatchCategory=name,IOProviderClass='IOResources',IOResourceMatch='IOKit')}
   (bundle/'Info.plist').write_bytes(plistlib.dumps(info))
+  # Preserve DWARF before removing the linker's object-path records.
+  if name=='WhateverXe':run(['xcrun','dsymutil',exe,'-o',out/(name+'.kext.dSYM')])
+  run(['xcrun','strip','-S',exe])
   symbols=subprocess.check_output(['xcrun','nm',str(exe)],text=True)
   assert ' _kmod_info' in symbols, 'missing kext lifecycle metadata'
   if name=='WhateverXe':

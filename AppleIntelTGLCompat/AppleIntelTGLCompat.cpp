@@ -8,6 +8,7 @@
 #include <mach/kmod.h>
 #include "AppleIntelTGLCompatPortProbe.hpp"
 #include "kern_xelp_device.hpp"
+#include "kern_xelp_os.hpp"
 
 extern "C" const char version[];
 
@@ -222,9 +223,8 @@ extern "C" uint32_t tglProbePort(void *port) {
 }
 
 extern "C" kern_return_t tglStart(kmod_info_t *, void *) {
-    if (strcmp(version, "Darwin Kernel Version 20.0.0: Sat Jun 13 17:58:16 PDT 2020; root:xnu-7090.0.0.111.5~1/RELEASE_X86_64") &&
-        strcmp(version, "Darwin Kernel Version 20.6.0: Thu Jul  6 22:12:47 PDT 2023; root:xnu-7195.141.49.702.12~1/RELEASE_X86_64"))
-        return KERN_FAILURE;
+    if (XELP::kernelOS(version)==XELP::OS::Unknown)return KERN_FAILURE;
+
     // Backend selection is per physical owner/validated binding, not a global
     // boot policy. Register/DSB and port operations enforce their own guards.
     IOLog("AppleIntelTGLCompat: revision 0.5.0 started, physical-owner/binding selection\n");

@@ -5,6 +5,7 @@ f='\n'.join(re.search(p,s,re.S).group() for p in [r'volatile uint8_t \*XE::tglCl
 tx=s[s.index('struct TGLClockOffTransaction {'):s.index('} tglClockOffTransaction;')+len('} tglClockOffTransaction;')]
 code=r'''
 #include <cassert>
+template<class... T>void tglTransitionRecord(T...){ }
 #include <cstdint>
 #include <cstdio>
 #include <cstring>

@@ -5,6 +5,15 @@
 #define KERN_XELP_MEMORY_LAYOUT_HPP
 #include <stdint.h>
 namespace XELPMemory {
+// pmap uses 32-bit 4K page numbers. Exclude unassigned, fragmented or mismatched BARs.
+inline bool mmioPages(uint64_t pci,uint64_t physical,uint64_t length,uint64_t contiguous,
+                      uint32_t &first,uint32_t &end) {
+    first=end=0;
+    if(!pci || (pci&4095) || physical!=pci || length!=0x1000000 || contiguous<length ||
+       pci>=(uint64_t(UINT32_MAX)<<12) || length>(uint64_t(UINT32_MAX)<<12)-pci)return false;
+    first=static_cast<uint32_t>(pci>>12);end=static_cast<uint32_t>((pci+length)>>12);
+    return first<end;
+}
 constexpr uint64_t DMAEnd=0x8000000000ULL, Aperture=0x10000000;
 struct Layout {
     uint64_t base {},bytes {},gttBytes {},apertureBytes {};

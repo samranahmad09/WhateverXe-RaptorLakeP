@@ -1,6 +1,7 @@
 // Copyright © 2018 vit9696. Derived from WhateverGreen (BSD-3-Clause).
 #include "kern_host.hpp"
 #include "kern_xelp_device.hpp"
+#include "kern_xe_data_access.hpp"
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_iokit.hpp>
 #include <IOKit/pci/IOPCIDevice.h>
@@ -18,6 +19,7 @@ void XeHost::init() {
  lilu.onKextLoadForce(nullptr,0,[](void *u,KernelPatcher &p,size_t i,mach_vm_address_t a,size_t s){static_cast<XeHost *>(u)->processKext(p,i,a,s);},this);
  if(resetFramebuffer!=FB_NONE)lilu.onKextLoadForce(&graphics);
  xe.init();
+ XeDataAccess::init();
 }
 void XeHost::processKernel(KernelPatcher &patcher) {
  auto info=DeviceInfo::create();if(!info)return;
@@ -35,7 +37,13 @@ void XeHost::processKernel(KernelPatcher &patcher) {
   if(!gpu->getProperty("model"))if(const auto name=XELP::model(profile))gpu->setProperty("model",const_cast<char *>(name),strlen(name)+1);
  }
  if(active) {
+  XeDataAccess::processKernel(patcher);
   // Xe admission reads physical PCI identity. Do not install WEG's ID spoof hooks.
+  // WEG normalizes the ME device discovered by Lilu for Apple's name matching.
+  if(auto mei=info->managementEngine) {
+   const auto name=mei->getName();
+   if(!name || strcmp(name,"IMEI"))WIOKit::renameDevice(mei,"IMEI");
+  }
   if(info->firmwareVendor!=DeviceInfo::FirmwareVendor::Apple) {
    if(strcmp(gpu->getName(),"IGPU"))WIOKit::renameDevice(gpu,"IGPU");
    if(!gpu->getProperty("built-in")){uint8_t value=0;gpu->setProperty("built-in",&value,1);}
@@ -56,6 +64,7 @@ void XeHost::processKernel(KernelPatcher &patcher) {
 }
 void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  if(!active)return;
+ if(XeDataAccess::processKext(patcher,index,address,size))return;
  if(graphics.loadIndex==index) {
   gIOFBVerboseBootPtr=patcher.solveSymbol<uint8_t *>(index,"__ZL16gIOFBVerboseBoot",address,size);
   if(gIOFBVerboseBootPtr){KernelPatcher::RouteRequest route("__ZN13IOFramebuffer6initFBEv",wrapFramebufferInit,orgFramebufferInit);patcher.routeMultiple(index,&route,1,address,size);}
