@@ -425,3 +425,19 @@ Addendum (2026-10-20): the user reports the noise moves like television static, 
 sink is locked but cannot frame the pixel stream. The enhanced-framing bit of the training control word is now taken
 from the lane-count byte the driver itself writes to DPCD 0x101 over AUX (observed on the AUX data registers), with
 the port flag only as a fallback before that write is seen, and the observed byte is recorded at each boundary.
+
+### Native boot: moving static, no cursor; the scrambler seed (2026-10-20)
+
+The full AUX conversation of the training is in this capture. The driver writes the link rate and lane count (HBR,
+two lanes, enhanced framing, matching the training control word), then the eDP configuration byte DPCD 0x10A = 0x01,
+which switches the panel to the alternate scrambler seed, then downspread 0 and pattern 1 at swing level 0. The panel
+reports clock recovery on both lanes, pattern 4 follows, and the panel reports clock recovery, equalisation, symbol lock
+and interlane alignment, so training ends normally. Every training control word the driver writes selects the standard
+scrambler on the source. Control symbols and framing are not scrambled and equalisation is judged on signal quality,
+so training passes with mismatched seeds; every data symbol of the video then descrambles to noise, which is the moving
+static with no cursor. The firmware never enabled the alternate seed and showed a picture. The pixel samples show the
+plane's surface mapping linearly to the stolen framebuffer, the pages WindowServer writes, so memory is not the cause.
+
+Change: the plugin observes the driver's native AUX writes and clears bit 0 of the DPCD 0x10A byte before the payload is
+written, keeping the panel on the standard seed the source uses, and records the original byte. Pending hardware
+validation.

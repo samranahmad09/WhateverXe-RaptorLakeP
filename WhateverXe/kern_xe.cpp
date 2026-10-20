@@ -5233,16 +5233,33 @@ static AlderLakeNDDIRecord adlnDDIRecord;
 // (rate, then the lane-count byte with ENHANCED_FRAME_EN in bit 7) arrives as the request word on
 // DP_AUX_DATA_A_1 followed by the payload on DP_AUX_DATA_A_2. The training control word's enhanced
 // framing bit follows that byte; the port flag is only the fallback before the first write is seen.
-struct AlderLakeNAUXLink {volatile uint32_t pendingLaneWrite {},laneByte {},laneSeen {},writes {};};
+struct AlderLakeNAUXLink {volatile uint32_t pendingLaneWrite {},laneByte {},laneSeen {},writes {},pendingSeedByte {},seedWrites {},seedOriginal {};};
 static AlderLakeNAUXLink adlnAUXLink;
-static void adlnAUXObserve(uint64_t reg,uint32_t value) {
-    if(reg==0x64014) { // request: cmd 31:28, address 27:8, length-1 7:0
+// Observe the driver's native AUX writes (request word on DP_AUX_DATA_A_1: command 31:28, address
+// 27:8, length-1 7:0; payload on DP_AUX_DATA_A_2, first byte in bits 31:24). Two of them matter:
+// the lane-count byte (DPCD 0x101) decides the training word's enhanced-framing bit, and the eDP
+// configuration byte (DPCD 0x10A) is kept on the standard scrambler seed. The donor enables the
+// alternate seed on the sink (bit 0) while its training control words select the standard
+// scrambler on the source: training passes (control symbols and equalisation are seed-independent)
+// and every data symbol after it descrambles to noise. The firmware never enabled it.
+static uint32_t adlnAUXObserve(uint64_t reg,uint32_t value) {
+    auto &a=adlnAUXLink;
+    if(reg==0x64014) {
         const auto cmd=(value>>28)&0xF,address=(value>>8)&0xFFFFF,length=(value&0xFF)+1;
-        adlnAUXLink.pendingLaneWrite=cmd==8 && ((address==0x100 && length>=2) ? 1 : (address==0x101 ? 2 : 0));
-    } else if(reg==0x64018 && adlnAUXLink.pendingLaneWrite) {
-        adlnAUXLink.laneByte=adlnAUXLink.pendingLaneWrite==1 ? (value>>16)&0xFF : (value>>24)&0xFF;
-        adlnAUXLink.laneSeen=1;++adlnAUXLink.writes;adlnAUXLink.pendingLaneWrite=0;
+        a.pendingLaneWrite=cmd==8 && ((address==0x100 && length>=2) ? 1 : (address==0x101 ? 2 : 0));
+        a.pendingSeedByte=(cmd==8 && address<=0x10A && 0x10A<address+length && 0x10A-address<4) ? 1+(0x10A-address) : 0;
+    } else if(reg==0x64018) {
+        if(a.pendingLaneWrite) {
+            a.laneByte=a.pendingLaneWrite==1 ? (value>>16)&0xFF : (value>>24)&0xFF;
+            a.laneSeen=1;++a.writes;a.pendingLaneWrite=0;
+        }
+        if(a.pendingSeedByte) {
+            const auto shift=24-8*(a.pendingSeedByte-1);
+            a.seedOriginal=(value>>shift)&0xFF;++a.seedWrites;a.pendingSeedByte=0;
+            value&=~(1U<<shift);
+        }
     }
+    return value;
 }
 static bool adlnDDIPrepare(uint32_t value,uint64_t rva,AlderLakeNDDIPlan &p) {
     auto &c=display13FBPower;if(!c.map || c.bridge.bootPort!=0)return false;
@@ -5279,7 +5296,8 @@ static bool adlnDDIPrepare(uint32_t value,uint64_t rva,AlderLakeNDDIPlan &p) {
 static bool adlnEDPTraceSerialize(void *,void *,OSSerialize *serializer);
 static void adlnPublishEDPRemap() {
     {
-        uint64_t d[72] {2,adlnDDIRecord.checks,adlnDDIRecord.clockWrites,adlnDDIRecord.funcWrites,adlnDDIRecord.framing,adlnDDIRecord.count};
+        uint64_t d[72] {3,adlnDDIRecord.checks,adlnDDIRecord.clockWrites,adlnDDIRecord.funcWrites,adlnDDIRecord.framing,adlnDDIRecord.count,
+            adlnAUXLink.seedWrites,adlnAUXLink.seedOriginal|(uint64_t(adlnAUXLink.laneByte)<<8)|(uint64_t(adlnAUXLink.laneSeen)<<16)};
         for(unsigned i=0;i<8;++i)for(unsigned j=0;j<8;++j)d[8+8*i+j]=adlnDDIRecord.first[i][j];
         IORegistryEntry::getRegistryRoot()->setProperty("N97FBDDIAssociate",d,sizeof(d));
     }
@@ -5599,7 +5617,7 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
             }
             reg=phy.reg;value=phy.value;phyFlags=phy.redirected ? 32 : 0;
         }
-        if(reg==0x64014 || reg==0x64018)adlnAUXObserve(reg,value);
+        if(reg==0x64014 || reg==0x64018)value=adlnAUXObserve(reg,value);
         if(reg==0x60540 && (value&0x80000000U)) {
             AlderLakeNDDIPlan ddi;
             if(adlnDDIPrepare(value,rva,ddi)) {
