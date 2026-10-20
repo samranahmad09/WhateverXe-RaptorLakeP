@@ -5229,6 +5229,21 @@ static bool adlnPHYPlanWrite(uint64_t reg,uint32_t value,AlderLakeNPHYPlan &p) {
 struct AlderLakeNDDIPlan {bool clock {},func {};uint32_t clockValue {},funcValue {},value {};};
 struct AlderLakeNDDIRecord {volatile uint64_t checks {},clockWrites {},funcWrites {},framing {},count {};uint64_t first[8][8] {};};
 static AlderLakeNDDIRecord adlnDDIRecord;
+// The sink-side link configuration as the driver wrote it over AUX: a native write to DPCD 0x100
+// (rate, then the lane-count byte with ENHANCED_FRAME_EN in bit 7) arrives as the request word on
+// DP_AUX_DATA_A_1 followed by the payload on DP_AUX_DATA_A_2. The training control word's enhanced
+// framing bit follows that byte; the port flag is only the fallback before the first write is seen.
+struct AlderLakeNAUXLink {volatile uint32_t pendingLaneWrite {},laneByte {},laneSeen {},writes {};};
+static AlderLakeNAUXLink adlnAUXLink;
+static void adlnAUXObserve(uint64_t reg,uint32_t value) {
+    if(reg==0x64014) { // request: cmd 31:28, address 27:8, length-1 7:0
+        const auto cmd=(value>>28)&0xF,address=(value>>8)&0xFFFFF,length=(value&0xFF)+1;
+        adlnAUXLink.pendingLaneWrite=cmd==8 && ((address==0x100 && length>=2) ? 1 : (address==0x101 ? 2 : 0));
+    } else if(reg==0x64018 && adlnAUXLink.pendingLaneWrite) {
+        adlnAUXLink.laneByte=adlnAUXLink.pendingLaneWrite==1 ? (value>>16)&0xFF : (value>>24)&0xFF;
+        adlnAUXLink.laneSeen=1;++adlnAUXLink.writes;adlnAUXLink.pendingLaneWrite=0;
+    }
+}
 static bool adlnDDIPrepare(uint32_t value,uint64_t rva,AlderLakeNDDIPlan &p) {
     auto &c=display13FBPower;if(!c.map || c.bridge.bootPort!=0)return false;
     Display13FBDBUFIO readout {c.map};
@@ -5241,8 +5256,10 @@ static bool adlnDDIPrepare(uint32_t value,uint64_t rva,AlderLakeNDDIPlan &p) {
         const auto mst=Display13FBMemory::field<uint8_t>(port,0x1E),flag=Display13FBMemory::field<uint8_t>(port,0x117),framing=Display13FBMemory::field<uint8_t>(port,0x11A);
         fields=mst|(uint64_t(flag)<<8)|(uint64_t(framing)<<16)|(uint64_t(Display13FBMemory::field<uint32_t>(port,0x124)&0xFFFF)<<32)|
             (uint64_t(Display13FBMemory::field<uint32_t>(port,0x128)&0xFFFF)<<48);
-        if(framing)p.value|=1U<<18;
+        const bool enhanced=adlnAUXLink.laneSeen ? (adlnAUXLink.laneByte&0x80)!=0 : framing!=0;
+        if(enhanced)p.value|=1U<<18;
     }
+    fields|=uint64_t(adlnAUXLink.laneByte|(adlnAUXLink.laneSeen ? 0x100U : 0U))<<24; // bits 24..32: the sink's lane-count byte as written, bit 32 = seen
     if(p.value!=value)__atomic_fetch_add(&adlnDDIRecord.framing,1,__ATOMIC_RELAXED);
     p.clock=((clk>>28)&0xF)==0;
     if(p.clock) {p.clockValue=(clk&0x0FFFFFFFU)|0x10000000U;__atomic_fetch_add(&adlnDDIRecord.clockWrites,1,__ATOMIC_RELAXED);}
@@ -5582,6 +5599,7 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
             }
             reg=phy.reg;value=phy.value;phyFlags=phy.redirected ? 32 : 0;
         }
+        if(reg==0x64014 || reg==0x64018)adlnAUXObserve(reg,value);
         if(reg==0x60540 && (value&0x80000000U)) {
             AlderLakeNDDIPlan ddi;
             if(adlnDDIPrepare(value,rva,ddi)) {

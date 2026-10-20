@@ -420,3 +420,8 @@ when the physical read helper is unavailable; the trace freezes lead-up windows 
 and at the first normal-operation write, which bracket the whole exchange (DPCD rate, lane count, pattern writes,
 status replies); the r3 configuration carries the read-only display-evidence boot argument that enables the
 sampler. Pending hardware validation.
+
+Addendum (2026-10-20): the user reports the noise moves like television static, which points at the link layer: the
+sink is locked but cannot frame the pixel stream. The enhanced-framing bit of the training control word is now taken
+from the lane-count byte the driver itself writes to DPCD 0x101 over AUX (observed on the AUX data registers), with
+the port flag only as a fallback before that write is seen, and the observed byte is recorded at each boundary.
