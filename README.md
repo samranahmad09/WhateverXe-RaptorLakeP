@@ -6,10 +6,12 @@ A fork of [WhateverXe](https://github.com/b00t0x/WhateverXe) working toward macO
 **Raptor Lake-P** integrated graphics: the UHD and Iris Xe GPUs in 13th-generation Core H, P and U laptop
 processors, including the laptop's internal (eDP) panel.
 
-> **Status: not a working driver yet.**
-> - Today this fork adds two opt-in diagnostics: the read-only `-wex-rplp-observe`, which reports the GPU's
->   configuration and the firmware's display state, and `-wex-rplp-gpu`, a one-shot GPU command self-test.
-> - Raptor Lake-P GPUs remain unsupported.
+> **Status: the internal panel lights natively; no acceleration yet.**
+> - Since 2026-10-20 the native Display 13 framebuffer path drives the reference machine's eDP panel (link
+>   training, 60 Hz mode, cursor, WindowServer desktop, software rendered) with the `-wex-rplp-gt` boot
+>   argument. The GPU accelerator does not start yet; that is the next milestone.
+> - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
+> - Raptor Lake-P support is experimental and tested on one machine.
 > - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.
 > - Hardware findings so far: [docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md).
 

@@ -441,3 +441,19 @@ plane's surface mapping linearly to the stolen framebuffer, the pages WindowServ
 Change: the plugin observes the driver's native AUX writes and clears bit 0 of the DPCD 0x10A byte before the payload is
 written, keeping the panel on the standard seed the source uses, and records the original byte. Pending hardware
 validation.
+
+### Native boot: first picture (2026-10-20)
+
+With the panel kept on the standard scrambler seed, the native mode change produced the desktop: the in-boot capture
+shows the eDP configuration byte going out as 0x00, clock recovery on both lanes after pattern 1, equalisation, symbol
+lock and alignment after pattern 4, the transcoder on with the driver's function word, the pipe scanning at 60 Hz, the
+backlight on, and WindowServer presenting to the stolen framebuffer with the cursor plane updating. The user reports
+the login screen and desktop behaving like the stock configuration (software rendered).
+
+Open display-side item: about 15 seconds after the desktop appeared, a watermark arm whose compares passed had its
+DBUF retire refused (the retire step returned Conflict) and the arm wrapper faulted the watermark path; the picture is
+unaffected but later watermark updates are refused until the cause is found.
+
+The accelerator does not start: its kext loads, no accelerator object is created, the native probe is blocked and native
+start is not allowed, because the strong-uncacheable MMIO mapping is reported not ready even though all nine of its
+preflight conditions pass. That is the next milestone.

@@ -5,9 +5,9 @@
 [WhateverXe](https://github.com/b00t0x/WhateverXe)のforkです。Intel **Raptor Lake-P**内蔵GPUのmacOS対応を目指しています。
 対象は第13世代Core H／P／Uシリーズのノート向けCPUに搭載されたUHD／Iris Xe Graphicsと、ノートPCの内蔵ディスプレイ（eDP）です。
 
-> **現状：まだ動作するドライバではありません。**
-> - このforkが現在追加しているのは、任意の診断機能2つのみです。読み取り専用の`-wex-rplp-observe`はGPUの構成とファームウェアの画面状態を報告し、`-wex-rplp-gpu`はGPUがコマンドを実行できるかを1回だけ確かめるセルフテストです。
-> - Raptor Lake-PのGPUは引き続き非対応です。
+> **現状：内蔵パネルはネイティブに点灯します。アクセラレーションは未対応です。**
+> - 2026-10-20以降、ネイティブのDisplay 13フレームバッファ経路が検証機のeDPパネルを駆動します（リンクトレーニング、60 Hzモード、カーソル、WindowServerデスクトップ、ソフトウェア描画。起動引数`-wex-rplp-gt`）。GPUアクセラレータはまだ起動しません。これが次の目標です。
+> - Raptor Lake-P対応は実験段階で、1台の機種でのみ検証しています。読み取り専用の`-wex-rplp-observe`と単発の`-wex-rplp-gpu`セルフテストは引き続き利用できます。
 > - upstreamが対応する機種（Tiger Lake、Alder Lake-N / Twin Lake）の動作はupstreamと変わりません。
 > - これまでのハードウェア調査結果：[docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md)（英語）。
 
