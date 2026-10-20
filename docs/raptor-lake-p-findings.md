@@ -401,3 +401,22 @@ transcoder clock from DDI A when the select is empty, configures the function wo
 count's width, enable clear) when it differs, and carries the sink's negotiated enhanced framing into the training
 control word. Readbacks of the clock select, function word, DP_TP_CTL, DDI buffer and the port's lane, rate, MST and
 framing fields are recorded at each boundary (`N97FBDDIAssociate`). Pending hardware validation.
+
+### Native boot: the link trains and the panel lights (2026-10-20)
+
+With the transcoder clock selected and the function word configured before the first training pattern, and
+enhanced framing carried into the training control word, the native mode change completed in one pass: training
+pattern 1, then pattern 4 for equalisation, idle, normal operation, no retry. The pre-training record shows the
+state the plugin corrected at the first pattern (clock select zero, function word with no DDI selected). The capture
+taken at 61 s shows the transcoder on with the driver's own function word, DDI A on DPLL0 with the clock selected,
+DP_TP in normal operation with enhanced framing, the pipe scanning at 60 Hz, the backlight on, WindowServer flipping
+to surface 0 with the cursor plane updating, and a Complete watermark latch with the DBUF retired. The panel shows
+uniform noise rather than the desktop. The plane scans the borrowed boot scanout at GGTT offset 0, which is outside
+the plugin's shared pool, so the pixel sampler recorded nothing, and the training exchange itself fell between the
+frozen window and the live ring.
+
+Change: the pixel sampler accepts the boot scanout below the aperture and records each sample's GGTT entry even
+when the physical read helper is unavailable; the trace freezes lead-up windows at the first training pattern 1
+and at the first normal-operation write, which bracket the whole exchange (DPCD rate, lane count, pattern writes,
+status replies); the r3 configuration carries the read-only display-evidence boot argument that enables the
+sampler. Pending hardware validation.

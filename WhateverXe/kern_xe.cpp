@@ -5589,6 +5589,11 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
                 if(ddi.func) {FunctionCast(wrapDisplay13GMBusWrite,callbackXE->orgDisplay13GMBusWrite)(access,0x60400,ddi.funcValue);adlnEDPTrace(true,0x60400,ddi.funcValue,rva,16);}
                 value=ddi.value;
             }
+            // Freeze the lead-up to the first TP1 (the DPCD rate/count/pattern writes and the
+            // DDI enable precede it) and to the first normal-operation write (the last status reads).
+            static volatile uint32_t trainingWindows;const auto pattern=(value>>8)&7U;
+            if(pattern==0 && !(trainingWindows&1)) {trainingWindows|=1;adlnEDPTraceDisable(0x100000000ULL|rva);}
+            if(pattern==3 && !(trainingWindows&2)) {trainingWindows|=2;adlnEDPTraceDisable(0x200000000ULL|rva);}
         }
         adlnEDPTrace(true,reg,value,rva,(reg!=original && !phyFlags ? 2 : 0)|(value!=requested ? 4 : 0)|phyFlags);
         if(reg==0x70180 && !(value&0x80000000U))adlnEDPTraceDisable(rva);
@@ -7179,8 +7184,10 @@ static bool adlnObserveScanoutPixels(unsigned pipe,uint64_t (&q)[88]) {
     if(!Display13FBIRQ::powered(io.read(0x45404),pipe))return false;
     const auto control=io.read(0x70180+bank),surface=io.read(0x7019C+bank),live=io.read(0x701AC+bank);
     const auto prefix=__atomic_load_n(&display13FBGTT.sharedPoolPrefix,__ATOMIC_ACQUIRE);
+    // The surface is either inside the plugin's shared pool or the borrowed boot scanout
+    // below the aperture (the firmware's stolen mapping at GGTT 0, which the panel path flips to).
     if(!(control&(1U<<31)) || !Display13WM::supportedRGBControl(control) || (control&(1U<<8)) ||
-       !prefix || surface<prefix || (surface&4095) || surface!=live)return false;
+       !((prefix && surface>=prefix) || surface<Display13FBGTT::Aperture) || (surface&4095) || surface!=live)return false;
     const auto frame=io.read(0x70040+bank);
     if(counts[pipe] && frame-lastFrame[pipe]<30)return false;
     lastFrame[pipe]=frame;
@@ -7194,14 +7201,14 @@ static bool adlnObserveScanoutPixels(unsigned pipe,uint64_t (&q)[88]) {
     for(unsigned j=0;j<9;++j) {
         auto r=q+16+j*8;const auto x=xs[j%3],y=ys[j/3];r[0]=x|(uint64_t(y)<<32);
         uint64_t off=0;
-        if(!q[12] || (q[5]&~4095ULL) || !Display13FBMemory::scanoutSampleOffset(tiling,q[5],width,height,q[7],x,y,off) ||
+        if((q[5]&~4095ULL) || !Display13FBMemory::scanoutSampleOffset(tiling,q[5],width,height,q[7],x,y,off) ||
            off>=0x100000000ULL-surface || 16>0x100000000ULL-surface-off)continue;
         r[1]=surface+off;
         const auto reg=0x800000+((r[1]&~4095ULL)>>9);
         if(reg>c.map->getLength()-8)continue;
         auto pte=reinterpret_cast<volatile uint64_t *>(c.map->getVirtualAddress()+reg);
-        r[2]=*pte;const uint64_t physical=r[2]&0x7FFFFFF000ULL;
-        if(!(r[2]&1) || (r[2]&2) || !physical)continue;
+        r[2]=*pte;const uint64_t physical=r[2]&0x7FFFFFF000ULL; // the entry is kept even without the VM helper
+        if(!q[12] || !(r[2]&1) || (r[2]&2) || !physical)continue;
         r[3]=physical+(r[1]&4095);
         if(r[3]>UINT64_MAX-tglVM.directBase)continue;
         const auto cpu=tglVM.directBase+r[3];
