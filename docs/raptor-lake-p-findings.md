@@ -479,3 +479,19 @@ counters; the wrap is now an explicit retirement input, and a backward counter i
 
 Not validated yet: Metal workloads beyond the desktop, sleep/wake, panel power sequencing, brightness control, 144 Hz,
 external outputs, and whether the revision-4 workaround table the driver applies suits this GT C0 stepping.
+
+### Display wake: interrupts are enabled before the pipe (2026-10-20)
+
+Turning the internal panel off and on again (display sleep, then a key press) brought the picture back but left every
+display interrupt dead, and the compositor gave up forty seconds later with a transaction hang: the accelerator's display
+pipe had seen no VBlank since the display went off. The plugin's records explain the order: at wake the native driver
+asks for the display interrupts first, while the pipe is still disabled (PIPECONF 0), and only then re-enables the pipe
+and asks for the VBlank interrupt. The plugin's interrupt module had treated "expected pipe not running" as a topology
+fault and latched itself off, so the later VBlank request was refused too. Boot never shows this because the firmware's
+pipe is already running when the first request arrives.
+
+The fix defers instead of faulting: a request with no running pipe while the expected pipe is powered is pending, and
+the VBlank request after the pipe is on re-arms the whole bank (masters, pipe bank, DSB and hotplug policy) before
+setting the VBlank bit. The re-test recorded the pending answer at the re-enable, one re-arm with a complete status,
+interrupts and GPU submissions flowing for the following minute, no display-pipe timeouts and no compositor report. The
+panel's own power-off and relink therefore work on this path; a full system sleep has not been attempted yet.
