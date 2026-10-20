@@ -8371,14 +8371,15 @@ static bool adlnObserveScanoutPixels(unsigned pipe,uint64_t (&q)[88]) {
     return true;
 }
 
-// R4 probe (opt-in: -wex-rplp-pwm=<10..100>, Raptor Lake-P only): one write of the backlight PWM duty from the
+// R4 probe (opt-in: -wex-rplp-pwm, Raptor Lake-P only): one write of the backlight PWM duty (70 %) from the
 // firmware-enabled controller's own period, at the first completed watermark retire of the desktop. It answers
 // whether the display engine's PWM pin reaches this panel; Linux reports the embedded controller owns it.
 static struct {volatile uint64_t attempted,applied,percent,ctl,freq,before,written,after;} adlnBacklight;
 static void adlnBacklightProbe(Display13FBPowerContext &c) {
 	auto &b=adlnBacklight;if(b.attempted || !c.map || c.map->getLength()!=0x1000000 || !c.map->getVirtualAddress())return;
 	if(xelpSelectedProfile.family!=XELP::Family::RaptorLakeP)return;
-	uint32_t percent=0;if(!PE_parse_boot_argn("wex-rplp-pwm",&percent,sizeof(percent)))return;
+	if(!checkKernelArgument("-wex-rplp-pwm"))return;
+	const uint32_t percent=70; // One data point against the firmware's ~35 %; a dash-prefixed argument carries no value.
 	b.attempted=1;b.percent=percent;
 	const auto base=c.map->getVirtualAddress();
 	auto reg=[&](uint32_t offset)->volatile uint32_t & {return *reinterpret_cast<volatile uint32_t *>(base+offset);};

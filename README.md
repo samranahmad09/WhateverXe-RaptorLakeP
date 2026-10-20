@@ -292,6 +292,7 @@ Alder Lake-N / Twin Lake.
 | `-wex-rplp-observe` | Raptor Lake-P only: publish the read-only R1 diagnostic described above. The GPU stays unsupported. |
 | `-wex-rplp-gpu` | Raptor Lake-P only, with `-wex-rplp-observe`: run the one-shot R2 BCS self-test described above. The GPU stays unsupported. |
 | `-wex-rplp-gt` | Raptor Lake-P A7A8 revision 4 only: admit the device to the in-development backend (native panel path and accelerator). |
+| `-wex-rplp-pwm` | Raptor Lake-P only, with `-wex-rplp-gt`: once the desktop appears, write the display engine's backlight PWM duty to 70 % (the firmware leaves about 35 %) and record it. Tells whether the PWM pin drives this panel. |
 
 ### Tested features and known issues
 
