@@ -6749,6 +6749,12 @@ static void adlnPublishECBacklight() {
 		b.lastDuty,b.lastFreq,b.lastLevel,b.lastSent,b.lastStatus,b.lastReturn,b.selfLevel,b.selfMax,b.selfSource,b.selfStatus,b.selfProbe,b.selfRestored,b.pending};
 	IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPECBacklight",r,sizeof(r));
 }
+// The ACPI device class by name: this kext declares no dependency on IOACPIFamily, so the class's metaclass symbol
+// must never be referenced (an unresolved import slot panicked the first r4 boots); metaCast by name lives in the
+// kernel and the method calls below are virtual, so no IOACPIFamily symbol is needed.
+static IOACPIPlatformDevice *adlnECBacklightACPI(OSObject *entry) {
+	return entry ? static_cast<IOACPIPlatformDevice *>(entry->metaCast("IOACPIPlatformDevice")) : nullptr;
+}
 // True when this ACPI device's _WDG carries the EC backlight GUID as a method; remembers the method's name.
 static bool adlnECBacklightMatch(IOACPIPlatformDevice *dev) {
 	OSObject *obj=nullptr;
@@ -6767,7 +6773,7 @@ static IOACPIPlatformDevice *adlnECBacklightFind() {
 	if(auto matching=IOService::nameMatching("AWMI")) {
 		if(auto iterator=IOService::getMatchingServices(matching)) {
 			while(auto entry=iterator->getNextObject()) {
-				auto dev=OSDynamicCast(IOACPIPlatformDevice,entry);
+				auto dev=adlnECBacklightACPI(entry);
 				if(dev && adlnECBacklightMatch(dev)) {dev->retain();found=dev;b.deviceFound=1;break;}
 			}
 			iterator->release();
@@ -6778,7 +6784,7 @@ static IOACPIPlatformDevice *adlnECBacklightFind() {
 		if(auto matching=IOService::serviceMatching("IOACPIPlatformDevice")) {
 			if(auto iterator=IOService::getMatchingServices(matching)) {
 				while(auto entry=iterator->getNextObject()) {
-					auto dev=OSDynamicCast(IOACPIPlatformDevice,entry);
+					auto dev=adlnECBacklightACPI(entry);
 					if(dev && adlnECBacklightMatch(dev)) {dev->retain();found=dev;b.deviceFound=2;break;}
 				}
 				iterator->release();
