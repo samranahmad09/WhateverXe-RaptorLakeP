@@ -13,9 +13,14 @@ processors, including the laptop's internal (eDP) panel.
 >   and About This Mac reports 1536 MB for the iGPU.
 > - That build is `rplp-accel`: upstream 0.3.0 merged (one binary for Big Sur through Tahoe; the MMIO cache
 >   bridges on the 20G1443 kernel bound to the BAR page range) plus the fork's panel path. `main` follows it.
-> - Display sleep and wake work (the interrupt re-arm at the pipe's activation boundary). Not validated yet: Metal
->   workloads beyond the desktop, OpenGL (the prepatched user-mode drivers' device-ID allowlists lack A7A8; in
->   progress), system sleep, brightness control, 144 Hz, external outputs. The findings describe each step.
+> - Display sleep and wake work (the interrupt re-arm at the pipe's activation boundary).
+> - OpenGL applications start since 2026-10-21: the accelerator's hardware-capabilities reply presents Tiger Lake
+>   GT2 (9A49) to the prepatched user-mode OpenGL and video drivers, whose device lists end at Alder Lake-N
+>   (`-wex-rplp-nocaps` keeps the physical ID), and Chess draws its 3D board. The picture still flickers while the
+>   board rotates and the application feels slow; that is the open OpenGL item. Not validated yet: Metal workloads
+>   beyond the desktop, hardware video decode (a Safari video plays; the decode path is not yet confirmed), system
+>   sleep, brightness control (a backlight PWM probe changed nothing visible on this panel), 144 Hz, external
+>   outputs. The findings describe each step.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
 > - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.

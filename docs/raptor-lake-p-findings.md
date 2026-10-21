@@ -495,3 +495,22 @@ the VBlank request after the pipe is on re-arms the whole bank (masters, pipe ba
 setting the VBlank bit. The re-test recorded the pending answer at the re-enable, one re-arm with a complete status,
 interrupts and GPU submissions flowing for the following minute, no display-pipe timeouts and no compositor report. The
 panel's own power-off and relink therefore work on this path; a full system sleep has not been attempted yet.
+
+### OpenGL: the user-mode drivers judge the device by the accelerator's capabilities reply (2026-10-21)
+
+With the accelerator running, Metal applications worked while every OpenGL application (Chess, Preview's image
+adjustments, Safari's WebGL and video pages) aborted at an assertion in the OpenGL driver's compiler setup. The
+deciding value is neither the IORegistry `device-id` nor the GT description: it is the device identity inside the
+reply the user-mode drivers receive when they ask the accelerator for the GPU's hardware capabilities. The prepatched
+OpenGL and video drivers accept Tiger Lake and Alder Lake-N identities there and nothing else, and the installed
+drivers are signed as a set, so editing their device lists on disk was not an option.
+
+The plugin answers that one question differently for A7A8: after the accelerator has filled the reply, the device
+halfword is rewritten from A7A8 to 9A49 (Tiger Lake GT2); every other byte of the reply stays as the accelerator
+produced it for this GPU, the IORegistry keeps the physical `device-id`, and Metal is not involved (it describes the
+platform through a different query). `-wex-rplp-nocaps` restores the physical identity, and the record
+`N97RPLPCapsReply` counts calls, rewrites and refusals.
+
+First result: Chess starts and draws its 3D board, the first OpenGL rendering on this GPU under macOS, while the Metal
+desktop, the Drift screen saver and a Safari video are unaffected. The board flickers while it is rotated and the
+application feels slow; that rendering question is open, and the record of the first boot is still to be read.
