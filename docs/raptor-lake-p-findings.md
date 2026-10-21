@@ -537,3 +537,32 @@ backlight owner (the `nvidia_wmi_ec_backlight` driver bound), and the probe conf
 pin is not what this panel follows. Brightness control therefore has to go through the embedded controller's ACPI
 interface rather than the display engine's PWM. Record: `N97RPLPBacklightProbe` = [1, attempted, applied, percent, CTL1,
 FREQ1, before, written, after].
+
+### Brightness: the embedded controller's WMI method, reached from the kernel (2026-10-21)
+
+The firmware exposes the panel's brightness the way Windows and Linux use it: a WMI device under the root bridge whose
+`_WDG` carries the GUID 603E9613-EF25-4338-A3D0-C46177516DB7 as a method, a 24-byte argument block (mode byte, value
+DWORD) and three operations on the level (get, set, maximum) plus one on the source. The level is a memory-mapped mailbox
+field of the embedded controller, so no EC driver is involved. `-wex-rplp-ecbl` finds that device by its `_WDG`, and on
+the first boot every call succeeded from a kernel thread call: level 38, maximum 100, source 2 (the EC), a step to 53,
+the restore to 38. The framebuffer writes the backlight duty register on its own during light-up (five writes, one of
+them zero), and those writes, scaled by the period, are what the bridge forwards (38 percent, the firmware's ratio, where
+the EC's own default had been 35).
+
+With a PNLF device present, AppleBacklight attaches to it and the built-in display becomes an `AppleBacklightDisplay`
+whose parameters include the framebuffer's backlight attribute (`bklt`, 24704 of 65535, the same 38 percent) but no
+`brightness`: the panel driver publishes that parameter only for a panel it knows by name, and this BOE panel is not in
+its table. The plugin now adds the generic panel curves to that table, as WhateverGreen does, so the slider can appear.
+
+### OpenGL: readback isolates two defects (2026-10-21)
+
+A pure-Python test (`tools/rplp-gl-verify.py`) creates an accelerated legacy context ("Intel HD Graphics TGL OpenGL Engine
+(GT2 LP)", 2.1 INTEL-16.0.32) with no window, renders into a 64x64 RGBA8 framebuffer and reads the pixels back. Passing:
+a fixed-function triangle over 32 alternating frames, a flat GLSL colour, a 2x2 nearest-filtered texture, a 4x multisample
+resolve, a 1024x1024 shader checker compared row by row, and 16 frames each with and without a finish before readback.
+Failing, deterministically: after drawing with one program and switching to a newly built second program, the second
+program's first draw produced the first program's colour over the whole target (the same checker shader built later,
+after fixed-function drawing, was correct); and with the depth test enabled (less), a nearer triangle drawn after a
+farther one was rejected everywhere (the far colour stayed), while the opposite order was correct. The follow-up test
+(`tools/rplp-gl-verify2.py`) reads the depth buffer itself and varies formats, functions, draw orders and program
+switches to separate wrong depth values from wrong comparisons and to characterise the stale-shader case.

@@ -18,11 +18,15 @@ processors, including the laptop's internal (eDP) panel.
 >   GT2 (9A49) to the prepatched user-mode OpenGL and video drivers, whose device lists end at Alder Lake-N
 >   (`-wex-rplp-nocaps` keeps the physical ID; `-wex-rplp-capsadln` presents Alder Lake-N instead, an experiment).
 >   Preview's image adjustments work; Chess and WebGL, which redraw 3D scenes continuously, show flicker and striped
->   faces while the GPU records no recovery. That rendering defect is the open OpenGL item. Hardware video: Safari
->   playback works, but the screen recorder crashes inside the video driver during a pixel transfer (open).
-> - Brightness: the display engine's backlight PWM duty was written and read back at 70 percent with no visible
->   change, so the embedded controller owns this panel's backlight and brightness control has to go through ACPI
->   (built as `-wex-rplp-ecbl` with a PNLF device, under test). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
+>   faces while the GPU records no recovery. An offscreen readback test on the hardware renderer passes the
+>   fixed-function, shader, texture, multisample and large-surface stages and isolates two defects: a program switch
+>   whose first draw uses the previous fragment shader, and a depth test that rejects nearer fragments drawn after
+>   farther ones. Those are the open OpenGL items. Hardware video: Safari playback works, but the screen recorder
+>   crashes inside the video driver during a pixel transfer (open).
+> - Brightness goes through the embedded controller: the display engine's PWM duty does not reach this panel, so
+>   `-wex-rplp-ecbl` forwards the framebuffer's duty writes to the firmware's WMI brightness method (verified on the
+>   hardware: level read, raised, restored, source reported as the EC) and gives AppleBacklight the generic panel
+>   curves so the built-in display gets its slider (the slider itself is the next test). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
 >   findings describe each step.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
