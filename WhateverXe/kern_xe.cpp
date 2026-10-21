@@ -6765,10 +6765,12 @@ static IOACPIPlatformDevice *adlnECBacklightFind() {
 	if(adlnECBacklightDevice)return adlnECBacklightDevice;
 	IOACPIPlatformDevice *found=nullptr;
 	if(auto matching=IOService::nameMatching("AWMI")) {
-		if(auto service=IOService::copyMatchingService(matching)) {
-			auto dev=OSDynamicCast(IOACPIPlatformDevice,service);
-			if(dev && adlnECBacklightMatch(dev)) {found=dev;b.deviceFound=1;}
-			else service->release();
+		if(auto iterator=IOService::getMatchingServices(matching)) {
+			while(auto entry=iterator->getNextObject()) {
+				auto dev=OSDynamicCast(IOACPIPlatformDevice,entry);
+				if(dev && adlnECBacklightMatch(dev)) {dev->retain();found=dev;b.deviceFound=1;break;}
+			}
+			iterator->release();
 		}
 		matching->release();
 	}
