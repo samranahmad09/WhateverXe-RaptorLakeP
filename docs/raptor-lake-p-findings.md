@@ -514,3 +514,26 @@ platform through a different query). `-wex-rplp-nocaps` restores the physical id
 First result: Chess starts and draws its 3D board, the first OpenGL rendering on this GPU under macOS, while the Metal
 desktop, the Drift screen saver and a Safari video are unaffected. The board flickers while it is rotated and the
 application feels slow; that rendering question is open, and the record of the first boot is still to be read.
+
+### OpenGL and video after admission: the second boot (2026-10-21)
+
+A second session on the same build separated the consumers. Preview's image adjustments (a 2D OpenGL layer) work.
+Chess flickers while its board is rotated, and the spinning WebGL cube on get.webgl.org is drawn as vertical dashed
+stripes inside the cube's outline. Meanwhile the plugin's records show nothing wrong on its own side: every
+hardware-capabilities query was rewritten (no errors, no odd sizes), the GPU recovery counters stayed at zero, interrupt
+and submission counters rose steadily, and the display interrupt bank reported no fault. Screen recording failed three
+times in a row: the recorder crashed inside the video driver with an access to address 8 (a null object), reached from
+VideoToolbox's pixel-transfer session through the GVA framework; a Safari video had played in the earlier session. The
+crash reports are kept with the private captures. Both the rendering defect and the video crash are open; the
+`-wex-rplp-capsadln` experiment exists to tell whether the identity presented after admission plays a part.
+
+### Backlight: the display engine's PWM duty does not reach this panel (2026-10-21)
+
+The firmware leaves the display engine's backlight PWM enabled: BXT_BLC_PWM_CTL1 (0xC8250) = 0x80000000, FREQ1
+(0xC8254) = 17777 and DUTY1 (0xC8258) = 6701, about 38 percent. The opt-in probe (`-wex-rplp-pwm`) wrote DUTY1 = 12444
+(70 percent) once the desktop's first watermark update had retired; every later pass read 12444 back, and the panel's
+brightness did not change on any of four boots. The Linux capture had already named the embedded controller as the
+backlight owner (the `nvidia_wmi_ec_backlight` driver bound), and the probe confirms it on the register side: the PWM
+pin is not what this panel follows. Brightness control therefore has to go through the embedded controller's ACPI
+interface rather than the display engine's PWM. Record: `N97RPLPBacklightProbe` = [1, attempted, applied, percent, CTL1,
+FREQ1, before, written, after].

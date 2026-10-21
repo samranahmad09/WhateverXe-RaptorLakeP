@@ -16,11 +16,14 @@ processors, including the laptop's internal (eDP) panel.
 > - Display sleep and wake work (the interrupt re-arm at the pipe's activation boundary).
 > - OpenGL applications start since 2026-10-21: the accelerator's hardware-capabilities reply presents Tiger Lake
 >   GT2 (9A49) to the prepatched user-mode OpenGL and video drivers, whose device lists end at Alder Lake-N
->   (`-wex-rplp-nocaps` keeps the physical ID), and Chess draws its 3D board. The picture still flickers while the
->   board rotates and the application feels slow; that is the open OpenGL item. Not validated yet: Metal workloads
->   beyond the desktop, hardware video decode (a Safari video plays; the decode path is not yet confirmed), system
->   sleep, brightness control (a backlight PWM probe changed nothing visible on this panel), 144 Hz, external
->   outputs. The findings describe each step.
+>   (`-wex-rplp-nocaps` keeps the physical ID; `-wex-rplp-capsadln` presents Alder Lake-N instead, an experiment).
+>   Preview's image adjustments work; Chess and WebGL, which redraw 3D scenes continuously, show flicker and striped
+>   faces while the GPU records no recovery. That rendering defect is the open OpenGL item. Hardware video: Safari
+>   playback works, but the screen recorder crashes inside the video driver during a pixel transfer (open).
+> - Brightness: the display engine's backlight PWM duty was written and read back at 70 percent with no visible
+>   change, so the embedded controller owns this panel's backlight and brightness control has to go through ACPI
+>   (planned). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
+>   findings describe each step.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
 > - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.
