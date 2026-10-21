@@ -10080,6 +10080,31 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					rplpCapsDisabled=checkKernelArgument("-wex-rplp-nocaps");
 					rplpCapsPresented=checkKernelArgument("-wex-rplp-capsadln") ? RaptorLakeP::CapsReply::PresentedADLN : RaptorLakeP::CapsReply::Presented;
 					adlnECBacklightSetup();
+					// Diagnostic (opt-in -wex-rplp-warev3, Codex's Q17 specification, 2026-10-21): the kernel accelerator's
+					// start() hands the physical revision (4) to its workaround-table initialisation; this supplies 3 to that
+					// one call only, so the table takes the pre-revision-4 policies (13 packed bits differ). Everything else
+					// (physical revision, admission, the GL caps, the compiler's table) stays at 4. Guarded by the exact
+					// 8-byte site inside IntelAccelerator::start and applied in place; N97RPLPWARev3 = [1, requested, site, applied].
+					{
+						uint64_t rec[4] {1,0,0,0};
+						rec[1]=checkKernelArgument("-wex-rplp-warev3");
+						if(rec[1]) {
+							static const uint8_t site[] {0x41,0x0F,0xB7,0x8D,0x10,0x11,0x00,0x00};
+							static const uint8_t rev3[] {0xB9,0x03,0x00,0x00,0x00,0x90,0x90,0x90};
+							constexpr size_t offset=0x240B6;
+							const auto start=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator5startEP9IOService",address,size);
+							patcher.clearError();
+							rec[2]=size>offset+sizeof(site) && start>=address && start<address+offset && address+offset-start<0x400 &&
+								!memcmp(reinterpret_cast<const void *>(address+offset),site,sizeof(site));
+							if(rec[2]) {
+								KernelPatcher::LookupPatch patch {&kextIntelTGL,site,rev3,sizeof(site),1};
+								patcher.applyLookupPatch(&patch,reinterpret_cast<uint8_t *>(address+offset),sizeof(site));
+								rec[3]=patcher.getError()==KernelPatcher::Error::NoError && !memcmp(reinterpret_cast<const void *>(address+offset),rev3,sizeof(rev3));
+								patcher.clearError();
+							}
+						}
+						IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPWARev3",rec,sizeof(rec));
+					}
 					KernelPatcher::RouteRequest caps {"__ZN13IGAccelDevice11get_hw_capsEP16_IntelHwCapsInfoS1_yPy",wrapRaptorLakePGetHWCaps,orgRaptorLakePGetHWCaps};
 					bool capsReady=size>0x9D40 && patcher.solveSymbol<mach_vm_address_t>(index,caps.symbol,address,size)==address+0x9CDE;
 					patcher.clearError();
