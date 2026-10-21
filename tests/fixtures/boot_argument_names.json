@@ -132,6 +132,7 @@
   "-wex-rplp-gpu": [],
   "-wex-rplp-gt": [],
   "-wex-rplp-pwm": [],
+  "-wex-rplp-nocaps": [],
   "-wexoff": [
     "-wxeoff"
   ],

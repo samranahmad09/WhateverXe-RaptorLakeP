@@ -292,5 +292,26 @@ int main() {
     auto allOnes=eDP();
     const auto onesBoot=AlderLakeN::readDisplay(allOnes,true);allOnes.regs[0xc8258]=UINT32_MAX;
     assert(RaptorLakeP::readEDP(allOnes,onesBoot).status==EDPStatus::Unavailable);
-    std::puts("RaptorLakeP eDP readout, DP SST selection, power-change and bounded-read fixtures passed");
+    // The user-client hardware-caps reply: only the device halfword of a successful, full A7A8 reply changes;
+    // every other byte, other devices, errors, short replies and the disabled mode stay untouched.
+    {
+        using namespace RaptorLakeP::CapsReply;
+        uint8_t reply[Size];for(unsigned i=0;i<Size;++i)reply[i]=uint8_t(0x30+i);
+        reply[8]=0x86;reply[9]=0x80;reply[10]=0xA8;reply[11]=0xA7;
+        uint8_t expected[Size];std::memcpy(expected,reply,Size);expected[10]=0x49;expected[11]=0x9A;
+        assert(identity(reply)==Physical && adapt(reply,Size,0,true)==Status::Rewritten);
+        assert(identity(reply)==Presented && !std::memcmp(reply,expected,Size));
+        assert(adapt(reply,Size,0,true)==Status::NotA7A8 && !std::memcmp(reply,expected,Size));
+        uint8_t other[Size];std::memcpy(other,expected,Size);other[10]=0xD2;other[11]=0x46;
+        uint8_t copy[Size];std::memcpy(copy,other,Size);
+        assert(adapt(other,Size,0,true)==Status::NotA7A8 && !std::memcmp(other,copy,Size));
+        uint8_t a7a8[Size];std::memcpy(a7a8,expected,Size);a7a8[10]=0xA8;a7a8[11]=0xA7;std::memcpy(copy,a7a8,Size);
+        assert(adapt(a7a8,Size,0,false)==Status::Disabled && !std::memcmp(a7a8,copy,Size));
+        assert(adapt(a7a8,Size,int(0xE00002BC),true)==Status::Error && !std::memcmp(a7a8,copy,Size));
+        assert(adapt(a7a8,Size-4,0,true)==Status::BadSize && adapt(a7a8,0,0,true)==Status::BadSize);
+        assert(adapt(nullptr,Size,0,true)==Status::BadSize && !std::memcmp(a7a8,copy,Size));
+        assert(adapt(a7a8,Size,0,true)==Status::Rewritten && identity(a7a8)==Presented && a7a8[8]==0x86 && a7a8[9]==0x80);
+        for(unsigned i=0;i<Size;++i)if(i!=10 && i!=11)assert(a7a8[i]==copy[i]);
+    }
+    std::puts("RaptorLakeP eDP readout, DP SST selection, power-change, bounded-read and caps-reply fixtures passed");
 }

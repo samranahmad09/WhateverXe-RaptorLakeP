@@ -69,6 +69,10 @@ private:
 	__attribute__((noinline)) bool processAlderLakeNLoadOnly(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	__attribute__((noinline)) bool processAlderLakeNRejectedAccelerator(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	static IOService *wrapAlderLakeNRejectedAcceleratorProbe(IOService *that,IOService *provider,SInt32 *score);
+	// Raptor Lake-P: the device user client's hardware-caps reply presents 9A49 (see RaptorLakeP::CapsReply).
+	static IOReturn wrapRaptorLakePGetHWCaps(void *that,void *input,void *output,uint64_t inputSize,uint64_t *outSize);
+	mach_vm_address_t orgRaptorLakePGetHWCaps {};
+	bool rplpCapsDisabled {false};
 	__attribute__((noinline)) bool processAlderLakeNParentBoundary(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	__attribute__((noinline)) bool processXELPMemoryStage(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	__attribute__((noinline)) bool processAlderLakeNConfigStage(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);

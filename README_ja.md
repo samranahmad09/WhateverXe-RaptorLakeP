@@ -216,6 +216,7 @@ Alder Lake-N / Twin Lakeで世代選択や個別機能の有効化引数を追�
 | `-wex-rplp-gpu` | Raptor Lake-Pのみ。`-wex-rplp-observe`と併用し、上記のR2 BCSセルフテストを1回実行する。GPUは非対応のまま。 |
 | `-wex-rplp-gt` | Raptor Lake-PのA7A8（revision 4）のみ。開発中のバックエンドへの組み込みを許可する（ネイティブの内蔵パネル経路とアクセラレータ）。 |
 | `-wex-rplp-pwm` | Raptor Lake-Pのみ。`-wex-rplp-gt`と併用し、デスクトップ表示後にディスプレイエンジンのバックライトPWMデューティを70 %に1度だけ書き込み（ファームウェアは約35 %）、記録する。PWMピンがこのパネルを駆動するかを調べる。 |
+| `-wex-rplp-nocaps` | Raptor Lake-Pのみ。アクセラレータのハードウェア性能応答に物理device IDをそのまま残す。既定ではこの応答にTiger Lake GT2（9A49）を示し、device IDリストにA7A8がないパッチ済みOpenGL／ビデオのユーザモードドライバにGPUを認めさせる。Metalはどちらでも影響を受けない。 |
 
 ### 動作確認済みの機能と既知の問題
 

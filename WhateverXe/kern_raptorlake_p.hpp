@@ -211,5 +211,30 @@ template<class IO> EDPReadout readEDP(IO &io, const AlderLakeN::DisplayReadout &
     if (r.status == EDPStatus::Complete && after != power) r.status = EDPStatus::PowerChanged;
     return r;
 }
+
+// The accelerator's device user client answers selector 0xB with a 0x7C-byte hardware-caps record copied
+// from the accelerator object (revision at +0, packed vendor/device at +8, resources from +0x10). The
+// prepatched user-mode GL and VA drivers admit a device by that packed identity and list only Tiger Lake
+// and Alder Lake-N: on A7A8 OpenGL aborts in its compiler constructor and the video driver returns an
+// error. The returned copy, and only it, presents 9A49 (the Tiger Lake GT2 those drivers already route
+// Alder Lake-N to): the device halfword at +0xA changes, vendor 8086 and every other byte stay as read.
+// The stored caps, selector 0x18 (Metal) and the IORegistry identity are untouched.
+namespace CapsReply {
+enum class Status : uint32_t {Untouched, Rewritten, Disabled, Error, BadSize, NotA7A8};
+constexpr uint64_t Size = 0x7C;
+constexpr uint32_t Physical = 0xA7A88086, Presented = 0x9A498086;
+inline uint32_t identity(const uint8_t *reply) {
+    return reply[8] | uint32_t(reply[9]) << 8 | uint32_t(reply[10]) << 16 | uint32_t(reply[11]) << 24;
+}
+// result is the donor method's return; size the reply length it reported into a buffer that had room for it.
+inline Status adapt(uint8_t *reply, uint64_t size, int result, bool enabled) {
+    if (!enabled) return Status::Disabled;
+    if (result != 0) return Status::Error;
+    if (!reply || size != Size) return Status::BadSize;
+    if (identity(reply) != Physical) return Status::NotA7A8;
+    reply[10] = uint8_t(Presented >> 16); reply[11] = uint8_t(Presented >> 24);
+    return Status::Rewritten;
+}
+}
 }
 #endif

@@ -9254,6 +9254,33 @@ void XE::wrapAlderLakeNPowerPutDDI(void *p,uint32_t d) { adlnPowerReference(p,4,
 void XE::wrapAlderLakeNPowerGetAUX(void *p,uint32_t d) { adlnPowerReference(p,5,d); }
 void XE::wrapAlderLakeNPowerPutAUX(void *p,uint32_t d) { adlnPowerReference(p,6,d); }
 
+// Selector 0xB of the accelerator's device user client, IGAccelDevice::get_hw_caps(this, input, output,
+// inputSize, outSize*): a legacy struct-in/struct-out method. The donor writes 0x7C to *outSize, copies 31
+// words of the stored caps into output and returns 0, or 0xE00002BC after still setting the size. Only a
+// successful, full reply into a buffer that had room for it, for the physical A7A8, is touched, and only its
+// device halfword (RaptorLakeP::CapsReply). The record counts every outcome and keeps the last identities.
+static struct {volatile uint64_t calls,rewritten,errors,badSize,other,disabled,lastBefore,lastAfter,lastSize,lastResult,routed;} adlnCapsReply;
+IOReturn XE::wrapRaptorLakePGetHWCaps(void *that,void *input,void *output,uint64_t inputSize,uint64_t *outSize) {
+	const uint64_t capacity=outSize ? *outSize : 0;
+	const IOReturn result=FunctionCast(wrapRaptorLakePGetHWCaps,callbackXE->orgRaptorLakePGetHWCaps)(that,input,output,inputSize,outSize);
+	auto &r=adlnCapsReply;__sync_fetch_and_add(&r.calls,1ULL);
+	auto reply=static_cast<uint8_t *>(output);
+	const uint64_t size=outSize && capacity>=RaptorLakeP::CapsReply::Size ? *outSize : 0;
+	const bool readable=reply && size==RaptorLakeP::CapsReply::Size;
+	const uint32_t before=readable ? RaptorLakeP::CapsReply::identity(reply) : 0;
+	const auto status=RaptorLakeP::CapsReply::adapt(reply,size,result,!callbackXE->rplpCapsDisabled);
+	using S=RaptorLakeP::CapsReply::Status;
+	if(status==S::Rewritten)__sync_fetch_and_add(&r.rewritten,1ULL);
+	else if(status==S::Error)__sync_fetch_and_add(&r.errors,1ULL);
+	else if(status==S::BadSize)__sync_fetch_and_add(&r.badSize,1ULL);
+	else if(status==S::NotA7A8)__sync_fetch_and_add(&r.other,1ULL);
+	else if(status==S::Disabled)__sync_fetch_and_add(&r.disabled,1ULL);
+	r.lastBefore=before;r.lastAfter=readable ? RaptorLakeP::CapsReply::identity(reply) : 0;
+	r.lastSize=outSize ? *outSize : 0;r.lastResult=static_cast<uint32_t>(result);
+	uint64_t record[12] {1,r.calls,r.rewritten,r.errors,r.badSize,r.other,r.disabled,r.lastBefore,r.lastAfter,r.lastSize,r.lastResult,r.routed};
+	IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPCapsReply",record,sizeof(record));
+	return result;
+}
 IOService *XE::wrapAlderLakeNRejectedAcceleratorProbe(IOService *,IOService *,SInt32 *) {
 	IORegistryEntry::getRegistryRoot()->setProperty("N97NativeProbeBlocked",true);
 	return nullptr;
@@ -9819,6 +9846,21 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				adlnObserved=adlnObserved && patcher.routeMultiple(index,native,arrsize(native),address,size);
 				IORegistryEntry::getRegistryRoot()->setProperty("N97NativeObservationsRouted",adlnObserved);
 				IOLog("AlderLakeN native donor hooks=%u\n",adlnObserved);
+				// Raptor Lake-P: the prepatched user-mode GL and VA drivers admit a device by the packed PCI identity
+				// in the hardware-caps reply (selector 0xB) and list Tiger Lake and Alder Lake-N only. Present 9A49 in
+				// that returned copy alone (RaptorLakeP::CapsReply; -wex-rplp-nocaps turns it off). Alder Lake-N is
+				// not routed; a missing route leaves the accelerator as it is and shows in N97RPLPCapsRouted.
+				if (adlnObserved && xeProfile.family==XELP::Family::RaptorLakeP) {
+					rplpCapsDisabled=checkKernelArgument("-wex-rplp-nocaps");
+					KernelPatcher::RouteRequest caps {"__ZN13IGAccelDevice11get_hw_capsEP16_IntelHwCapsInfoS1_yPy",wrapRaptorLakePGetHWCaps,orgRaptorLakePGetHWCaps};
+					bool capsReady=size>0x9D40 && patcher.solveSymbol<mach_vm_address_t>(index,caps.symbol,address,size)==address+0x9CDE;
+					patcher.clearError();
+					capsReady=capsReady && patcher.routeMultiple(index,&caps,1,address,size);
+					adlnCapsReply.routed=capsReady;
+					IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPCapsRouted",capsReady);
+					IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPCapsDisabled",rplpCapsDisabled);
+					patcher.clearError();
+				}
 			}
 			patcher.clearError();
 			KernelPatcher::RouteRequest request("__ZN16IntelAccelerator5startEP9IOService",
