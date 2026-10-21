@@ -74,6 +74,8 @@ private:
 	mach_vm_address_t orgRaptorLakePGetHWCaps {};
 	bool rplpCapsDisabled {false};
 	uint32_t rplpCapsPresented {0x9A498086};
+	static bool wrapApplePanelSetDisplay(IOService *that,IOService *display);
+	mach_vm_address_t orgApplePanelSetDisplay {};
 	__attribute__((noinline)) bool processAlderLakeNParentBoundary(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	__attribute__((noinline)) bool processXELPMemoryStage(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	__attribute__((noinline)) bool processAlderLakeNConfigStage(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);

@@ -3715,6 +3715,66 @@ extern "C" __attribute__((naked, used)) void tglGuCDMAWriteBridge() {
 		"jmpq *_tglGuCDMAWriteResume(%rip)\n");
 }
 
+// R4 slider: AppleBacklight's panel driver publishes the brightness parameter only for a panel it knows by name
+// ("F<PNLF _UID>T<panel id>"), so an unknown panel gets a backlight display without a slider. As WhateverGreen's
+// applbkl does (the fork's parent, BSD-3), the lookup key's panel-id digits become "xxxx" and the generic panel
+// curves are added to ApplePanels; the built-in display then gets its slider, the framebuffer drives its backlight
+// attribute and the EC bridge forwards the resulting duty. Opt-in with -wex-rplp-ecbl.
+static const char *pathAppleBacklight[] {"/System/Library/Extensions/AppleBacklight.kext/Contents/MacOS/AppleBacklight"};
+static KernelPatcher::KextInfo kextAppleBacklight {"com.apple.driver.AppleBacklight",pathAppleBacklight,arrsize(pathAppleBacklight),{true},{},KernelPatcher::KextInfo::Unloaded};
+struct AppleBacklightPanel {const char *name;uint8_t data[36];};
+static const AppleBacklightPanel appleBacklightPanels[] {
+	{"F14Txxxx",{0x00,0x11,0x00,0x00,0x00,0x34,0x00,0x52,0x00,0x73,0x00,0x94,0x00,0xBE,0x00,0xFA,0x01,0x36,0x01,0x72,0x01,0xC5,0x02,0x2F,0x02,0xB9,0x03,0x60,0x04,0x1A,0x05,0x0A,0x06,0x0E,0x07,0x10}},
+	{"F15Txxxx",{0x00,0x11,0x00,0x00,0x00,0x36,0x00,0x54,0x00,0x7D,0x00,0xB2,0x00,0xF5,0x01,0x49,0x01,0xB1,0x02,0x2B,0x02,0xB8,0x03,0x59,0x04,0x13,0x04,0xEC,0x05,0xF3,0x07,0x34,0x08,0xAF,0x0A,0xD9}},
+	{"F16Txxxx",{0x00,0x11,0x00,0x00,0x00,0x18,0x00,0x27,0x00,0x3A,0x00,0x52,0x00,0x71,0x00,0x96,0x00,0xC4,0x00,0xFC,0x01,0x40,0x01,0x93,0x01,0xF6,0x02,0x6E,0x02,0xFE,0x03,0xAA,0x04,0x78,0x05,0x6C}},
+	{"F17Txxxx",{0x00,0x11,0x00,0x00,0x00,0x1F,0x00,0x34,0x00,0x4F,0x00,0x71,0x00,0x9B,0x00,0xCF,0x01,0x0E,0x01,0x5D,0x01,0xBB,0x02,0x2F,0x02,0xB9,0x03,0x60,0x04,0x29,0x05,0x1E,0x06,0x44,0x07,0xA1}},
+	{"F18Txxxx",{0x00,0x11,0x00,0x00,0x00,0x53,0x00,0x8C,0x00,0xD5,0x01,0x31,0x01,0xA2,0x02,0x2E,0x02,0xD8,0x03,0xAE,0x04,0xAC,0x05,0xE5,0x07,0x59,0x09,0x1C,0x0B,0x3B,0x0D,0xD0,0x10,0xEA,0x14,0x99}},
+	{"F19Txxxx",{0x00,0x11,0x00,0x00,0x02,0x8F,0x03,0x53,0x04,0x5A,0x05,0xA1,0x07,0xAE,0x0A,0x3D,0x0E,0x14,0x13,0x74,0x1A,0x5E,0x24,0x18,0x31,0xA9,0x44,0x59,0x5E,0x76,0x83,0x11,0xB6,0xC7,0xFF,0x7B}},
+	{"F24Txxxx",{0x00,0x11,0x00,0x01,0x00,0x34,0x00,0x52,0x00,0x73,0x00,0x94,0x00,0xBE,0x00,0xFA,0x01,0x36,0x01,0x72,0x01,0xC5,0x02,0x2F,0x02,0xB9,0x03,0x60,0x04,0x1A,0x05,0x0A,0x06,0x0E,0x07,0x10}},
+};
+static volatile uint64_t adlnPanelInject[4];	// routed, key patched, setDisplay calls, panels added
+static void adlnPublishPanelInject() {
+	uint64_t r[5] {1,adlnPanelInject[0],adlnPanelInject[1],adlnPanelInject[2],adlnPanelInject[3]};
+	IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPPanelInject",r,sizeof(r));
+}
+bool XE::wrapApplePanelSetDisplay(IOService *that,IOService *display) {
+	static bool injected;
+	if(!injected) {
+		injected=true;
+		if(auto panels=OSDynamicCast(OSDictionary,that->getProperty("ApplePanels"))) {
+			auto raw=panels->copyCollection();
+			if(auto copy=OSDynamicCast(OSDictionary,raw)) {
+				uint64_t added=0;
+				for(auto &p:appleBacklightPanels) {
+					if(auto d=OSData::withBytes(p.data,sizeof(p.data))) {copy->setObject(p.name,d);++added;}	// kept, as WhateverGreen does
+				}
+				that->setProperty("ApplePanels",copy);
+				adlnPanelInject[3]=added;
+			}
+			if(raw)raw->release();
+		}
+	}
+	__sync_fetch_and_add(&adlnPanelInject[2],1ULL);
+	const bool result=FunctionCast(wrapApplePanelSetDisplay,callbackXE->orgApplePanelSetDisplay)(that,display);
+	adlnPublishPanelInject();
+	return result;
+}
+static bool adlnProcessAppleBacklight(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+	KernelPatcher::RouteRequest request("__ZN15AppleIntelPanel10setDisplayEP9IODisplay",XE::wrapApplePanelSetDisplay,callbackXE->orgApplePanelSetDisplay);
+	adlnPanelInject[0]=patcher.routeMultiple(index,&request,1,address,size);
+	patcher.clearError();
+	if(adlnPanelInject[0]) {
+		static const uint8_t find[] {"F%uT%04x"};
+		static const uint8_t replace[] {"F%uTxxxx"};
+		KernelPatcher::LookupPatch patch {&kextAppleBacklight,find,replace,sizeof(find),1};
+		patcher.applyLookupPatch(&patch);
+		adlnPanelInject[1]=patcher.getError()==KernelPatcher::Error::NoError;
+		patcher.clearError();
+	}
+	adlnPublishPanelInject();
+	return true;
+}
+
 void XE::init() {
     callbackXE = this;
     // Register notifications before Lilu closes registration. Actual family
@@ -3722,6 +3782,8 @@ void XE::init() {
     lilu.onKextLoadForce(&kextAppleIntelTGLCompat);
     lilu.onKextLoadForce(&kextIntelTGL);
     lilu.onKextLoadForce(&kextIntelTGLFb);
+    // R4: AppleBacklight's panel lookup is patched only when the EC bridge is requested.
+    if(checkKernelArgument("-wex-rplp-ecbl"))lilu.onKextLoadForce(&kextAppleBacklight);
 }
 
 void XE::selectProfile(const XELP::Profile &profile) {
@@ -4267,6 +4329,7 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 }
 
 bool XE::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
+    if(kextAppleBacklight.loadIndex==index)return adlnProcessAppleBacklight(patcher,index,address,size);
     if((tglRequested || display13FramebufferRequested) && kextAppleIntelTGLCompat.loadIndex==index) {
         const auto probe=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN17AppleIntelPortHAL13probePortModeEv",address,size);
         patcher.clearError();
