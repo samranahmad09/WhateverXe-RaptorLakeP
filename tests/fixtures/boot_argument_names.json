@@ -133,6 +133,7 @@
   "-wex-rplp-gt": [],
   "-wex-rplp-pwm": [],
   "-wex-rplp-nocaps": [],
+  "-wex-rplp-capsadln": [],
   "-wexoff": [
     "-wxeoff"
   ],

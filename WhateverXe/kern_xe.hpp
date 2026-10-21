@@ -73,6 +73,7 @@ private:
 	static IOReturn wrapRaptorLakePGetHWCaps(void *that,void *input,void *output,uint64_t inputSize,uint64_t *outSize);
 	mach_vm_address_t orgRaptorLakePGetHWCaps {};
 	bool rplpCapsDisabled {false};
+	uint32_t rplpCapsPresented {0x9A498086};
 	__attribute__((noinline)) bool processAlderLakeNParentBoundary(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	__attribute__((noinline)) bool processXELPMemoryStage(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 	__attribute__((noinline)) bool processAlderLakeNConfigStage(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);

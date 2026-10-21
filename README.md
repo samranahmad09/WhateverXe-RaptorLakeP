@@ -299,6 +299,7 @@ Alder Lake-N / Twin Lake.
 | `-wex-rplp-gt` | Raptor Lake-P A7A8 revision 4 only: admit the device to the in-development backend (native panel path and accelerator). |
 | `-wex-rplp-pwm` | Raptor Lake-P only, with `-wex-rplp-gt`: once the desktop appears, write the display engine's backlight PWM duty to 70 % (the firmware leaves about 35 %) and record it. Tells whether the PWM pin drives this panel. |
 | `-wex-rplp-nocaps` | Raptor Lake-P only: keep the physical device ID in the accelerator's hardware-caps reply. By default that reply presents Tiger Lake GT2 (9A49) so the prepatched OpenGL and video user-mode drivers, whose device lists lack A7A8, admit the GPU; Metal is unaffected either way. |
+| `-wex-rplp-capsadln` | Raptor Lake-P only: present Alder Lake-N (46D0) instead of Tiger Lake GT2 in that reply, the other identity those user-mode drivers accept. An experiment for the OpenGL rendering defects; `-wex-rplp-nocaps` wins when both are given. |
 
 ### Tested features and known issues
 

@@ -312,6 +312,11 @@ int main() {
         assert(adapt(nullptr,Size,0,true)==Status::BadSize && !std::memcmp(a7a8,copy,Size));
         assert(adapt(a7a8,Size,0,true)==Status::Rewritten && identity(a7a8)==Presented && a7a8[8]==0x86 && a7a8[9]==0x80);
         for(unsigned i=0;i<Size;++i)if(i!=10 && i!=11)assert(a7a8[i]==copy[i]);
+        // The alternative identity (-wex-rplp-capsadln): Alder Lake-N, the other family on those device lists.
+        uint8_t adln[Size];std::memcpy(adln,copy,Size);
+        assert(adapt(adln,Size,0,true,PresentedADLN)==Status::Rewritten && identity(adln)==PresentedADLN && adln[10]==0xD0 && adln[11]==0x46);
+        for(unsigned i=0;i<Size;++i)if(i!=10 && i!=11)assert(adln[i]==copy[i]);
+        assert(adapt(adln,Size,0,true,PresentedADLN)==Status::NotA7A8 && adapt(adln,Size,0,true)==Status::NotA7A8);
     }
     std::puts("RaptorLakeP eDP readout, DP SST selection, power-change, bounded-read and caps-reply fixtures passed");
 }

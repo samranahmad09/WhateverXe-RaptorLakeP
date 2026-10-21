@@ -9268,7 +9268,7 @@ IOReturn XE::wrapRaptorLakePGetHWCaps(void *that,void *input,void *output,uint64
 	const uint64_t size=outSize && capacity>=RaptorLakeP::CapsReply::Size ? *outSize : 0;
 	const bool readable=reply && size==RaptorLakeP::CapsReply::Size;
 	const uint32_t before=readable ? RaptorLakeP::CapsReply::identity(reply) : 0;
-	const auto status=RaptorLakeP::CapsReply::adapt(reply,size,result,!callbackXE->rplpCapsDisabled);
+	const auto status=RaptorLakeP::CapsReply::adapt(reply,size,result,!callbackXE->rplpCapsDisabled,callbackXE->rplpCapsPresented);
 	using S=RaptorLakeP::CapsReply::Status;
 	if(status==S::Rewritten)__sync_fetch_and_add(&r.rewritten,1ULL);
 	else if(status==S::Error)__sync_fetch_and_add(&r.errors,1ULL);
@@ -9848,10 +9848,12 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				IOLog("AlderLakeN native donor hooks=%u\n",adlnObserved);
 				// Raptor Lake-P: the prepatched user-mode GL and VA drivers admit a device by the packed PCI identity
 				// in the hardware-caps reply (selector 0xB) and list Tiger Lake and Alder Lake-N only. Present 9A49 in
-				// that returned copy alone (RaptorLakeP::CapsReply; -wex-rplp-nocaps turns it off). Alder Lake-N is
-				// not routed; a missing route leaves the accelerator as it is and shows in N97RPLPCapsRouted.
+				// that returned copy alone (RaptorLakeP::CapsReply; -wex-rplp-nocaps turns it off, -wex-rplp-capsadln
+				// presents Alder Lake-N 46D0 instead). Alder Lake-N is not routed; a missing route leaves the
+				// accelerator as it is and shows in N97RPLPCapsRouted.
 				if (adlnObserved && xeProfile.family==XELP::Family::RaptorLakeP) {
 					rplpCapsDisabled=checkKernelArgument("-wex-rplp-nocaps");
+					rplpCapsPresented=checkKernelArgument("-wex-rplp-capsadln") ? RaptorLakeP::CapsReply::PresentedADLN : RaptorLakeP::CapsReply::Presented;
 					KernelPatcher::RouteRequest caps {"__ZN13IGAccelDevice11get_hw_capsEP16_IntelHwCapsInfoS1_yPy",wrapRaptorLakePGetHWCaps,orgRaptorLakePGetHWCaps};
 					bool capsReady=size>0x9D40 && patcher.solveSymbol<mach_vm_address_t>(index,caps.symbol,address,size)==address+0x9CDE;
 					patcher.clearError();
@@ -9859,6 +9861,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 					adlnCapsReply.routed=capsReady;
 					IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPCapsRouted",capsReady);
 					IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPCapsDisabled",rplpCapsDisabled);
+					IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPCapsPresented",rplpCapsPresented,32);
 					patcher.clearError();
 				}
 			}
