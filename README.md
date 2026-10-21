@@ -23,10 +23,10 @@ processors, including the laptop's internal (eDP) panel.
 >   whose first draw uses the previous fragment shader, and a depth test that rejects nearer fragments drawn after
 >   farther ones. Those are the open OpenGL items. Hardware video: Safari playback works, but the screen recorder
 >   crashes inside the video driver during a pixel transfer (open).
-> - Brightness goes through the embedded controller: the display engine's PWM duty does not reach this panel, so
->   `-wex-rplp-ecbl` forwards the framebuffer's duty writes to the firmware's WMI brightness method (verified on the
->   hardware: level read, raised, restored, source reported as the EC) and gives AppleBacklight the generic panel
->   curves so the built-in display gets its slider (the slider itself is the next test). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
+> - Brightness works through the embedded controller since 2026-10-21: the display engine's PWM duty does not reach
+>   this panel, so `-wex-rplp-ecbl` forwards the framebuffer's duty writes to the firmware's WMI brightness method and
+>   gives AppleBacklight the generic panel curves; the built-in display has its brightness slider and the panel follows
+>   it (the brightness keys are a separate, firmware-notification matter). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
 >   findings describe each step.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.

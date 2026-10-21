@@ -566,3 +566,25 @@ after fixed-function drawing, was correct); and with the depth test enabled (les
 farther one was rejected everywhere (the far colour stayed), while the opposite order was correct. The follow-up test
 (`tools/rplp-gl-verify2.py`) reads the depth buffer itself and varies formats, functions, draw orders and program
 switches to separate wrong depth values from wrong comparisons and to characterise the stale-shader case.
+
+### Brightness: the slider works through the bridge (2026-10-21)
+
+With the generic panel curves added to AppleBacklight's table, the built-in display's parameters gained `brightness`
+(0 to 1024) next to the framebuffer's own backlight attribute, the Displays preference pane showed its slider, and the
+panel followed it. In one session the slider produced 397 duty writes from the framebuffer; the bridge turned them into
+369 level requests, coalesced into 145 calls to the embedded controller's method, none failing, and skipped 28 writes of
+zero duty (the panel-off path). The brightness keys are not part of this: on this laptop they are firmware events that
+reach the operating system as ACPI display notifications, which a separate component has to turn into key presses.
+
+### OpenGL: the second readback probe narrows the depth defect (2026-10-21)
+
+The follow-up probe (`tools/rplp-gl-verify2.py`) read the depth buffer back directly: after the clear it holds 1.0, after
+the far triangle 0.75, after the near triangle 0.25, and the colours are correct whenever a readback separates the two
+draws. Drawn back to back without a read in between, the nearer second triangle is still rejected (16-bit depth), and
+with 24-bit, 32-bit float and depth-texture attachments created after the first one the whole target came back black,
+clear included. GL_LEQUAL, an inverted GL_GREATER test, GL_ALWAYS, a masked first draw and a disabled test all pass.
+Every program-switch variant with prebuilt programs passes, so the stale-shader case from the first probe is tied to
+the first use of a freshly linked shader. The third probe (`tools/rplp-gl-verify3.py`) runs each case in a fresh context
+and varies only the operation between the two draws (nothing, flush, finish, a colour read, a depth read), the depth
+attachment type, and prebuilt versus freshly linked shaders. A diagnostic flag (`-wex-rplp-warev3`) exists to compare
+the same probes with the accelerator's workaround table initialised as for revision 3.
