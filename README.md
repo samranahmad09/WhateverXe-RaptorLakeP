@@ -22,7 +22,7 @@ processors, including the laptop's internal (eDP) panel.
 >   playback works, but the screen recorder crashes inside the video driver during a pixel transfer (open).
 > - Brightness: the display engine's backlight PWM duty was written and read back at 70 percent with no visible
 >   change, so the embedded controller owns this panel's backlight and brightness control has to go through ACPI
->   (planned). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
+>   (built as `-wex-rplp-ecbl` with a PNLF device, under test). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
 >   findings describe each step.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
@@ -303,6 +303,7 @@ Alder Lake-N / Twin Lake.
 | `-wex-rplp-pwm` | Raptor Lake-P only, with `-wex-rplp-gt`: once the desktop appears, write the display engine's backlight PWM duty to 70 % (the firmware leaves about 35 %) and record it. Tells whether the PWM pin drives this panel. |
 | `-wex-rplp-nocaps` | Raptor Lake-P only: keep the physical device ID in the accelerator's hardware-caps reply. By default that reply presents Tiger Lake GT2 (9A49) so the prepatched OpenGL and video user-mode drivers, whose device lists lack A7A8, admit the GPU; Metal is unaffected either way. |
 | `-wex-rplp-capsadln` | Raptor Lake-P only: present Alder Lake-N (46D0) instead of Tiger Lake GT2 in that reply, the other identity those user-mode drivers accept. An experiment for the OpenGL rendering defects; `-wex-rplp-nocaps` wins when both are given. |
+| `-wex-rplp-ecbl` | Raptor Lake-P only: brightness through the embedded controller. The framebuffer's backlight PWM duty writes are forwarded as a 0 to 100 level to the firmware's WMI brightness method (the EC drives this panel, not the PWM pin); needs a PNLF device for AppleBacklight. A visible self-test raises the level for 1.5 s after the desktop appears and records level, maximum and source in `N97RPLPECBacklight`. |
 
 ### Tested features and known issues
 

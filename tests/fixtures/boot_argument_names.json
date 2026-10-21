@@ -134,6 +134,7 @@
   "-wex-rplp-pwm": [],
   "-wex-rplp-nocaps": [],
   "-wex-rplp-capsadln": [],
+  "-wex-rplp-ecbl": [],
   "-wexoff": [
     "-wxeoff"
   ],

@@ -29,6 +29,10 @@
 #include "kern_display13_dbuf.hpp"
 #include "kern_display13_wm.hpp"
 #include "kern_display13_backlight.hpp"
+#include "kern_display13_ecbacklight.hpp"
+#include <IOKit/acpi/IOACPIPlatformDevice.h>
+#include <kern/thread_call.h>
+#include <kern/clock.h>
 #include "kern_tgl_training_scope.hpp"
 #include "kern_tgl_port_map.hpp"
 #include "kern_tgl_pcode_gate.hpp"
@@ -6728,6 +6732,154 @@ void XE::wrapAlderLakeNGamma10(void *path,void *transaction,uint32_t control) {
     if(slot)__sync_lock_test_and_set(&slot->thread,0);
 }
 
+// R4 bridge (opt-in: -wex-rplp-ecbl, Raptor Lake-P only): the framebuffer's backlight PWM duty writes become the
+// embedded controller's level through the firmware's WMI method (Display13ECBacklight). A register write only notes
+// the request; thread calls evaluate the ACPI method outside the framebuffer's context. At the first completed
+// watermark retire a self-test reads the level, the maximum and the source, raises the level for 1.5 s and restores it.
+static struct {
+	volatile uint64_t enabled,deviceFound,methodFound,method,dutyWrites,freqWrites,zeroSkipped,requests,calls,errors,
+		lastDuty,lastFreq,lastLevel,lastSent,lastStatus,lastReturn,selfLevel,selfMax,selfSource,selfStatus,selfProbe,selfRestored,pending,started;
+} adlnECBacklight;
+static IOACPIPlatformDevice *adlnECBacklightDevice;
+static thread_call_t adlnECBacklightForward,adlnECBacklightSelfTest;
+static Display13ECBacklight::Method adlnECBacklightMethod;
+static void adlnPublishECBacklight() {
+	auto &b=adlnECBacklight;if(!b.enabled)return;
+	uint64_t r[24] {1,b.enabled,b.deviceFound,b.methodFound,b.method,b.dutyWrites,b.freqWrites,b.zeroSkipped,b.requests,b.calls,b.errors,
+		b.lastDuty,b.lastFreq,b.lastLevel,b.lastSent,b.lastStatus,b.lastReturn,b.selfLevel,b.selfMax,b.selfSource,b.selfStatus,b.selfProbe,b.selfRestored,b.pending};
+	IORegistryEntry::getRegistryRoot()->setProperty("N97RPLPECBacklight",r,sizeof(r));
+}
+// True when this ACPI device's _WDG carries the EC backlight GUID as a method; remembers the method's name.
+static bool adlnECBacklightMatch(IOACPIPlatformDevice *dev) {
+	OSObject *obj=nullptr;
+	if(dev->evaluateObject("_WDG",&obj)!=kIOReturnSuccess || !obj)return false;
+	Display13ECBacklight::Method m;
+	if(auto data=OSDynamicCast(OSData,obj))m=Display13ECBacklight::find(static_cast<const uint8_t *>(data->getBytesNoCopy()),data->getLength());
+	obj->release();
+	if(m.found)adlnECBacklightMethod=m;
+	return m.found;
+}
+// The WMI device: by the reference machine's name first, then any ACPI device whose _WDG carries the GUID.
+static IOACPIPlatformDevice *adlnECBacklightFind() {
+	auto &b=adlnECBacklight;
+	if(adlnECBacklightDevice)return adlnECBacklightDevice;
+	IOACPIPlatformDevice *found=nullptr;
+	if(auto matching=IOService::nameMatching("AWMI")) {
+		if(auto service=IOService::copyMatchingService(matching)) {
+			auto dev=OSDynamicCast(IOACPIPlatformDevice,service);
+			if(dev && adlnECBacklightMatch(dev)) {found=dev;b.deviceFound=1;}
+			else service->release();
+		}
+		matching->release();
+	}
+	if(!found) {
+		if(auto matching=IOService::serviceMatching("IOACPIPlatformDevice")) {
+			if(auto iterator=IOService::getMatchingServices(matching)) {
+				while(auto entry=iterator->getNextObject()) {
+					auto dev=OSDynamicCast(IOACPIPlatformDevice,entry);
+					if(dev && adlnECBacklightMatch(dev)) {dev->retain();found=dev;b.deviceFound=2;break;}
+				}
+				iterator->release();
+			}
+			matching->release();
+		}
+	}
+	if(found) {
+		b.methodFound=1;uint64_t packed=0;
+		for(unsigned i=0;i<4;++i)packed|=uint64_t(static_cast<uint8_t>(adlnECBacklightMethod.name[i]))<<(8*i);
+		b.method=packed;
+	}
+	adlnECBacklightDevice=found;return found;
+}
+// One evaluation of the WMI method (instance 0): the integer it returns lands in result; false when it did not run.
+static bool adlnECBacklightEvaluate(uint32_t method,uint32_t mode,uint32_t value,uint32_t &result) {
+	auto &b=adlnECBacklight;result=UINT32_MAX;
+	auto dev=adlnECBacklightFind();
+	if(!dev) {__sync_fetch_and_add(&b.errors,1ULL);b.lastStatus=static_cast<uint32_t>(kIOReturnNotFound);return false;}
+	uint8_t bytes[Display13ECBacklight::ArgumentBytes];Display13ECBacklight::arguments(bytes,mode,value);
+	auto instance=OSNumber::withNumber(0ULL,32);auto id=OSNumber::withNumber(static_cast<unsigned long long>(method),32);
+	auto buffer=OSData::withBytes(bytes,sizeof(bytes));
+	OSObject *params[3] {instance,id,buffer};OSObject *out=nullptr;
+	const IOReturn status=(instance && id && buffer) ? dev->evaluateObject(adlnECBacklightMethod.name,&out,params,3) : kIOReturnNoMemory;
+	__sync_fetch_and_add(&b.calls,1ULL);b.lastStatus=static_cast<uint32_t>(status);
+	if(status==kIOReturnSuccess && out) {
+		if(auto n=OSDynamicCast(OSNumber,out))result=n->unsigned32BitValue();
+		else if(auto d=OSDynamicCast(OSData,out)) {if(d->getLength()>=4)memcpy(&result,d->getBytesNoCopy(),4);}
+	}
+	if(status!=kIOReturnSuccess)__sync_fetch_and_add(&b.errors,1ULL);
+	b.lastReturn=result;
+	if(out)out->release();
+	if(instance)instance->release();
+	if(id)id->release();
+	if(buffer)buffer->release();
+	return status==kIOReturnSuccess;
+}
+// Forward: the latest requested level, once, outside the framebuffer's context.
+static void adlnECBacklightForwardWork(thread_call_param_t,thread_call_param_t) {
+	using namespace Display13ECBacklight;
+	auto &b=adlnECBacklight;uint32_t r=0;
+	const auto level=static_cast<uint32_t>(b.lastLevel);b.pending=0;
+	if(level>=1 && level<=100 && level!=b.lastSent && adlnECBacklightEvaluate(MethodLevel,ModeSet,level,r))b.lastSent=level;
+	adlnPublishECBacklight();
+}
+// Self-test: read level, maximum and source, raise the level visibly, then restore it 1.5 s later unless a real
+// request arrived in between.
+static void adlnECBacklightSelfTestWork(thread_call_param_t,thread_call_param_t param) {
+	using namespace Display13ECBacklight;
+	auto &b=adlnECBacklight;uint32_t r=0;
+	if(reinterpret_cast<uintptr_t>(param)==1) {
+		if(adlnECBacklightEvaluate(MethodLevel,ModeGet,0,r))b.selfLevel=r;
+		if(adlnECBacklightEvaluate(MethodLevel,ModeGetMax,0,r))b.selfMax=r;
+		if(adlnECBacklightEvaluate(MethodSource,ModeGet,0,r))b.selfSource=r;
+		b.selfStatus=b.lastStatus;
+		if(b.selfLevel<=100 && b.selfMax>=1 && b.selfMax<=100) {
+			const auto up=probeLevel(static_cast<uint32_t>(b.selfLevel),static_cast<uint32_t>(b.selfMax));
+			if(adlnECBacklightEvaluate(MethodLevel,ModeSet,up,r)) {
+				b.selfProbe=up;b.lastSent=up;
+				uint64_t deadline=0;clock_interval_to_deadline(1500,kMillisecondScale,&deadline);
+				thread_call_enter1_delayed(adlnECBacklightSelfTest,reinterpret_cast<thread_call_param_t>(2),deadline);
+			}
+		}
+	} else if(!b.pending && b.selfProbe) {
+		if(adlnECBacklightEvaluate(MethodLevel,ModeSet,static_cast<uint32_t>(b.selfLevel),r)) {b.selfRestored=1;b.lastSent=b.selfLevel;}
+	}
+	adlnPublishECBacklight();
+}
+// From the register-write route: a DUTY1 write is a brightness request; FREQ1 writes keep the period current.
+static void adlnECBacklightObserve(uint64_t reg,uint32_t value) {
+	auto &b=adlnECBacklight;
+	if(reg==Display13Backlight::FREQ1) {b.lastFreq=value;__sync_fetch_and_add(&b.freqWrites,1ULL);return;}
+	if(reg!=Display13Backlight::DUTY1)return;
+	__sync_fetch_and_add(&b.dutyWrites,1ULL);b.lastDuty=value;
+	auto freq=static_cast<uint32_t>(b.lastFreq);
+	if(!freq) {	// No FREQ1 write seen yet: the firmware's period is still in the controller.
+		auto &c=display13FBPower;
+		if(c.map && c.map->getLength()==0x1000000 && c.map->getVirtualAddress())
+			freq=*reinterpret_cast<volatile uint32_t *>(c.map->getVirtualAddress()+Display13Backlight::FREQ1);
+		b.lastFreq=freq;
+	}
+	uint32_t level=0;
+	if(!Display13ECBacklight::level(value,freq,level))return;
+	if(level==0) {__sync_fetch_and_add(&b.zeroSkipped,1ULL);return;}	// The panel-off path; the EC keeps its level.
+	b.lastLevel=level;b.pending=1;__sync_fetch_and_add(&b.requests,1ULL);
+	if(adlnECBacklightForward)thread_call_enter(adlnECBacklightForward);
+}
+// Once, at the first completed watermark retire of the desktop (locks held there: only the thread call is queued).
+static void adlnECBacklightSelfTestStart() {
+	auto &b=adlnECBacklight;
+	if(!b.enabled || !adlnECBacklightSelfTest || __sync_lock_test_and_set(&b.started,1ULL))return;
+	thread_call_enter1(adlnECBacklightSelfTest,reinterpret_cast<thread_call_param_t>(1));
+}
+// At the Raptor Lake-P route: read the flag, allocate the thread calls, publish the initial record.
+static void adlnECBacklightSetup() {
+	auto &b=adlnECBacklight;
+	b.enabled=checkKernelArgument("-wex-rplp-ecbl");
+	if(!b.enabled)return;
+	if(!adlnECBacklightForward)adlnECBacklightForward=thread_call_allocate(adlnECBacklightForwardWork,nullptr);
+	if(!adlnECBacklightSelfTest)adlnECBacklightSelfTest=thread_call_allocate(adlnECBacklightSelfTestWork,nullptr);
+	adlnPublishECBacklight();
+}
+
 void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
     if(adlnEDPRemapActive(access)) {
         const auto rva=reinterpret_cast<uintptr_t>(__builtin_return_address(0))-callbackXE->adlnGMBusFunction;
@@ -6759,6 +6911,7 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
         adlnEDPTrace(true,reg,value,rva,(reg!=original && !phyFlags ? 2 : 0)|(value!=requested ? 4 : 0)|phyFlags);
         if(reg==0x70180 && !(value&0x80000000U))adlnEDPTraceDisable(rva);
     }
+    if(adlnECBacklight.enabled)adlnECBacklightObserve(reg,value);
     // This route also carries direct native cursor writes, outside the WM
     // trigger queue. Apply Display 13's slot WA only to our proven owner.
     if(reg==0x70080 || reg==0x71080 || reg==0x72080) {
@@ -8519,7 +8672,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 		// counted as the new frame while the counter stood still (the first picture's 48 s refusal).
 		if(Display13WM::retireEvidence(result,pipe))
 			retired=Display13DBUF::retire(readout,c.dbuf,primary,cursor,result.frameBefore,result.frameAfter,pipe,result.wrapped!=0);
-		if(retired==Display13DBUF::Status::Complete) {c.pipe[pipe].watermarkClockHz=actualHz;c.pipe[pipe].wmPending=0;adlnBacklightProbe(c);}
+		if(retired==Display13DBUF::Status::Complete) {c.pipe[pipe].watermarkClockHz=actualHz;c.pipe[pipe].wmPending=0;adlnBacklightProbe(c);adlnECBacklightSelfTestStart();}
 		else {	// A verified latch whose DBUF retire refused: named by the DDB register and the retire status.
 			result.status=Display13WM::Status::Conflict;result.lastReg=0x7027C+0x1000*pipe;
 			result.expected=static_cast<uint32_t>(Display13DBUF::Status::Complete);result.observed=static_cast<uint32_t>(retired);
@@ -8566,6 +8719,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
     const bool pixelsRecorded=result.status==Display13WM::Status::Complete && adlnObserveScanoutPixels(pipe,pixels);
 	IOLockUnlock(c.lock);IORecursiveLockUnlock(mutex);
 	adlnPublishBacklightProbe();
+	adlnPublishECBacklight();
     if(pixelsRecorded) {
         char key[64];snprintf(key,sizeof(key),"N97FBScanoutPixelsPipe%uSample%u",pipe,static_cast<unsigned>(pixels[1]));
         IORegistryEntry::getRegistryRoot()->setProperty(key,pixels,sizeof(pixels));
@@ -9854,6 +10008,7 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				if (adlnObserved && xeProfile.family==XELP::Family::RaptorLakeP) {
 					rplpCapsDisabled=checkKernelArgument("-wex-rplp-nocaps");
 					rplpCapsPresented=checkKernelArgument("-wex-rplp-capsadln") ? RaptorLakeP::CapsReply::PresentedADLN : RaptorLakeP::CapsReply::Presented;
+					adlnECBacklightSetup();
 					KernelPatcher::RouteRequest caps {"__ZN13IGAccelDevice11get_hw_capsEP16_IntelHwCapsInfoS1_yPy",wrapRaptorLakePGetHWCaps,orgRaptorLakePGetHWCaps};
 					bool capsReady=size>0x9D40 && patcher.solveSymbol<mach_vm_address_t>(index,caps.symbol,address,size)==address+0x9CDE;
 					patcher.clearError();
