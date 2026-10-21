@@ -3759,8 +3759,8 @@ bool XE::wrapApplePanelSetDisplay(IOService *that,IOService *display) {
 	adlnPublishPanelInject();
 	return result;
 }
-static bool adlnProcessAppleBacklight(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
-	KernelPatcher::RouteRequest request("__ZN15AppleIntelPanel10setDisplayEP9IODisplay",XE::wrapApplePanelSetDisplay,callbackXE->orgApplePanelSetDisplay);
+bool XE::processAppleBacklight(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+	KernelPatcher::RouteRequest request("__ZN15AppleIntelPanel10setDisplayEP9IODisplay",wrapApplePanelSetDisplay,orgApplePanelSetDisplay);
 	adlnPanelInject[0]=patcher.routeMultiple(index,&request,1,address,size);
 	patcher.clearError();
 	if(adlnPanelInject[0]) {
@@ -4329,7 +4329,7 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 }
 
 bool XE::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
-    if(kextAppleBacklight.loadIndex==index)return adlnProcessAppleBacklight(patcher,index,address,size);
+    if(kextAppleBacklight.loadIndex==index)return processAppleBacklight(patcher,index,address,size);
     if((tglRequested || display13FramebufferRequested) && kextAppleIntelTGLCompat.loadIndex==index) {
         const auto probe=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN17AppleIntelPortHAL13probePortModeEv",address,size);
         patcher.clearError();
