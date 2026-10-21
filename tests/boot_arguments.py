@@ -48,7 +48,7 @@ static std::set<std::string> args;
 bool checkKernelArgument(const char *name) { return args.count(name); }
 #define SYSLOG(...) ((void)0)
 #define IOLog(...) ((void)0)
-static int kextIntelTGLFb, kextAppleIntelTGLCompat, kextIntelTGL;
+static int kextIntelTGLFb, kextAppleIntelTGLCompat, kextIntelTGL, kextAppleBacklight;
 static struct { void onKextLoadForce(int *) {} } lilu;
 struct XE {
  XELP::Profile xeProfile;
