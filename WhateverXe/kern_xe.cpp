@@ -6836,7 +6836,7 @@ static void adlnECBacklightSelfTestWork(thread_call_param_t,thread_call_param_t 
 			const auto up=probeLevel(static_cast<uint32_t>(b.selfLevel),static_cast<uint32_t>(b.selfMax));
 			if(adlnECBacklightEvaluate(MethodLevel,ModeSet,up,r)) {
 				b.selfProbe=up;b.lastSent=up;
-				uint64_t deadline=0;clock_interval_to_deadline(1500,kMillisecondScale,&deadline);
+				uint64_t deadline=0;clock_interval_to_deadline(1500,1000000U,&deadline);	// 1.5 s in nanoseconds per millisecond
 				thread_call_enter1_delayed(adlnECBacklightSelfTest,reinterpret_cast<thread_call_param_t>(2),deadline);
 			}
 		}
