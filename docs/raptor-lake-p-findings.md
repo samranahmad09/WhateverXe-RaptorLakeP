@@ -638,7 +638,7 @@ comparand of exactly those four guards in the DSDT (two 15-byte OpenCore patches
 Darwin without changing any other OS-version gate. With BrightnessKeys the keys work, the slider still works, and the boot
 is as fast as without the patches, where the `_OSI` to `XOSI` table had cost about twenty seconds of silent early-kernel time.
 
-### OpenGL: after the boundary only the first draw is in the image (2026-10-23)
+### OpenGL: after the boundary, what the readback returns (2026-10-23)
 
 The fifth probe's second revision, run twice on one boot with identical results, replays the first probe's call sequence
 exactly. After a program draw followed by a readback (a finish or a flush does the same), nothing added later is in any
@@ -649,7 +649,10 @@ separate triangles, the first is in the image and the second is not, and the cle
 behaves the same way: the farther triangle is in the image and the nearer one is not, in colour and in depth (the depth
 attachment reads the farther value at every interior pixel, read before or after the colour), with the depth function set to
 always pass, with the farther draw's depth write masked, with a depth clear between the draws, with a third nearer draw after
-the second (both absent) and with both triangles in one glBegin; so the depth test is not the mechanism. A depth readback
-between the two draws still restores the pair. Whether the later draws never reach the GPU, reach it with stale state, or
-land where the readback does not look is the next question (`tools/rplp-gl-verify6.py`: a trailing throwaway draw, a trailing
-clear, a texture upload, a framebuffer switch, vertex arrays instead of immediate mode).
+the second (both absent) and with both triangles in one glBegin; so an ordinary, correctly applied depth comparison is not
+the mechanism (stale depth state or a missing depth clear are not excluded). A depth readback between the two draws still
+restores the pair; one after the pair recovers nothing. There is no general "first draw succeeds" rule either: the lone
+quad is absent although it is the first draw after its clear. Whether the later draws never reach the GPU, reach it with
+stale state, or land where the readback does not look is the next question (`tools/rplp-gl-verify6.py`, revision 2: a
+trailing throwaway, clipped or depth-rejected draw, a trailing clear, a texture upload, a framebuffer switch with and
+without an allocation, vertex arrays instead of immediate mode).
