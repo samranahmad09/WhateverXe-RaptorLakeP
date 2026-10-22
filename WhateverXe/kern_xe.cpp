@@ -10094,11 +10094,15 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 							constexpr size_t offset=0x240B6;
 							const auto start=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator5startEP9IOService",address,size);
 							patcher.clearError();
-							rec[2]=size>offset+sizeof(site) && start>=address && start<address+offset && address+offset-start<0x400 &&
+							// Lilu's ranged lookup scans [start, start+span-pattern): a span equal to the pattern gives no candidate
+							// (the round-26 boot recorded site matched, nothing applied), so the span is one byte longer than the
+							// pattern and the whole span must lie inside the image; the write is still the eight bytes at the site.
+							constexpr size_t span=sizeof(site)+1;
+							rec[2]=size>=offset+span && start>=address && start<address+offset && address+offset-start<0x400 &&
 								!memcmp(reinterpret_cast<const void *>(address+offset),site,sizeof(site));
 							if(rec[2]) {
 								KernelPatcher::LookupPatch patch {&kextIntelTGL,site,rev3,sizeof(site),1};
-								patcher.applyLookupPatch(&patch,reinterpret_cast<uint8_t *>(address+offset),sizeof(site));
+								patcher.applyLookupPatch(&patch,reinterpret_cast<uint8_t *>(address+offset),span);
 								rec[3]=patcher.getError()==KernelPatcher::Error::NoError && !memcmp(reinterpret_cast<const void *>(address+offset),rev3,sizeof(rev3));
 								patcher.clearError();
 							}
