@@ -610,3 +610,19 @@ turned out not to have applied). Minutes earlier on the same boot the first prob
 depth and shader defects need what happened earlier in the same context; a fourth probe replays the failing history and changes
 one boundary per case (unbind-before-readback, the 32-frame prelude, previous shader activity, a rebuilt framebuffer, completion
 between the draws) to name the boundary.
+
+### OpenGL: the bisection names a readback boundary and shows lost work (2026-10-22)
+
+The fourth probe (`tools/rplp-gl-verify4.py`) replays the first probe's exact history in a fresh context per case and changes
+one boundary at a time. Checker: the control fails with the clear colour where the quad should be; removing the readback that
+followed the earlier program's draw makes it pass, and so does reading the quad back while its program is still bound;
+unbinding the earlier program after its readback instead of before, building the checker program first, or drawing it again
+afterwards still fail; without the 32-frame prelude one of the quad's two triangles is missing instead of both. The first
+probe's own picture from the same session shows the earlier stage's triangle on the clear colour, so the checker stage's clear
+and quad never executed at all: the earlier description of this defect as a stale fragment shader was wrong, the work is lost.
+Depth: without the earlier shader stages, or with the framebuffer rebuilt before the two draws, the pair passes; glFinish or a
+colour readback between the draws does not repair it, a depth readback does. The accelerator's workaround-table revision (the
+`-wex-rplp-warev3` diagnostic, now verified to apply) changes none of this. The fifth probe (`tools/rplp-gl-verify5.py`) adds a
+picture and a wrong-colour histogram per case and the discriminating variants: the clear colour changed, a re-read after
+completion, the quad as two triangles, a fixed-function quad, completion instead of the readback, the depth values after both
+draws, the near draw with GL_ALWAYS, both triangles in one batch.

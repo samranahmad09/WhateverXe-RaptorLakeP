@@ -19,9 +19,10 @@ processors, including the laptop's internal (eDP) panel.
 >   (`-wex-rplp-nocaps` keeps the physical ID; `-wex-rplp-capsadln` presents Alder Lake-N instead, an experiment).
 >   Preview's image adjustments work; Chess and WebGL, which redraw 3D scenes continuously, show flicker and striped
 >   faces while the GPU records no recovery. An offscreen readback test on the hardware renderer passes the
->   fixed-function, shader, texture, multisample and large-surface stages and isolates two defects: a program switch
->   whose first draw uses the previous fragment shader, and a depth test that rejects nearer fragments drawn after
->   farther ones. Those are the open OpenGL items. Hardware video: Safari playback works, but the screen recorder
+>   fixed-function, shader, texture, multisample and large-surface stages and isolates two sequences that lose GPU
+>   work: a program's clear and draw never land when a readback with no program bound followed an earlier program's
+>   draw, and a nearer triangle drawn right after a farther one is missing once shaders ran on the same framebuffer
+>   (only a depth readback between the two draws restores it). Those are the open OpenGL items. Hardware video: Safari playback works, but the screen recorder
 >   crashes inside the video driver during a pixel transfer (open).
 > - Brightness works through the embedded controller since 2026-10-21: the display engine's PWM duty does not reach
 >   this panel, so `-wex-rplp-ecbl` forwards the framebuffer's duty writes to the firmware's WMI brightness method and
