@@ -588,3 +588,25 @@ the first use of a freshly linked shader. The third probe (`tools/rplp-gl-verify
 and varies only the operation between the two draws (nothing, flush, finish, a colour read, a depth read), the depth
 attachment type, and prebuilt versus freshly linked shaders. A diagnostic flag (`-wex-rplp-warev3`) exists to compare
 the same probes with the accelerator's workaround table initialised as for revision 3.
+
+### Brightness keys: the firmware's OS-version gate (2026-10-22)
+
+The keys never reached the operating system because the DSDT runs its brightness-key cases, which notify the iGPU's eDP display
+device with the standard ACPI codes 0x86 and 0x87, only when its OS-version variable says "Windows 2012" or newer, and that
+variable is set from Windows `_OSI` strings alone (default 1000 under Darwin). The usual answer, an `_OSI` to `XOSI` rename in the
+DSDT plus a table that answers the Windows strings under Darwin, makes the variable 0x07DC when the table stops at "Windows
+2012", which is exactly the gate's threshold, and acidanthera's BrightnessKeys turns the notifications into key presses. With
+that in place the keys change the brightness through the same chain as the slider. Nothing in the plugin is involved; the table
+and the kext are EFI-side. A first boot with the broader table (answering every string up to "Windows 2022", variable 0x07DF)
+reached the desktop about two minutes late, with the waiting inside the accelerator's own initialisation; the narrowed table is
+being timed.
+
+### OpenGL: isolated sequences pass; the history matters (2026-10-22)
+
+A third probe ran each depth and shader case in a fresh context with one readback at the end and every operation between the two
+depth draws (nothing, flush, finish, a colour read, a depth read), for 16-bit, 24-bit, 32-bit-float and texture depth, and the
+freshly linked checker in every order tried: all 30 cases passed, on the default build and on the revision-3 diagnostic (which
+turned out not to have applied). Minutes earlier on the same boot the first probe failed both of its stages as before. So the
+depth and shader defects need what happened earlier in the same context; a fourth probe replays the failing history and changes
+one boundary per case (unbind-before-readback, the 32-frame prelude, previous shader activity, a rebuilt framebuffer, completion
+between the draws) to name the boundary.

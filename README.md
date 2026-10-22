@@ -25,8 +25,9 @@ processors, including the laptop's internal (eDP) panel.
 >   crashes inside the video driver during a pixel transfer (open).
 > - Brightness works through the embedded controller since 2026-10-21: the display engine's PWM duty does not reach
 >   this panel, so `-wex-rplp-ecbl` forwards the framebuffer's duty writes to the firmware's WMI brightness method and
->   gives AppleBacklight the generic panel curves; the built-in display has its brightness slider and the panel follows
->   it (the brightness keys are a separate, firmware-notification matter). Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
+>   gives AppleBacklight the generic panel curves; the built-in display has its brightness slider and the panel follows it. The brightness keys work too once the
+>   firmware is allowed to report them (the usual `_OSI` to `XOSI` table, answering up to "Windows 2012") and acidanthera's
+>   BrightnessKeys turns the notifications into key presses; both live in the EFI, not in this plugin. Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
 >   findings describe each step.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
