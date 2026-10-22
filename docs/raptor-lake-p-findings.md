@@ -611,7 +611,7 @@ depth and shader defects need what happened earlier in the same context; a fourt
 one boundary per case (unbind-before-readback, the 32-frame prelude, previous shader activity, a rebuilt framebuffer, completion
 between the draws) to name the boundary.
 
-### OpenGL: the bisection names a readback boundary and shows lost work (2026-10-22)
+### OpenGL: the bisection names a readback boundary; the work is missing from the returned image (2026-10-22)
 
 The fourth probe (`tools/rplp-gl-verify4.py`) replays the first probe's exact history in a fresh context per case and changes
 one boundary at a time. Checker: the control fails with the clear colour where the quad should be; removing the readback that
@@ -619,10 +619,14 @@ followed the earlier program's draw makes it pass, and so does reading the quad 
 unbinding the earlier program after its readback instead of before, building the checker program first, or drawing it again
 afterwards still fail; without the 32-frame prelude one of the quad's two triangles is missing instead of both. The first
 probe's own picture from the same session shows the earlier stage's triangle on the clear colour, so the checker stage's clear
-and quad never executed at all: the earlier description of this defect as a stale fragment shader was wrong, the work is lost.
+and quad are absent from the returned image: the earlier description of this defect as a stale fragment shader was wrong;
+whether the work was dropped, rejected or read back stale is open.
 Depth: without the earlier shader stages, or with the framebuffer rebuilt before the two draws, the pair passes; glFinish or a
 colour readback between the draws does not repair it, a depth readback does. The accelerator's workaround-table revision (the
-`-wex-rplp-warev3` diagnostic, now verified to apply) changes none of this. The fifth probe (`tools/rplp-gl-verify5.py`) adds a
+`-wex-rplp-warev3` diagnostic, now verified to apply) changes none of this, except one bisection case that passed once without
+it and failed once with it (neither noise nor a regression on a single run each). The fifth probe (`tools/rplp-gl-verify5.py`,
+revision 2: the history replayed as the exact API sequence, strict and relaxed controls, a re-read with the program rebound, the
+depth read before and after the colour, a clear-only sentinel) adds a
 picture and a wrong-colour histogram per case and the discriminating variants: the clear colour changed, a re-read after
 completion, the quad as two triangles, a fixed-function quad, completion instead of the readback, the depth values after both
 draws, the near draw with GL_ALWAYS, both triangles in one batch.
