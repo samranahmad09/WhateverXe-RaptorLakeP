@@ -714,3 +714,18 @@ sometimes the one lost, and the same draw counts zero samples or its full area d
 occlusion counts observe the same disturbed pipeline rather than measuring it independently. The tenth probe draws eight
 small triangles in eight cells in a fixed order and records, per cell, which land under each placement of an empty or
 spanning query, a depth readback, a finish or a flush.
+
+### OpenGL: the second and third draws after the clear are the ones lost (2026-10-23)
+
+The tenth probe drew eight small triangles in eight cells in a fixed order after the boundary and the clear, with no
+queries: cells 2 and 3 are missing and the other six present, twice over, and all eight present without the history. A
+finish, a flush, a depth readback, an empty occlusion query or an empty timer query between the clear and the first draw
+brings all eight back and not the clear; an empty query before the clear brings the clear back and nothing else; a query
+around an even-numbered mark loses that mark (it then counts zero samples), around an odd one changes nothing; queries
+around all eight lose only the first; a finish after the fourth mark loses the fifth. Together with the earlier results
+(two triangles lose the second, three corners the second and third, a six-vertex array draw its second triangle, a
+four-vertex quad is lost whole), the simplest reading is a lost stretch of about six vertices of vertex data, starting
+after the first three, in the first batch after the boundary, with a draw that straddles it lost whole and anything that
+flushes or re-emits state before the first draw moving the draws out of it. The eleventh probe varies the vertex layout
+(order, one glBegin, one array draw, six vertices per mark, a wider vertex, a twelve-vertex first mark, no clear, a quad
+instead of the clear, drawn twice, a flush before each) to test that reading.
