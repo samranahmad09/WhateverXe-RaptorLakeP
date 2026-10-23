@@ -698,3 +698,19 @@ present, the reverse of the result without queries. A query places depth-count a
 while active, forces the render target writeable in the pixel-shader blend state. The ninth probe places empty and spanning
 queries differently (around the clear, before or after the draw, deleted unread, a timer query, around one draw of several)
 and, with no query at all, changes plain pixel state before the draw, to tell the two apart.
+
+### OpenGL: the query's commands must sit before the draw; no plain state change repairs; the loss moves (2026-10-23)
+
+The ninth probe placed the query differently around the failing sequence. A query around the quad repairs it (and the
+repaired quad shows through a blit into a second framebuffer), a query around the clear that has already ended before the
+quad repairs it too, an empty query before the clear makes the clear visible but not the quad, an empty query after the
+quad or a warm-up query before the history changes nothing, a query deleted without reading its result still repairs, and
+a timer query repairs like an occlusion query. So the repair comes from what a query's begin and end leave behind for the
+next operation, not from an active query during the draw. No plain pixel state change without a query repairs anything:
+the colour mask re-asserted or toggled, blending enabled with a one/zero function, the depth test or the scissor toggled,
+all of them together, before the quad or before the nearer triangle of the depth pair. With queries around some draws of
+a sequence, which draw is lost moves: the draw before a query begin lands in every case, the draw inside a query is
+sometimes the one lost, and the same draw counts zero samples or its full area depending only on what follows it, so the
+occlusion counts observe the same disturbed pipeline rather than measuring it independently. The tenth probe draws eight
+small triangles in eight cells in a fixed order and records, per cell, which land under each placement of an empty or
+spanning query, a depth readback, a finish or a flush.
