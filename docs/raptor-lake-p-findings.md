@@ -683,3 +683,16 @@ readback taken first fixes the old image for every later observer. Of three smal
 first is present; after an absent quad, two trailing triangles are both present. The eighth probe wraps every draw in an
 occlusion query, to learn whether the absent draws rasterised at all, and re-asserts one piece of pipeline state at a time
 before the draw.
+
+### OpenGL: an occlusion query around each draw makes the missing draws land; compression does not matter (2026-10-23)
+
+With IOSurface render compression disabled in the accelerator personality (logged by the driver), the readback sequences,
+Chess and WebGL were unchanged, so the device-cache compression that upstream 0.4.0 keeps off is not the cause here. The
+eighth probe wrapped every draw of the failing sequences in an occlusion query (`GL_SAMPLES_PASSED`) and read the counts only
+after the readback: the lone quad landed with all 4096 samples counted, two triangles landed, the depth pair came out with
+the nearer triangle on top, and no re-asserted pipeline state (colour mask, viewport, framebuffer binding, draw buffer,
+scissor, depth mask, blend) was needed, so none of those had been lost. Only the query's begin and end commands differ from
+the sequences that fail, and a finish or flush in the same places never had this effect. Under the queries one sequence still
+loses a draw: of three small triangles the first counts zero samples and is absent while the other two are present, the
+reverse of the result without queries. The ninth probe places the query around the clear, empty before or after the draw,
+deleted unread, as a timer query, or around one draw of several, to find where its commands must sit.
