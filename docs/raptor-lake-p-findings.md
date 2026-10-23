@@ -763,3 +763,19 @@ positions; the second of two passes misses different triangles than the first, s
 about either pass. Separately, whether the clear itself is in the returned image depends on how many frames were read back
 before it: present after 0 or 16, missing after 32 or 48. The thirteenth probe measures the window in vertex units with
 1024 one-pixel points behind a varying number of clipped spacer points in one draw.
+
+### OpenGL: the lost records are the 46th and 47th of every data buffer (2026-10-23)
+
+The thirteenth probe drew 1024 one-pixel points in one draw after a clear in a fresh context. Exactly points 45-46, 129-130
+and so on to 969-970 are missing: twelve windows, 84 apart, two wide. Clipped spacer points placed before the visible points
+in the same draw shift every window by exactly the number of spacers, so the window is fixed in the stream of vertex records
+the driver writes. A colour attribute used by the shader changes nothing. A texture coordinate on top makes the windows
+recur every 56 records instead of 84, while the first window still sits at record 45. A window at a fixed byte offset of
+the buffer would have moved to record 30 with the wider records; it did not move, so the invariant is the record index.
+84 x 48 = 56 x 72 = 4032 = 4096 - 64: the recurrence is the record capacity of a 4 KB data buffer with a 64-byte reserve,
+with 48-byte and 72-byte records. A draw of its own before the main draw moves the windows by about 44 records, a run of
+equal draws by about 5 per draw boundary, and 60-vertex draws each lose their own 45th and 46th because each starts a fresh
+buffer. After the earlier probes' history the windows are at 3 + 84n, after a fixed-function quad at 19 + 84n. With nothing
+drawn after it, the clear is missing after a prelude of 8, 16, 24, 32 or 48 frames. The fourteenth probe tests the record
+index against draws of exactly 44 to 48 points, a third stride, the shader's output size versus its input size, and the
+vertex-buffer-object path.
