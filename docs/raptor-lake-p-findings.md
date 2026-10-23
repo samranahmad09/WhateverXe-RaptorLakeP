@@ -669,3 +669,17 @@ under the depth test a second nearer triangle is still absent. Through client ve
 immediate mode: a GL_QUADS primitive is absent, a six-vertex GL_TRIANGLES draw shows its first triangle only. The next
 probe looks at the same framebuffer through a blit, a texture copy, other pixel formats and a sub-rectangle to tell a
 stale readback from work the surface never received.
+
+### OpenGL: every second look returns the old image (2026-10-23)
+
+The seventh probe looked at the framebuffer after the failing sequence through other paths, each first validated on a good
+source in a fresh context: a framebuffer blit into a second framebuffer, a copy into a texture drawn into a second
+framebuffer (texture allocated before or after), BGRA and float readbacks, a sub-rectangle, and for the depth pair a
+colour-and-depth blit. Every path returned exactly what the direct readback returned: the image from before the sequence,
+with the blitted depth at the farther triangle's value everywhere. So the missing colour is not in the attachment that the
+GPU blit, the GPU copy and the readback all reference; a stale CPU-side copy alone does not explain it. One ordering differs:
+a blit made before any readback shows the clear colour and no quad, and the readback taken after it shows the same; a
+readback taken first fixes the old image for every later observer. Of three small triangles drawn after the clear only the
+first is present; after an absent quad, two trailing triangles are both present. The eighth probe wraps every draw in an
+occlusion query, to learn whether the absent draws rasterised at all, and re-asserts one piece of pipeline state at a time
+before the draw.
