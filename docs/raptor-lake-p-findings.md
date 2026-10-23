@@ -656,3 +656,16 @@ quad is absent although it is the first draw after its clear. Whether the later 
 stale state, or land where the readback does not look is the next question (`tools/rplp-gl-verify6.py`, revision 2: a
 trailing throwaway, clipped or depth-rejected draw, a trailing clear, a texture upload, a framebuffer switch with and
 without an allocation, vertex arrays instead of immediate mode).
+
+### OpenGL: the completion wait and the trailing-work probe (2026-10-23)
+
+A completion wait after every GPU submission (the accelerator personality's `WaitForComplete` set to 1, verified in the
+registry and in the log on and off) did not change the two readback sequences: the same images came back, one case passed
+once, probe 6 was identical, and the policy added lag and a new failure on a 1024x1024 readback surface. It is retired. The
+sixth probe found no trailing operation that brings the missing quad back into the readback (a tiny triangle, a clipped
+triangle, a finish, a texture upload, a framebuffer switch with or without an allocation), yet a trailing tiny triangle is
+itself present while the quad before it is not, a trailing clear is present, and a quad drawn a second time is present;
+under the depth test a second nearer triangle is still absent. Through client vertex arrays the picture is the same as in
+immediate mode: a GL_QUADS primitive is absent, a six-vertex GL_TRIANGLES draw shows its first triangle only. The next
+probe looks at the same framebuffer through a blit, a texture copy, other pixel formats and a sub-rectangle to tell a
+stale readback from work the surface never received.
