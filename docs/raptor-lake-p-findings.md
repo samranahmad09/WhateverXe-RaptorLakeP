@@ -779,3 +779,17 @@ buffer. After the earlier probes' history the windows are at 3 + 84n, after a fi
 drawn after it, the clear is missing after a prelude of 8, 16, 24, 32 or 48 frames. The fourteenth probe tests the record
 index against draws of exactly 44 to 48 points, a third stride, the shader's output size versus its input size, and the
 vertex-buffer-object path.
+
+### OpenGL: the first lost record, and the recurrence by layout and path (2026-10-23)
+
+The fourteenth probe measured, in a fresh context after a clear: a draw of 44 points loses nothing, a draw of 45 loses its
+last point, a draw of 46 its 46th (the last), a draw of 47 its 46th, a draw of 48 its 46th and 47th. The windows recur
+every 84 records for position only, for a colour, for a texture coordinate read by the vertex shader but not output, for
+four extra constant outputs, for colour plus two texture coordinates, and on the vertex-buffer-object path; every 56 for
+colour plus one texture coordinate on the client path, array and glBegin alike; every 48 on the vertex-buffer-object path
+with colour plus one texture coordinate. The first window is at record 45 on the client path for every layout, at 53 on
+the vertex-buffer-object path with position only and at 5 on that path with colour plus one texture coordinate; spacer
+points inside the buffer object shift the windows one for one. The second of two draws of 512 has its windows five records
+early. After a 16- or 32-frame prelude the clear is missing whether nothing, one point or 1024 points follow it. The
+fifteenth probe takes the draw-length series to the other paths and separates the twelfth probe's setup from its geometry
+for the clear.
