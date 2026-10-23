@@ -746,3 +746,20 @@ lost whole or in part. The twelfth probe maps the region on a 40-triangle grid d
 format, the draw path (a client array, one or forty glBegin, glDrawElements in storage or reverse order, a vertex
 buffer object, one-pixel points, two passes in two colours), the length of the history before the boundary and what
 precedes the draw, with a no-history control per path and the triangles judged separately from the background.
+
+### OpenGL: the loss needs no history and recurs every 84 vertices (2026-10-23)
+
+The twelfth probe drew a grid of 40 small triangles (120 vertices) through several paths, each with a no-history control.
+Every no-history control failed: in a fresh context, after a plain clear, one draw of 120 vertices misses vertices 45 and
+46 (drawn as points) or the triangle made of vertices 45 to 47, the same for 2, 3 or 4 components per vertex, one glBegin
+or a client array, glDrawElements, and with a flush or an empty query before the draw. The earlier no-history controls
+passed only because they never reached position 45. The missing set follows the draw position, not the storage position:
+with the triangles drawn in reverse order through an index array, the 16th drawn triangle is the missing one. The window
+recurs every 84 vertices along one draw: after the earlier probes' history the misses are at vertices 3 and 87, after a
+fixed-function quad at 0 and 84, after a flush at 33 and 117, with nothing before the draw at 45. What precedes the draw
+moves the window by amounts unrelated to its vertex count. Two draws of 60 vertices each miss their own 45th vertex; four
+draws of 30 miss nothing; forty separate glBegin calls move the windows; the vertex-buffer-object path misses at other
+positions; the second of two passes misses different triangles than the first, so a complete image drawn twice says nothing
+about either pass. Separately, whether the clear itself is in the returned image depends on how many frames were read back
+before it: present after 0 or 16, missing after 32 or 48. The thirteenth probe measures the window in vertex units with
+1024 one-pixel points behind a varying number of clipped spacer points in one draw.
