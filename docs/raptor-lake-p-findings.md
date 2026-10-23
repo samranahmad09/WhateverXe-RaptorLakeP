@@ -630,3 +630,26 @@ depth read before and after the colour, a clear-only sentinel) adds a
 picture and a wrong-colour histogram per case and the discriminating variants: the clear colour changed, a re-read after
 completion, the quad as two triangles, a fixed-function quad, completion instead of the readback, the depth values after both
 draws, the near draw with GL_ALWAYS, both triangles in one batch.
+
+### Brightness keys without the OS masquerade (2026-10-23)
+
+The four firmware hotkey cases that notify the display device sit behind "OS version at least Windows 2012"; rewriting the
+comparand of exactly those four guards in the DSDT (two 15-byte OpenCore patches, two matches each) makes them true under
+Darwin without changing any other OS-version gate. With BrightnessKeys the keys work, the slider still works, and the boot
+is as fast as without the patches, where the `_OSI` to `XOSI` table had cost about twenty seconds of silent early-kernel time.
+
+### OpenGL: after the boundary only the first draw is in the image (2026-10-23)
+
+The fifth probe's second revision, run twice on one boot with identical results, replays the first probe's call sequence
+exactly. After a program draw followed by a readback (a finish or a flush does the same), nothing added later is in any
+readback of that framebuffer: not a clear of any colour, with or without geometry, not a program or fixed-function draw, not
+a re-read at once, after glFinish or with the program rebound, not a second clear and draw. Not reading, finishing or
+flushing after the first draw keeps everything correct. The exception carries the information: when the next draw is two
+separate triangles, the first is in the image and the second is not, and the clear before them is not. The depth pair
+behaves the same way: the farther triangle is in the image and the nearer one is not, in colour and in depth (the depth
+attachment reads the farther value at every interior pixel, read before or after the colour), with the depth function set to
+always pass, with the farther draw's depth write masked, with a depth clear between the draws, with a third nearer draw after
+the second (both absent) and with both triangles in one glBegin; so the depth test is not the mechanism. A depth readback
+between the two draws still restores the pair. Whether the later draws never reach the GPU, reach it with stale state, or
+land where the readback does not look is the next question (`tools/rplp-gl-verify6.py`: a trailing throwaway draw, a trailing
+clear, a texture upload, a framebuffer switch, vertex arrays instead of immediate mode).
