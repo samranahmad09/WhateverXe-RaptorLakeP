@@ -729,3 +729,16 @@ after the first three, in the first batch after the boundary, with a draw that s
 flushes or re-emits state before the first draw moving the draws out of it. The eleventh probe varies the vertex layout
 (order, one glBegin, one array draw, six vertices per mark, a wider vertex, a twelve-vertex first mark, no clear, a quad
 instead of the clear, drawn twice, a flush before each) to test that reading.
+
+### OpenGL: the loss is in the vertex data (2026-10-23)
+
+The eleventh probe varied the vertex layout of the eight marks with no queries. One glBegin and one glDrawArrays of 24
+vertices each lose exactly their second and third triangles; drawn in reverse order the second and third draws are the
+lost ones; a first mark made of twelve vertices loses its second and third sub-triangles and every later mark survives;
+with two triangles per mark every mark survives, each keeping one copy; a per-vertex colour changes nothing; without the
+clear the first mark is lost instead and the rest survive; a fixed-function quad in place of the clear lands and the
+first mark after it is lost; the marks drawn twice all survive; a flush before each mark scatters the loss over marks 2,
+5, 7 and 8. So a stretch of about six vertices of vertex data is not what the GPU reads in the first batch after the
+boundary, its position moves with whatever was written into the vertex arena before it, and a draw that straddles it is
+lost whole or in part. The twelfth probe maps the region on a 40-triangle grid drawn in one go, against the vertex
+component count, the draw split, the length of the history before the boundary and what precedes the draw.
