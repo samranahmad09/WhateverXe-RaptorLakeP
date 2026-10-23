@@ -721,8 +721,9 @@ The tenth probe drew eight small triangles in eight cells in a fixed order after
 queries: cells 2 and 3 are missing and the other six present, twice over, and all eight present without the history. A
 finish, a flush, a depth readback, an empty occlusion query or an empty timer query between the clear and the first draw
 brings all eight back and not the clear; an empty query before the clear brings the clear back and nothing else; a query
-around an even-numbered mark loses that mark (it then counts zero samples), around an odd one changes nothing; queries
-around all eight lose only the first; a finish after the fourth mark loses the fifth. Together with the earlier results
+around mark 3, 4, 6 or 8 loses that mark (it then counts zero samples), around mark 5 or 7 changes nothing, so no
+parity rule follows; queries around marks 1 and 8 together lose 1 and 6; queries around all eight lose only the first;
+a finish after the fourth mark loses the fifth. Together with the earlier results
 (two triangles lose the second, three corners the second and third, a six-vertex array draw its second triangle, a
 four-vertex quad is lost whole), the simplest reading is a lost stretch of about six vertices of vertex data, starting
 after the first three, in the first batch after the boundary, with a draw that straddles it lost whole and anything that
@@ -735,10 +736,13 @@ instead of the clear, drawn twice, a flush before each) to test that reading.
 The eleventh probe varied the vertex layout of the eight marks with no queries. One glBegin and one glDrawArrays of 24
 vertices each lose exactly their second and third triangles; drawn in reverse order the second and third draws are the
 lost ones; a first mark made of twelve vertices loses its second and third sub-triangles and every later mark survives;
-with two triangles per mark every mark survives, each keeping one copy; a per-vertex colour changes nothing; without the
+with two triangles per mark every mark is present in the final image; a per-vertex colour changes nothing; without the
 clear the first mark is lost instead and the rest survive; a fixed-function quad in place of the clear lands and the
-first mark after it is lost; the marks drawn twice all survive; a flush before each mark scatters the loss over marks 2,
+first mark after it is lost; the marks drawn twice are all present in the final image (which copy landed is not
+established); a flush before each mark scatters the loss over marks 2,
 5, 7 and 8. So a stretch of about six vertices of vertex data is not what the GPU reads in the first batch after the
 boundary, its position moves with whatever was written into the vertex arena before it, and a draw that straddles it is
-lost whole or in part. The twelfth probe maps the region on a 40-triangle grid drawn in one go, against the vertex
-component count, the draw split, the length of the history before the boundary and what precedes the draw.
+lost whole or in part. The twelfth probe maps the region on a 40-triangle grid drawn in one go, against the input
+format, the draw path (a client array, one or forty glBegin, glDrawElements in storage or reverse order, a vertex
+buffer object, one-pixel points, two passes in two colours), the length of the history before the boundary and what
+precedes the draw, with a no-history control per path and the triangles judged separately from the background.
