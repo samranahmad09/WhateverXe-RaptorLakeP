@@ -790,3 +790,16 @@ points inside the buffer object shift the windows one for one. The second of two
 early. After a 16- or 32-frame prelude the clear is missing whether nothing, one point or 1024 points follow it. The
 fifteenth probe takes the draw-length series to the other paths and separates the twelfth probe's setup from its geometry
 for the clear.
+
+### OpenGL: the short-draw shape repeats exactly, and the loss follows the submission order (2026-10-25)
+
+The fifteenth probe repeated the short draws in fresh contexts. Every repeat agreed: on the client path (client arrays, one
+glBegin, and colour plus a texture coordinate alike) a draw of 44 points loses nothing, a draw of 45 loses its last point, a
+draw of 46 its last, a draw of 47 its 46th, a draw of 48 its 46th and 47th; on the vertex-buffer-object path the same shape
+starts at the 53rd point (52 loses nothing, 53 its last, 54 its last, 55 its 53rd, 56 its 53rd and 54th). With the point
+positions permuted while the submission order was kept, the affected ordinals stayed at 45-46 plus multiples of 84 while
+the affected pixels scattered, so the loss follows the submission order, not the screen location. A texture coordinate
+alone behaves like position only; on the vertex-buffer-object path the first affected ordinal differs by layout and the
+distances between windows are irregular with more attributes. The earlier probe's two sequences whose clear was present did
+not reproduce with the same setup; in this run only a clear in a fresh context, and one points case after the flat stage
+with no prelude frames, left an all-blue background.
