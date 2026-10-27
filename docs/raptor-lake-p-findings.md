@@ -803,3 +803,20 @@ alone behaves like position only; on the vertex-buffer-object path the first aff
 distances between windows are irregular with more attributes. The earlier probe's two sequences whose clear was present did
 not reproduce with the same setup; in this run only a clear in a fresh context, and one points case after the flat stage
 with no prelude frames, left an all-blue background.
+
+### OpenGL: the draw count alone sets the short-draw outcome, and the clear varies between sessions (2026-10-26)
+
+The sixteenth probe held the storage fixed: with 48 points in the client array, or 56 in a buffer object, draws of 44 to 48
+and of 52 to 56 lose exactly what the draws from storage of their own size lose, in both repeats, with one exception (a
+buffer-object draw of 55 lost nothing once). The seventeenth probe compared the two earlier probes' recipes one change at a
+time, each run in its own process, forty runs in all: every arm gave the same image, the clear missing and the same three
+triangles absent, so none of the four differences between those probes explains why one of them once had the clear present.
+Exact replays of the unchanged earlier probes then showed the clear present in cases that had it missing before and missing
+in a case that had it present, with the draws otherwise unchanged. Whether the clear after the history lands is therefore
+not fixed by the GL call sequence alone.
+
+Related work: a NootedGreen-based build for the same device id on macOS 26 (https://github.com/olaf11071107/Hackintosh-Huawei-Matebook-D16-2024-iGPU-i5-13th-Gen) reports that its hardware cursor needed
+its own write-combined buffer because the image written by the CPU through the GGTT aperture did not reliably reach the
+pages the display reads, and that it overrides the driver's EU and L3 bank counts for its part. Whether the accelerator's
+data paths on Big Sur are affected by the same aperture behaviour is an open question here. That project derives from
+ChefKiss code under the Thou Shalt Not Profit licence, so nothing from it is used in this fork.
