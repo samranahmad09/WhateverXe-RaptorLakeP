@@ -846,4 +846,11 @@ the exact rule needs a change in the user-mode driver's allocation, which this f
 the override (five and four banks) stalled at the end of the boot: the plugin's own native admission guards compared the
 accelerator's stored bank count with the measured six, found the override instead and refused the engine start. Revision
 r326 makes the published count the guards' reference, so an applied override admits as the measured count does, and
-publishes `RPLPURBBanksOverride` only for an applied override.
+publishes `RPLPURBBanksOverride` only for an applied override. Round 42 (2026-10-28) then ran the r326 build with five
+banks: the first probe's thirteen stages all pass (the glsl-checker and both depth stages included), the 1024-point probe
+finds every point present in all 29 cases and the clear present after every prelude, and Chess and the rotating cube
+render without the dropped faces. The installed drivers are unchanged (the same GL driver hash), so the whole difference
+is the count the plugin publishes: a vertex URB allocation ending at 320 KiB instead of 384 KiB on these six banks. Five
+banks is therefore the working configuration on this part; it costs URB capacity for every consumer, and the exact rule
+(end the six-bank vertex-shader-only allocation at 360 KiB, as the upstream package does inside the driver) remains the
+principled fix to carry in user mode.
