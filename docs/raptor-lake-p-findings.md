@@ -820,3 +820,15 @@ its own write-combined buffer because the image written by the CPU through the G
 pages the display reads, and that it overrides the driver's EU and L3 bank counts for its part. Whether the accelerator's
 data paths on Big Sur are affected by the same aperture behaviour is an open question here. That project derives from
 ChefKiss code under the Thou Shalt Not Profit licence, so nothing from it is used in this fork.
+
+### OpenGL: the user-mode side is correct for the failing draws (2026-10-28)
+
+A live capture of the user-mode driver's state around the boundary draws (run on the daily configuration) found every
+requested point present and correct in the driver's CPU-side vertex arena, including the points missing from the image,
+unchanged up to the readback, and the command stream encoding the full requested draw with an adequate vertex-buffer extent;
+within each path the streams for passing and failing counts differ only in the count value. The emitted URB allocation
+(1,408 vertex-shader entries of 256 bytes, 352 KiB, with 16 KiB of push constants each for the vertex and pixel stages)
+fits the six L3 banks the plugin publishes for this part. So the loss acts after the user-mode driver: in the kernel's
+relocation and resource association, in memory visibility, in execution, or in the readback path. The next step retains
+the kernel-side submit records of the same draws with the plugin's own opt-in queue trace (boot argument
+`-wex-adln-qtrace`, process named `adln-qtrace`).
