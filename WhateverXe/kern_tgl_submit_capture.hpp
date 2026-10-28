@@ -20,9 +20,13 @@ struct Record {
  // Current CPU physical translation and actual GGTT PTE, including the
  // remainder of the retained context. Absent CPU pages remain unknown.
  uint64_t pages[28][3] {};
- struct Batch {uint64_t q[12] {};uint8_t bytes[4096] {};} batch[2];
+ // Each BBS target keeps up to four pages, copied one by one through their
+ // own translations: q[12] pages requested, q[13] bitmask of pages copied
+ // whole, q[14] bitmask of pages whose translation was stable around the
+ // copy, q[15] bytes copied in all. q[0..11] describe the first page as before.
+ struct Batch {uint64_t q[16] {};uint8_t bytes[16384] {};} batch[2];
  struct Aux {uint64_t q[16] {};uint8_t bytes[16384] {};uint64_t pages[4][3] {};} aux[2];
- // Two BBS pages and eight pages covering the saved 32KiB Aux root VA.
+ // Two BBS first pages and eight pages covering the saved 32KiB Aux root VA.
  uint64_t chainOwnership[8] {};
  struct ChainPair {uint64_t qualified {},stable {};TGLPPGTT::Chain before,after;} chains[10];
 };

@@ -2641,12 +2641,28 @@ static void tglFillSubmitCapture(TGLSubmitCapture::Record &r,uint64_t ctx,uint64
     if (before.status || before.rootPhysical!=q[Root] || before.physical>UINT64_MAX-tglVM.directBase) continue;
     const uint64_t cpu=tglVM.directBase+before.physical;
     a[4]=2;
-    if (cpu<tglVM.directBase || cpu>=tglVM.directEnd || tglVM.directEnd-cpu<sizeof(v.bytes)) continue;
-    a[8]=tglVM.nofault(cpu,reinterpret_cast<uintptr_t>(v.bytes),sizeof(v.bytes));
+    if (cpu<tglVM.directBase || cpu>=tglVM.directEnd || tglVM.directEnd-cpu<4096) continue;
+    a[8]=tglVM.nofault(cpu,reinterpret_cast<uintptr_t>(v.bytes),4096);
     const auto after=TGLPPGTT::inspect(q[Table],a[3],tglVMRead);
     a[9]=after.rootPhysical;a[10]=after.pte;a[11]=after.physical;
-    if (a[8]==sizeof(v.bytes) && !after.status && after.rootPhysical==before.rootPhysical &&
+    if (a[8]==4096 && !after.status && after.rootPhysical==before.rootPhysical &&
         after.pteAddress==before.pteAddress && after.pte==before.pte && after.physical==before.physical) a[4]=0;
+    // r324: the target's following pages, each through its own translation,
+    // so a submitted stream longer than one page is retained whole. The first
+    // page keeps the words above; the loop stops at the first page that is
+    // not mapped, not direct-mappable, short, or unstable around the copy.
+    a[12]=sizeof(v.bytes)/4096;a[13]=a[8]==4096;a[14]=a[4]==0;a[15]=a[8];
+    for (unsigned p=1;p<a[12] && (a[14]&(1ULL<<(p-1)));++p) {
+     const auto gpu=a[3]+p*4096;const auto b1=TGLPPGTT::inspect(q[Table],gpu,tglVMRead);
+     if (b1.status || b1.rootPhysical!=q[Root] || b1.physical>UINT64_MAX-tglVM.directBase) break;
+     const uint64_t c=tglVM.directBase+b1.physical;
+     if (c<tglVM.directBase || c>=tglVM.directEnd || tglVM.directEnd-c<4096) break;
+     const auto copied=tglVM.nofault(c,reinterpret_cast<uintptr_t>(v.bytes+p*4096),4096);a[15]+=copied;
+     const auto a1=TGLPPGTT::inspect(q[Table],gpu,tglVMRead);
+     if (copied==4096) a[13]|=1ULL<<p;
+     if (copied==4096 && !a1.status && a1.rootPhysical==b1.rootPhysical && a1.pteAddress==b1.pteAddress &&
+         a1.pte==b1.pte && a1.physical==b1.physical) a[14]|=1ULL<<p; else break;
+    }
    }
   }
   if(q[TableClass]==tglPPGTTClass && tglPPGTTClass && q[Root] && q[Root]==q[SoftwareRoot]) {
@@ -2687,6 +2703,10 @@ static void tglCaptureSubmit(uint64_t ctx,uint64_t streamer,uint32_t submit,unsi
 // context. No pending-work edits, extra wake, cache operation or GPU request.
 static bool adlnQueueTraceEnabled;
 static uintptr_t adlnQueueTraceProcName, adlnQueueTraceCreateOriginal, adlnQueueTraceProcessOriginal;
+// r324: kernel accessors that map a hardware context's owning task to its
+// process, so a process that never creates a command queue (a GL context) can
+// still be latched by name at the submit site.
+static uintptr_t adlnQueueTraceBSDInfo, adlnQueueTraceProcPid;
 static uint32_t adlnQueueTracePID,adlnQueueTraceProcesses,adlnQueueTraceSubmits;
 static struct {XELPQueueTrace::Target target;uint32_t ready;} adlnQueueTraceTargets[4];
 static struct {uint64_t q[16];uint32_t ready;} adlnQueueTraceProcessRecords[4];
@@ -2801,22 +2821,51 @@ static void adlnQueueTraceRegisters(uint64_t *q,uint8_t *owner) {
  q[1]=1;tglHostClock(q+2);
  for(unsigned i=0;i<arrsize(tglExecutionRegs);++i)q[3+i]=*reinterpret_cast<volatile uint32_t *>(base+tglExecutionRegs[i]);
 }
+// r324: latch by the owning task of the hardware context being submitted. The
+// native capture already takes the task from ctx+0x58 and reads its page-table
+// field; the same no-fault reads qualify the pointer before the two kernel
+// accessors run. A process that never creates a command queue (a GL context)
+// is latched here by name, like the queue path, once; later submissions of
+// its contexts are matched by the latched pid.
+static bool adlnQueueTraceContextMatches(uint64_t ctx) {
+ if(!adlnQueueTraceEnabled || !tglVM.nofault || !adlnQueueTraceBSDInfo || !adlnQueueTraceProcPid || !adlnQueueTraceProcName)return false;
+ uint64_t task=0,table=0,word=0;
+ if(!tglVMRead(ctx+0x58,task) || !TGLSubmitCapture::kernelRange(task,0x268) || !tglVMRead(task+0x260,table))return false;
+ const auto bsd=reinterpret_cast<uint64_t>(reinterpret_cast<void *(*)(void *)>(adlnQueueTraceBSDInfo)(reinterpret_cast<void *>(task)));
+ if(!TGLSubmitCapture::kernelRange(bsd,0x100) || !tglVMRead(bsd,word))return false;
+ const auto pid=reinterpret_cast<int (*)(void *)>(adlnQueueTraceProcPid)(reinterpret_cast<void *>(bsd));
+ if(pid<=0 || pid>99999)return false;
+ const auto selected=__atomic_load_n(&adlnQueueTracePID,__ATOMIC_ACQUIRE);
+ if(selected)return selected==uint32_t(pid);
+ char name[32] {};reinterpret_cast<void (*)(int,char *,int)>(adlnQueueTraceProcName)(pid,name,sizeof(name));
+ name[sizeof(name)-1]=0;if(strcmp(name,"adln-qtrace"))return false;
+ uint32_t empty=0;__atomic_compare_exchange_n(&adlnQueueTracePID,&empty,uint32_t(pid),false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
+ return __atomic_load_n(&adlnQueueTracePID,__ATOMIC_ACQUIRE)==uint32_t(pid);
+}
 static uint32_t adlnQueueTraceSubmitPrepare(uint64_t streamer,uint32_t submit,uint8_t *owner) {
- if(!adlnQueueTraceEnabled || !__atomic_load_n(&adlnQueueTracePID,__ATOMIC_ACQUIRE) || !owner || owner!=tglHost.owner)return 0;
+ if(!adlnQueueTraceEnabled || !owner || owner!=tglHost.owner)return 0;
  uint64_t active=0;if(!tglVMRead(streamer+0x50,active) || uint32_t(active)>1)return 0;
  uint32_t mask=0;
+ auto record=[&](uint64_t ctx,unsigned bank,uint64_t queue,uint64_t target)->bool {
+  const auto slot=__atomic_fetch_add(&adlnQueueTraceSubmits,1U,__ATOMIC_RELAXED);
+  if(slot>=arrsize(adlnQueueTraceRecords))return false;
+  auto &r=adlnQueueTraceRecords[slot];auto q=r.q;q[0]=1;q[1]=__atomic_load_n(&adlnQueueTracePID,__ATOMIC_ACQUIRE);
+  q[2]=queue;q[3]=ctx;q[4]=target;q[5]=submit;q[6]=bank;q[7]=__atomic_load_n(&adlnQueueTraceProcesses,__ATOMIC_RELAXED);
+  adlnQueueTraceRegisters(q+8,owner);
+  tglFillSubmitCapture(r.capture,ctx,streamer,submit,bank);adlnQueueMemoryCapture(slot,r.capture);mask|=1U<<slot;return true;
+ };
  for(unsigned bank=0;bank<2;++bank){uint64_t item=0,ctx=0;
   if(!tglVMRead(streamer+0x30+(1-uint32_t(active))*16+bank*8,item) || !item || !tglVMRead(item,ctx) || !ctx)continue;
-  for(unsigned t=0;t<arrsize(adlnQueueTraceTargets);++t){auto &target=adlnQueueTraceTargets[t];
-   if(__atomic_load_n(&target.ready,__ATOMIC_ACQUIRE)!=1 ||
-    !XELPQueueTrace::matches(target.target,ctx,reinterpret_cast<uintptr_t>(owner),tglVMRead))continue;
-   const auto slot=__atomic_fetch_add(&adlnQueueTraceSubmits,1U,__ATOMIC_RELAXED);
-   if(slot>=arrsize(adlnQueueTraceRecords))break;
-   auto &r=adlnQueueTraceRecords[slot];auto q=r.q;q[0]=1;q[1]=__atomic_load_n(&adlnQueueTracePID,__ATOMIC_ACQUIRE);
-   q[2]=target.target.queue;q[3]=ctx;q[4]=t;q[5]=submit;q[6]=bank;q[7]=__atomic_load_n(&adlnQueueTraceProcesses,__ATOMIC_RELAXED);
-   adlnQueueTraceRegisters(q+8,owner);
-   tglFillSubmitCapture(r.capture,ctx,streamer,submit,bank);adlnQueueMemoryCapture(slot,r.capture);mask|=1U<<slot;break;
-  }
+  bool matched=false;
+  if(__atomic_load_n(&adlnQueueTracePID,__ATOMIC_ACQUIRE))
+   for(unsigned t=0;t<arrsize(adlnQueueTraceTargets) && !matched;++t){auto &target=adlnQueueTraceTargets[t];
+    if(__atomic_load_n(&target.ready,__ATOMIC_ACQUIRE)!=1 ||
+     !XELPQueueTrace::matches(target.target,ctx,reinterpret_cast<uintptr_t>(owner),tglVMRead))continue;
+    matched=true;record(ctx,bank,target.target.queue,t);
+   }
+  // r324: no learned queue for this context (a GL context never creates one):
+  // latch or match by the owning task's process instead. q[4]=0xFF marks it.
+  if(!matched && adlnQueueTraceContextMatches(ctx))record(ctx,bank,0,0xFF);
  }
  return mask;
 }
@@ -10243,6 +10292,10 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
              patcher.clearError();
              if(ready)adlnQueueTraceProcName=patcher.solveSymbol(KernelPatcher::KernelID,"_proc_name");
              ready=ready && adlnQueueTraceProcName;patcher.clearError();
+             // r324: the task-to-process accessors for the submit-site latch.
+             if(ready)adlnQueueTraceBSDInfo=patcher.solveSymbol(KernelPatcher::KernelID,"_get_bsdtask_info");
+             if(ready)adlnQueueTraceProcPid=patcher.solveSymbol(KernelPatcher::KernelID,"_proc_pid");
+             ready=ready && adlnQueueTraceBSDInfo && adlnQueueTraceProcPid;patcher.clearError();
              if(ready) {
               KernelPatcher::RouteRequest trace[] {
                {create,adlnQueueTraceCreate,adlnQueueTraceCreateOriginal},
