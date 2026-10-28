@@ -13,16 +13,21 @@ start = (root / 'WhateverXe/kern_start.cpp').read_text()
 assert 'PE_parse_boot_arg' not in provider and 'checkKernelArgument' not in provider
 # Guard the public namespace across every reader, including plugin arrays.
 external = {'-igfxdvmt', 'gfxrst', '-allow3d', '-disablegfxfirmware'}
-used = set()
+flags, valued = set(), set()
 for directory in ['WhateverXe', 'AppleIntelTGLCompat']:
     for path in (root / directory).glob('*.cpp'):
-        used.update(re.findall(r'(?:checkKernelArgument|PE_parse_boot_argn)\("([^"]+)"', path.read_text()))
+        text = path.read_text()
+        flags.update(re.findall(r'checkKernelArgument\("([^"]+)"', text))
+        valued.update(re.findall(r'PE_parse_boot_argn\("([^"]+)"', text))
+used = flags | valued
 for array, expected in [('Off', '-wexoff'), ('Debug', '-wexdbg'), ('Beta', '-wexbeta')]:
     body = re.search(r'bootarg' + array + r'\[\] \{(.*?)\}', start, re.S).group(1)
     assert re.findall(r'"([^"]+)"', body) == [expected]
     used.add(expected)
 assert external <= used
-assert all(name.startswith('-wex') or name in external for name in used), used
+# XNU reads a dash-prefixed name as a flag and ignores its value, so a valued option is undashed and wex- prefixed.
+assert all(name.startswith('-wex') or name in external for name in flags), flags
+assert all(name.startswith('wex-') or name in external for name in valued), valued
 assert not (root / 'WhateverXe/kern_boot_args.hpp').exists()
 # Keep the complete diagnostic namespace regression independent of user docs.
 names = json.loads((root / 'tests/fixtures/boot_argument_names.json').read_text())

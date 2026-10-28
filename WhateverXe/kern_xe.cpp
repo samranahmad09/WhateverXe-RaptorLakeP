@@ -9950,7 +9950,9 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// drivers, `wex-rplp-urb-banks=<1..8>`, on the measured RPL-P profile
 			// only. The user-mode GL driver sizes its vertex URB allocation from
 			// this count, so a smaller count ends that allocation earlier. The
-			// measured count stays the default; the override is published.
+			// measured count stays the default; the override is published. The
+			// name has no dash: XNU reads a dash-prefixed name as a flag and
+			// stores 1 whatever follows its '='.
 			uint32_t urbBanksOverride=0;
 			if (XELP::measuredURBTopology(xeProfile.gt) &&
 				PE_parse_boot_argn("wex-rplp-urb-banks",&urbBanksOverride,sizeof(urbBanksOverride)) &&
