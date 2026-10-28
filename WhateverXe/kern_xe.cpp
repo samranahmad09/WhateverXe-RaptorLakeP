@@ -9946,6 +9946,18 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// admitted L3 capacity (RPL-P: 8 subslices, 6 banks).
 			uint8_t urbReplaceAlderLakeN[] {0x83,0xFE,0x01,0x75,0x59,0x83,0xFA,0x04,0x75,0x54,0x41,0xC7,0x87,0x64,0x11,0x00,0x00,0x04,0x00,0x00,0x00};
 			if (adlnDetected) { urbReplaceAlderLakeN[7]=adlnNativeSubslices;urbReplaceAlderLakeN[17]=adlnL3Banks; }
+			// r325: diagnostic override of the URB bank count published to the
+			// drivers, `wex-rplp-urb-banks=<1..8>`, on the measured RPL-P profile
+			// only. The user-mode GL driver sizes its vertex URB allocation from
+			// this count, so a smaller count ends that allocation earlier. The
+			// measured count stays the default; the override is published.
+			uint32_t urbBanksOverride=0;
+			if (XELP::measuredURBTopology(xeProfile.gt) &&
+				PE_parse_boot_argn("wex-rplp-urb-banks",&urbBanksOverride,sizeof(urbBanksOverride)) &&
+				urbBanksOverride>=1 && urbBanksOverride<=8) {
+				urbReplaceAlderLakeN[17]=static_cast<uint8_t>(urbBanksOverride);
+				IORegistryEntry::getRegistryRoot()->setProperty("RPLPURBBanksOverride",urbBanksOverride,32);
+			}
 			const auto urbReplacement = XELP::measuredURBTopology(xeProfile.gt) ? urbReplaceAlderLakeN :
 				(xeProfile.gt==XELP::GT::TGLG4 ? urbReplaceG4 : urbReplace);
 			auto gpuInfo=patcher.solveSymbol<mach_vm_address_t>(index,
