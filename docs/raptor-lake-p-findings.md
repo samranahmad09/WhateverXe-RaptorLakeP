@@ -832,3 +832,14 @@ fits the six L3 banks the plugin publishes for this part. So the loss acts after
 relocation and resource association, in memory visibility, in execution, or in the readback path. The next step retains
 the kernel-side submit records of the same draws with the plugin's own opt-in queue trace (boot argument
 `-wex-adln-qtrace`, process named `adln-qtrace`).
+
+### OpenGL: a matching fix exists in upstream's graphics package (2026-10-28)
+
+Upstream WhateverXe's companion package, WhateverXe Graphics 0.3.2 (https://github.com/b00t0x/WhateverXe-Graphics), reports fixing "OpenGL texture updates and
+missing geometry for the measured six-bank VS-only and VS/GS URB layouts on Big Sur to Tahoe" in its pre-patched OpenGL
+driver, with the six-bank vertex-shader URB allocation ending at 360 KiB. This part has six L3 banks, the failing draws here
+are vertex-shader-only, and the live capture of the user-mode driver on this machine shows its vertex URB allocation ending
+at 384 KiB (1,408 entries of 256 bytes from 32 KiB). A periodic loss of vertices whose period changes with the vertex layout,
+a lost clear and stale readbacks all fit a vertex URB allocation running past what works on this part. Revision r325 of this
+fork adds the diagnostic boot argument `wex-rplp-urb-banks=<1..8>` to publish a smaller bank count to the drivers for a test;
+the exact rule needs a change in the user-mode driver's allocation, which this fork does not carry yet.
