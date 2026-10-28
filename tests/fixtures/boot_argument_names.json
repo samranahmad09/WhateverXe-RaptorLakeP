@@ -137,6 +137,7 @@
   "-wex-rplp-ecbl": [],
   "-wex-rplp-warev3": [],
   "wex-rplp-urb-banks": [],
+  "-wex-rplp-gl-urb": [],
   "-wexoff": [
     "-wxeoff"
   ],

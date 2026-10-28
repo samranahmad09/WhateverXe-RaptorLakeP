@@ -11,6 +11,7 @@
 #include "kern_xelp_os.hpp"
 #include "kern_alderlake_n.hpp"
 #include "kern_raptorlake_p.hpp"
+#include "kern_rplp_gl_urb_runtime.hpp"
 #include "kern_xelp_device.hpp"
 #include "kern_xelp_memory_layout.hpp"
 #include "kern_xelp_forcewake_irq.hpp"
@@ -4330,6 +4331,9 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 			tglActive=tglVM.enabled && tglMMIOUCRouted && tglMMIOUCReady;
 			physicalGPU->setProperty("N97NativeKernelReady",tglActive);
 		}
+		RPLPGLURBRuntime::processKernel(patcher,xeProfile.family==XELP::Family::RaptorLakeP &&
+			xeProfile.identity==0xA7A88086 && xeProfile.revision==4 && adlnNativeReady && tglActive &&
+			adlnNativeSubslices==8 && adlnNativeEUs==64 && adlnL3Banks==6);
 		return;
 	}
 	if (tglRequested) {
