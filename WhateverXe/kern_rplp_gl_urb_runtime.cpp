@@ -145,7 +145,7 @@ void RPLPGLURBRuntime::processKernel(KernelPatcher &p,bool physicalReady) {
        XELP::kernelOS(version)!=XELP::OS::BigSur || !build || memcmp(build,"20G1443",8)) {
         state(Setup::WrongKernel);return;
     }
-    const auto entry=p.solveSymbol<mach_vm_address_t>(KernelPatcher::KernelID,"_cs_validate_page");
+    const auto entry=p.solveSymbol(KernelPatcher::KernelID,"_cs_validate_page");
     p.clearError();
     if(!routeable(entry)){state(Setup::UnsupportedEntry);return;}
     const auto prepared=prepareFile();
