@@ -4067,7 +4067,7 @@ void XE::adlnBootstrap(IOPCIDevice *pci) {
 			adlnNativeRequested ? &edram : nullptr);
 		if (xeProfile.family==XELP::Family::RaptorLakeP) RaptorLakeP::qualify(gt);
 		if (adlnNativeRequested) {
-            adlnNativeSubslices=gt.resources.nativeSubslices; adlnL3Banks=gt.resources.l3Banks; adlnNativeEUs=gt.resources.eus;
+            adlnNativeSubslices=gt.resources.nativeSubslices; adlnL3Banks=adlnPublishedL3Banks=gt.resources.l3Banks; adlnNativeEUs=gt.resources.eus;
 			AlderLakeN::LinearPlan plan;
 			auto display=AlderLakeN::readDisplay(io,barReady);
 			auto optionProperty=pci->getProperty("IOMemoryDescriptorOptions");
@@ -9950,16 +9950,14 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			// drivers, `wex-rplp-urb-banks=<1..8>`, on the measured RPL-P profile
 			// only. The user-mode GL driver sizes its vertex URB allocation from
 			// this count, so a smaller count ends that allocation earlier. The
-			// measured count stays the default; the override is published. The
-			// name has no dash: XNU reads a dash-prefixed name as a flag and
-			// stores 1 whatever follows its '='.
+			// measured count stays the default. The name has no dash: XNU reads
+			// a dash-prefixed name as a flag and stores 1 whatever follows its '='.
 			uint32_t urbBanksOverride=0;
 			if (XELP::measuredURBTopology(xeProfile.gt) &&
 				PE_parse_boot_argn("wex-rplp-urb-banks",&urbBanksOverride,sizeof(urbBanksOverride)) &&
-				urbBanksOverride>=1 && urbBanksOverride<=8) {
+				urbBanksOverride>=1 && urbBanksOverride<=8)
 				urbReplaceAlderLakeN[17]=static_cast<uint8_t>(urbBanksOverride);
-				IORegistryEntry::getRegistryRoot()->setProperty("RPLPURBBanksOverride",urbBanksOverride,32);
-			}
+			else urbBanksOverride=0;
 			const auto urbReplacement = XELP::measuredURBTopology(xeProfile.gt) ? urbReplaceAlderLakeN :
 				(xeProfile.gt==XELP::GT::TGLG4 ? urbReplaceG4 : urbReplace);
 			auto gpuInfo=patcher.solveSymbol<mach_vm_address_t>(index,
@@ -9974,6 +9972,15 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				urbReady=patcher.getError()==KernelPatcher::Error::NoError && !memcmp(urbSite,urbReplacement,sizeof(urbFind));
 			}
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLURBBankTopologyReady",urbReady);
+			// r326: the native admission guards compare the accelerator's stored
+			// bank count with the count this plugin published, so an applied
+			// override is the published count (round 42: with the measured count
+			// as the reference, the engine start was refused and the boot stalled).
+			// The property records an applied override only.
+			if (urbReady && urbBanksOverride) {
+				adlnPublishedL3Banks=urbBanksOverride;
+				IORegistryEntry::getRegistryRoot()->setProperty("RPLPURBBanksOverride",urbBanksOverride,32);
+			}
 			patcher.clearError();
 			// r124: resolve_ccs places its state at cursor+4096-alignedSize,
 			// but asks the pool for only two DWORDs. After the 0x9B8-byte init
@@ -11956,7 +11963,7 @@ bool XE::runXELPMemoryStage(IOService *that, IOPCIDevice *provider) {
 	const bool nativeReady=memoryReady && released && !afterErrors &&
 	 caps[0]==2 && callbackXE->adlnNativeSubslices &&
    caps[1]==callbackXE->adlnNativeEUs && caps[2]==callbackXE->adlnNativeSubslices &&
-   caps[3]==1 && caps[4]==callbackXE->adlnL3Banks &&
+   caps[3]==1 && caps[4]==callbackXE->adlnPublishedL3Banks &&
    caps[5]==callbackXE->adlnNativeEUs/callbackXE->adlnNativeSubslices &&
 	 (caps[6]&0x1800)==0 && !(caps[6]&0x20); // FW mode is selected later by populateAccelConfig.
 	root->setProperty("N97MemoryNativeReady",nativeReady);
@@ -11982,7 +11989,7 @@ void *XE::wrapAlderLakeNNewEventMachine(IOService *that) {
 	const bool ready=(flags&0x1800)==0x800 && !(flags&0x20) &&
 	 ((flags>>23)&7)==5 && options==2048 && *reinterpret_cast<const uint32_t *>(a+0x1120)==2 &&
 	 *reinterpret_cast<const uint32_t *>(a+0x1124)==callbackXE->adlnNativeEUs &&
-     *reinterpret_cast<const uint32_t *>(a+0x1164)==callbackXE->adlnL3Banks;
+     *reinterpret_cast<const uint32_t *>(a+0x1164)==callbackXE->adlnPublishedL3Banks;
 	root->setProperty("N97ConfigNativeReady",ready);
 	if (ready && callbackXE->adlnEventStageReady && checkKernelArgument("-wex-adln-event-stage")) {
 	 root->setProperty("N97ConfigEventFactoryBlocked",false);
@@ -12327,7 +12334,7 @@ bool XE::wrapTGLAcceleratorEngine(IOService *that) {
   bool ready=manager && bar && *reinterpret_cast<void **>(manager+0x10)==that &&
    caps[0]==2 && callbackXE->adlnNativeSubslices &&
    caps[1]==callbackXE->adlnNativeEUs && caps[2]==callbackXE->adlnNativeSubslices &&
-   caps[3]==1 && caps[4]==callbackXE->adlnL3Banks &&
+   caps[3]==1 && caps[4]==callbackXE->adlnPublishedL3Banks &&
    caps[5]==callbackXE->adlnNativeEUs/callbackXE->adlnNativeSubslices &&
    (caps[6]&0x1800)==0x800 && !(caps[6]&0x20) &&
    ranges[0]==0;

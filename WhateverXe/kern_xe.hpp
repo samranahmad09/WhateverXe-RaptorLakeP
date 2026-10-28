@@ -96,7 +96,7 @@ private:
     void xelpReadFirmware(IOPCIDevice *pci);
     void xelpLoadDisplayPool(IOService *provider);
     bool xelpInstallHostRPS(KernelPatcher &,size_t,mach_vm_address_t,size_t);
-    uint32_t adlnNativeSubslices {}, adlnL3Banks {}, adlnNativeEUs {};
+    uint32_t adlnNativeSubslices {}, adlnL3Banks {}, adlnPublishedL3Banks {}, adlnNativeEUs {};
 	bool adlnKernelReady {false};
 	bool adlnNativeRequested {false};
 	bool adlnNativeReady {false};

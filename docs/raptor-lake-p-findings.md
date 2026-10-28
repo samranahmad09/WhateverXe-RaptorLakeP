@@ -842,4 +842,8 @@ are vertex-shader-only, and the live capture of the user-mode driver on this mac
 at 384 KiB (1,408 entries of 256 bytes from 32 KiB). A periodic loss of vertices whose period changes with the vertex layout,
 a lost clear and stale readbacks all fit a vertex URB allocation running past what works on this part. Revision r325 of this
 fork adds the diagnostic boot argument `wex-rplp-urb-banks=<1..8>` to publish a smaller bank count to the drivers for a test;
-the exact rule needs a change in the user-mode driver's allocation, which this fork does not carry yet.
+the exact rule needs a change in the user-mode driver's allocation, which this fork does not carry yet. The first boots with
+the override (five and four banks) stalled at the end of the boot: the plugin's own native admission guards compared the
+accelerator's stored bank count with the measured six, found the override instead and refused the engine start. Revision
+r326 makes the published count the guards' reference, so an applied override admits as the measured count does, and
+publishes `RPLPURBBanksOverride` only for an applied override.

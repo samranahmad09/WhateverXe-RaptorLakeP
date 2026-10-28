@@ -222,7 +222,7 @@ Alder Lake-N / Twin Lakeで世代選択や個別機能の有効化引数を追�
 | `-wex-rplp-capsadln` | Raptor Lake-Pのみ。その応答でTiger Lake GT2の代わりにAlder Lake-N（46D0）を示す。これらのユーザモードドライバが受け入れるもう一方のIDで、OpenGL描画の乱れを調べる実験用。`-wex-rplp-nocaps`と併用した場合はそちらが優先。 |
 | `-wex-rplp-ecbl` | Raptor Lake-Pのみ。輝度を組み込みコントローラ（EC）経由で制御する。フレームバッファのバックライトPWMデューティ書き込みを0〜100の値に換算し、ファームウェアのWMI輝度メソッドへ転送する（このパネルはPWMピンではなくECが駆動）。AppleBacklight用のPNLFデバイスが必要で、そのパネル検索にはWhateverGreenの`applbkl`と同様に汎用パネルカーブを与え、内蔵ディスプレイに輝度スライダーを出す（`N97RPLPPanelInject`）。デスクトップ表示後に1.5秒間明るくする自己診断を行い、現在値・最大値・制御元を`N97RPLPECBacklight`に記録する。 |
 | `-wex-rplp-warev3` | Raptor Lake-Pのみ、診断用。カーネルアクセラレータのワークアラウンド表の初期化にだけ、物理revision 4の代わりに3を渡す（revision 4未満のポリシー、パックされた13ビットが異なる）。OpenGL読み戻しプローブを既定と比較するための実験で、描画・メディア・性能・安定性に影響しうる。修正ではなく常用もしない。`N97RPLPWARev3`。 |
-| `wex-rplp-urb-banks=` | Raptor Lake-Pのみ、診断用。ドライバへ公開するURB（unified return buffer）のバンク数を、実測の6ではなく1〜8の指定値にする。ユーザーモードのOpenGLドライバは頂点シェーダのURB割り当てをこの数から決めるため、少ない値ほど割り当てが早く終わる。Raptor Lake-Pの文書にある描画欠落の調査用。修正ではなく、常用には向かない。値は`RPLPURBBanksOverride`として公開される。先頭にダッシュは付けない。ダッシュ付きの名前はカーネルにフラグとして扱われ、値が無視される。 |
+| `wex-rplp-urb-banks=` | Raptor Lake-Pのみ、診断用。ドライバへ公開するURB（unified return buffer）のバンク数を、実測の6ではなく1〜8の指定値にする。ユーザーモードのOpenGLドライバは頂点シェーダのURB割り当てをこの数から決めるため、少ない値ほど割り当てが早く終わる。Raptor Lake-Pの文書にある描画欠落の調査用。修正ではなく、常用には向かない。プラグインの admission ガードは公開した値を基準にし、適用された上書きは`RPLPURBBanksOverride`として公開される。先頭にダッシュは付けない。ダッシュ付きの名前はカーネルにフラグとして扱われ、値が無視される。 |
 
 ### 動作確認済みの機能と既知の問題
 
