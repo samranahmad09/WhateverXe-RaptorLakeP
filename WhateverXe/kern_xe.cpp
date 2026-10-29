@@ -18,6 +18,7 @@
 #include <IOKit/IOMessage.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/pwr_mgt/IOPM.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
 #include "kern_display13_boot.hpp"
 #include "kern_tgl_gmbus.hpp"
 #include "kern_alderlake_n_gpu.hpp"
