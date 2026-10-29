@@ -15,6 +15,9 @@
 #include "kern_xelp_device.hpp"
 #include "kern_xelp_memory_layout.hpp"
 #include "kern_xelp_forcewake_irq.hpp"
+#include <IOKit/IOMessage.h>
+#include <IOKit/IODeviceTreeSupport.h>
+#include <IOKit/pwr_mgt/IOPM.h>
 #include "kern_display13_boot.hpp"
 #include "kern_tgl_gmbus.hpp"
 #include "kern_alderlake_n_gpu.hpp"
@@ -105,6 +108,73 @@ static uint32_t tglRPCSPowerWriter;
 static TGLRPCS::State tglRPCSPowerState{},tglRPCSPowerFailure{};
 static void tglRPCSPowerObserve(void *,uint64_t,uint64_t,unsigned);
 static bool tglRPCSPowerSerialize(void *,void *,OSSerialize *);
+
+// R-sleep wake telemetry (opt-in: -wex-rplp-wakelog, Raptor Lake-P only). Records the system power messages the root
+// domain sends every priority client, the plugin's submit, software-interrupt and forcewake traffic relative to them,
+// and the accelerator's engine start, as RPLPWakeLog on the registry root and as rplp-wakelog in NVRAM, so that a panic
+// during a wake still leaves the sequence behind. Counts and timestamps only; nothing is deferred or refused.
+enum RPLPWakeCounter : unsigned {RPLPWakeSubmit=0,RPLPWakeSWIRQ=1,RPLPWakeForceWake=2};
+namespace {
+constexpr unsigned rplpWakeWords=32;
+// 0 schema, 1 armed, 2 messages, 3 will-sleep ns, 4 will-power-on ns, 5 has-powered-on ns, 6 submits, 7 submits after
+// will-sleep, 8 submits after will-power-on before the engine start returned, 9 software interrupts in that window,
+// 10 regular forcewake calls in that window, 11 engine-start entries, 12 engine-start returns, 13 last engine-start ns,
+// 14 last engine-start result, 15 last message, 16..23 the last eight messages, 24..31 their times (uptime ns).
+uint64_t rplpWakeLog[rplpWakeWords] {1};
+bool rplpWakeLogEnabled;
+uint32_t rplpWakePhase; // 0 awake, 1 after kIOMessageSystemWillSleep, 2 after kIOMessageSystemWillPowerOn until the engine start returns
+uint64_t rplpWakeNow() {uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&t);return t;}
+void rplpWakeLogPublish(bool nvram) {
+ auto data=OSData::withBytes(rplpWakeLog,sizeof(rplpWakeLog));if(!data)return;
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeLog",data);
+ if(nvram)if(auto options=IORegistryEntry::fromPath("/options",gIODTPlane)) {options->setProperty("rplp-wakelog",data);options->release();}
+ data->release();
+}
+IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument,vm_size_t) {
+ const auto now=rplpWakeNow();
+ const auto n=__atomic_add_fetch(&rplpWakeLog[2],1ULL,__ATOMIC_RELAXED);
+ rplpWakeLog[15]=type;rplpWakeLog[16+((n-1)&7)]=type;rplpWakeLog[24+((n-1)&7)]=now;
+ bool nvram=false;
+ switch(type) {
+  case kIOMessageSystemWillSleep: rplpWakeLog[3]=now;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);nvram=true;break;
+  case kIOMessageSystemWillPowerOn: rplpWakeLog[4]=now;rplpWakeLog[8]=rplpWakeLog[9]=rplpWakeLog[10]=0;__atomic_store_n(&rplpWakePhase,2U,__ATOMIC_RELEASE);nvram=true;break;
+  case kIOMessageSystemHasPoweredOn: rplpWakeLog[5]=now;nvram=true;break;
+  default: break;
+ }
+ rplpWakeLogPublish(nvram);
+ if(type==kIOMessageSystemWillSleep || type==kIOMessageCanSystemSleep)
+  acknowledgeSleepWakeNotification(static_cast<IOPowerStateChangeNotification *>(argument)->powerRef);
+ return kIOReturnSuccess;
+}
+}
+static void rplpWakeLogArm() {
+ static bool armed;
+ if(armed || !checkKernelArgument("-wex-rplp-wakelog"))return;
+ armed=true;
+ const bool ok=registerPrioritySleepWakeInterest(rplpWakeLogHandler,nullptr,nullptr)!=nullptr;
+ rplpWakeLogEnabled=ok;rplpWakeLog[1]=ok;
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeLogArmed",ok);
+ rplpWakeLogPublish(false);
+}
+static void rplpWakeLogCount(RPLPWakeCounter which) {
+ if(!rplpWakeLogEnabled)return;
+ const auto phase=__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE);
+ if(which==RPLPWakeSubmit) {
+  const auto total=__atomic_add_fetch(&rplpWakeLog[6],1ULL,__ATOMIC_RELAXED);
+  if(phase==1)__atomic_fetch_add(&rplpWakeLog[7],1ULL,__ATOMIC_RELAXED);
+  if(phase && (total&31)==0)rplpWakeLogPublish(false);
+ }
+ if(phase!=2)return;
+ __atomic_fetch_add(&rplpWakeLog[which==RPLPWakeSubmit ? 8 : which==RPLPWakeSWIRQ ? 9 : 10],1ULL,__ATOMIC_RELAXED);
+}
+static void rplpWakeLogEngine(bool done,bool result) {
+ if(!rplpWakeLogEnabled)return;
+ if(!done) {__atomic_fetch_add(&rplpWakeLog[11],1ULL,__ATOMIC_RELAXED);rplpWakeLog[13]=rplpWakeNow();rplpWakeLogPublish(false);return;}
+ __atomic_fetch_add(&rplpWakeLog[12],1ULL,__ATOMIC_RELAXED);rplpWakeLog[14]=result;
+ const bool waking=__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==2;
+ if(waking)__atomic_store_n(&rplpWakePhase,0U,__ATOMIC_RELEASE);
+ rplpWakeLogPublish(waking);
+}
 
 
 // Stock 23J631/24H32 IOSurface moved fields used inline by the exact DP1 donor.
@@ -4403,6 +4473,7 @@ bool XE::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t add
 		if (adlnDetected && adlnKernelReady && display13FramebufferRequested && currentFramebuffer && currentFramebuffer->loadIndex==index)
 			return processDisplay13Framebuffer(patcher,index,address,size);
 		if (!adlnDetected || !adlnNativeRequested || !currentGraphics || currentGraphics->loadIndex != index) return false;
+		rplpWakeLogArm();
 		// Matching is persistent. A rejected bootstrap must not leave the
 		// original 46D1-incompatible donor probe reachable and panic before SSH.
 		if (!adlnNativeReady || !tglActive)return processAlderLakeNRejectedAccelerator(patcher,index,address,size);
@@ -12325,6 +12396,7 @@ bool XE::wrapAlderLakeNNativeIRQ(IOService *that) {
 }
 
 bool XE::wrapTGLAcceleratorEngine(IOService *that) {
+ rplpWakeLogEngine(false,false);
  if (callbackXE->adlnDetected) {
   auto a=reinterpret_cast<uint8_t *>(that);
   uint32_t caps[] {*reinterpret_cast<uint32_t *>(a+0x1120),*reinterpret_cast<uint32_t *>(a+0x1124),
@@ -12395,6 +12467,7 @@ bool XE::wrapTGLAcceleratorEngine(IOService *that) {
 	tglObserveAccelerator(that, 6, true, result, 0);
 	tglFBIRQEnd(irq,result);
 	if (tglHost.owner==that) tglHostPublish();
+	rplpWakeLogEngine(true,result);
 	return result;
 }
 
@@ -12467,6 +12540,7 @@ void XE::wrapTGLHostIRQService(void *bridge,const uint64_t *bits) {
  tglHostIRQEnd(r);
 }
 void XE::wrapTGLHostSWInterrupt(void *streamer,void *source,int count) {
+ rplpWakeLogCount(RPLPWakeSWIRQ);
  auto r=tglHostIRQBegin(2,streamer,reinterpret_cast<uintptr_t>(source),count,reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
  FunctionCast(wrapTGLHostSWInterrupt,callbackXE->orgTGLHostSWInterrupt)(streamer,source,count);
  tglHostIRQEnd(r);
@@ -12487,6 +12561,7 @@ mach_vm_address_t xelpRegularForceWakeOriginal {};
 // >=100us, >=1ms, bypass, total native ns, >=10ms. No MMIO from readers.
 static uint64_t xelpForceWakeIRQ[9] {};
 void xelpRegularForceWakeProtected(void *owner,bool enable,unsigned domains) {
+ rplpWakeLogCount(RPLPWakeForceWake);
  uint64_t flags=0;
  if(owner)memcpy(&flags,static_cast<uint8_t *>(owner)+0x1190,sizeof(flags));
  if(!owner || !XELPForceWakeIRQ::required(flags,domains)) {
@@ -13431,8 +13506,9 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
   if (io.engine==0 && (nativeFlags&0x1800)==0x800) renderWakeOwner=io.owner;
  }
  auto x=static_cast<uint8_t *>(streamer); uint32_t n=arrsize(tglHost.submit);
- if (tglHost.owner && *reinterpret_cast<void **>(x+0x10)==tglHost.owner)
-  n=__sync_fetch_and_add(&tglHost.submits,1);
+ if (tglHost.owner && *reinterpret_cast<void **>(x+0x10)==tglHost.owner) {
+  n=__sync_fetch_and_add(&tglHost.submits,1);rplpWakeLogCount(RPLPWakeSubmit);
+ }
  if (renderWakeOwner) {
   if (n<arrsize(tglHost.submit)) {
    auto q=tglHost.submit[n].q;q[47]=97;
