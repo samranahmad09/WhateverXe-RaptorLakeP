@@ -9204,16 +9204,26 @@ void XE::wrapAlderLakeNPowerOverride(void *power,bool enable) {
 }
 void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	auto &c=display13FBPower;if(!c.lock || power!=c.power || !c.controller)return;
-	uint64_t record[32] {};Display13Power::Result result;IOLockLock(c.lock);
+	// N97FBPowerRestoreWait: schema, fuse wait us, FUSE_STATUS before/after, PWR_WELL_CTL before/after, status, domain,
+	// writes, waking, suspended after, owned after (round 45: the restore faulted on PG1's fuse with a 1 us wait).
+	uint64_t record[32] {},rw[12] {1};Display13Power::Result result;IOLockLock(c.lock);
+	Display13FBPowerIO io {c.map};uint32_t v;
+	rw[2]=Display13Power::valid(io,Display13Power::Fuses,v) ? v : UINT32_MAX;
+	rw[4]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
 	if(callbackXE->display13FBLifecycleHooksReady && c.bridge.begun && !c.bridge.state.faulted && !c.clockFaulted &&
 		Display13Power::objectAssociations(power,0x80,c.controller,0x1C20)) {
-		Display13FBPowerIO io {c.map};result=Display13Power::restore(io,c.bridge.state);
+		result=Display13Power::restore(io,c.bridge.state);
 		if(result.status==Display13Power::Status::Complete &&
 			!Display13Power::publishObject(c.bridge,power,0x80,c.controller,0x1C20))result.status=Display13Power::Status::NotReady;
 	}
+	rw[3]=Display13Power::valid(io,Display13Power::Fuses,v) ? v : UINT32_MAX;
+	rw[5]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
+	rw[1]=result.fuseWaitUs;rw[6]=static_cast<uint32_t>(result.status);rw[7]=result.domain;rw[8]=result.writes;
+	rw[9]=waking;rw[10]=c.bridge.state.suspended;rw[11]=c.bridge.state.owned;
 	if(result.status!=Display13Power::Status::Complete)adlnFault(c.bridge.state.faulted,__LINE__);
 	display13FBPowerRecord(record,9,waking,result);IOLockUnlock(c.lock);
 	adlnPublishPowerRecord("N97FBPowerRestore",record);
+	IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerRestoreWait",rw,sizeof(rw));
 	if(result.status==Display13Power::Status::Complete)wrapAlderLakeNEngineEnable(power);
 }
 

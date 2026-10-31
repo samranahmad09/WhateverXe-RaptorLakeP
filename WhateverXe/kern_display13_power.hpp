@@ -16,6 +16,9 @@ constexpr uint32_t LegacyDomains = (1U << 7) - 1; // Existing B backend scope.
 constexpr uint32_t BootHDMIA = bit(Domain::PipeA) | bit(Domain::DDIA);
 constexpr uint32_t BootHDMIB = bit(Domain::PipeA) | bit(Domain::DDIB);
 constexpr uint32_t Driver = 0x45404, DDI = 0x45454, AUX = 0x45444, Fuses = 0x42000;
+// A power well's fuse distribution takes real time after a cold enable (i915 allows 1 ms); 5 us and 1 us only ever
+// proved a fuse that was already distributed, which held at every DC-state exit and failed at the first wake from S3.
+constexpr unsigned FuseWaitUs = 2000;
 constexpr bool tcAux(unsigned d) { return d>=12 && d<Count && !(d&1); }
 constexpr bool tcDDI(unsigned d) { return d>=11 && d<Count && (d&1); }
 constexpr uint32_t control(unsigned d) { return (d == 5 || d == 7 || d == 9 || tcDDI(d)) ? DDI : (d == 6 || d == 8 || d == 10 || tcAux(d)) ? AUX : Driver; }
@@ -43,7 +46,7 @@ enum class Status : uint32_t {
 };
 struct Result {
     Status status {Status::NotReady};
-    uint32_t domain {Count}, writes {}, rollbackFailed {}, forcedOn {};
+    uint32_t domain {Count}, writes {}, rollbackFailed {}, forcedOn {}, fuseWaitUs {};
 };
 struct State {
     bool ready {}, faulted {}, suspended {};
@@ -82,9 +85,10 @@ template<class IO> bool initialize(IO &io, State &s,uint32_t allowed=LegacyDomai
     return true;
 }
 
-template<class IO> Status wait(IO &io, uint32_t reg, uint32_t mask, unsigned timeoutUs) {
+template<class IO> Status wait(IO &io, uint32_t reg, uint32_t mask, unsigned timeoutUs, unsigned *elapsedOut = nullptr) {
     for (unsigned elapsed = 0;; ++elapsed) {
         uint32_t value;
+        if (elapsedOut) *elapsedOut = elapsed;
         if (!valid(io, reg, value)) return Status::Unavailable;
         if (value & mask) return Status::Complete;
         if (elapsed == timeoutUs) return reg == Fuses ? Status::FuseTimeout : Status::StateTimeout;
@@ -152,7 +156,7 @@ template<class IO> Result acquire(IO &io, State &s, Lease &lease, uint32_t domai
         if (!(domains & mask)) continue;
         r.domain = d;
         if (d == 0) {
-            r.status = wait(io, Fuses, 1U << 27, 5); // PG0 before PW1.
+            unsigned e = 0; r.status = wait(io, Fuses, 1U << 27, FuseWaitUs, &e); r.fuseWaitUs += e; // PG0 before PW1.
             if (r.status != Status::Complete) break;
         }
         if (!valid(io, control(d), value)) { r.status = Status::Unavailable; break; }
@@ -173,7 +177,7 @@ template<class IO> Result acquire(IO &io, State &s, Lease &lease, uint32_t domai
             r.status=waitTCAuxHealth(io,d);if(r.status!=Status::Complete)break;
         }
         if (d < 5) {
-            r.status = wait(io, Fuses, fuse(d), 1);
+            unsigned e = 0; r.status = wait(io, Fuses, fuse(d), FuseWaitUs, &e); r.fuseWaitUs += e;
             if (r.status != Status::Complete) break;
         }
     }
@@ -260,7 +264,7 @@ template<class IO> Result restore(IO &io,State &s) {
     r.status=Status::Complete;
     for(unsigned d=0;d<Count;++d)if(s.refs[d]) {
         r.domain=d;
-        if(!d)r.status=wait(io,Fuses,1U<<27,5);
+        if(!d) {unsigned e=0;r.status=wait(io,Fuses,1U<<27,FuseWaitUs,&e);r.fuseWaitUs+=e;}
         if(r.status!=Status::Complete)break;
         if(!valid(io,control(d),value)) {r.status=Status::Unavailable;break;}
         if(tcAux(d)) {r.status=enableTCAux(io,d);if(r.status!=Status::Complete)break;}
@@ -273,7 +277,7 @@ template<class IO> Result restore(IO &io,State &s) {
         r.status=wait(io,control(d),enabled(d),tcAux(d)?500000:1000);
         if(r.status==Status::Complete && tcAux(d))r.status=waitTCAuxHealth(io,d);
         if(r.status!=Status::Complete)break;
-        if(d<5)r.status=wait(io,Fuses,fuse(d),1);
+        if(d<5) {unsigned e=0;r.status=wait(io,Fuses,fuse(d),FuseWaitUs,&e);r.fuseWaitUs+=e;}
         if(r.status!=Status::Complete)break;
     }
     if(r.status==Status::Complete) {s.suspended=false;r.domain=Count;}

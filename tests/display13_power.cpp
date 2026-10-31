@@ -104,7 +104,7 @@ int main() {
       assert(acquire(io,s,l,0x80).status==Status::InvalidDomains && io.writes.empty()); }
     // PW1 prerequisite fuse timeout occurs before any write; no fake lease.
     { IO io; State s; Lease l; assert(initialize(io,s)); io.regs[0x42000]&=~0x08000000U;
-      assert(acquire(io,s,l,BootHDMIB).status==Status::FuseTimeout && io.time==5 && io.writes.empty());
+      assert(acquire(io,s,l,BootHDMIB).status==Status::FuseTimeout && io.time==FuseWaitUs && io.writes.empty());
       assert(s.faulted && !l.owner); empty(s); }
     // Bounded state wait plus rollback; never attempt DDI after failed PW_A.
     { IO io; io.failedEnable=0x400; State s; Lease l; assert(initialize(io,s));
@@ -119,7 +119,7 @@ int main() {
       assert(acquire(io,s,l,BootHDMIB).status==Status::NotReady); }
     // Native pipe fuse is checked after request/state, before DDI acquisition.
     { IO io; State s; Lease l; assert(initialize(io,s)); io.regs[0x42000]&=~0x00200000U;
-      auto r=acquire(io,s,l,BootHDMIB); assert(r.status==Status::FuseTimeout && r.domain==2 && io.time==1);
+      auto r=acquire(io,s,l,BootHDMIB); assert(r.status==Status::FuseTimeout && r.domain==2 && io.time==FuseWaitUs && r.fuseWaitUs==FuseWaitUs);
       assert(!l.owner && !r.rollbackFailed); empty(s); }
     // A stuck final release must retain refs/lease/prerequisites for recovery.
     { IO io; State s; Lease l; assert(initialize(io,s)); assert(ok(acquire(io,s,l,BootHDMIB)));
