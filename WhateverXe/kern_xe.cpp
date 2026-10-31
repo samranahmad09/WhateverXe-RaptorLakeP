@@ -117,7 +117,12 @@ static bool tglRPCSPowerSerialize(void *,void *,OSSerialize *);
 // during a wake still leaves the sequence behind. Counts and timestamps only; nothing is deferred or refused.
 enum RPLPWakeCounter : unsigned {RPLPWakeSubmit=0,RPLPWakeSWIRQ=1,RPLPWakeForceWake=2};
 namespace {
-constexpr unsigned rplpWakeWords=64,rplpWakeNVRAMPerWake=48;
+constexpr unsigned rplpWakeWords=96,rplpWakeNVRAMPerWake=48,rplpWakeEvents=8,rplpWakeEventBase=48;
+// Schema 3 (words 40..95): 40 publish sequence, 41 publish uptime ns, 42..44 the three regular forcewake reference
+// counts (render, media, GT; full 32-bit patterns, read at publish from the accelerator seen by the forcewake path),
+// 45 the accelerator's native flags; 48..95 the last eight forcewake calls of the window, six words each: uptime ns;
+// enable | domains << 8 | sequence << 32; render request | ack << 32; GT request | ack << 32; render count | media
+// count << 32 (full 32-bit); GT count | engine-start returns so far << 32.
 // Words 0..31: 0 schema (2), 1 armed, 2 messages, 3 will-sleep ns, 4 will-power-on ns, 5 has-powered-on ns, 6 submits,
 // 7 submits after will-sleep, 8 submits in the wake window before the engine start first returned, 9 software-interrupt
 // wrapper entries in that span, 10 regular forcewake calls in it, 11 engine-start entries, 12 engine-start returns (early
@@ -131,7 +136,8 @@ constexpr unsigned rplpWakeWords=64,rplpWakeNVRAMPerWake=48;
 // distinguishes inaccessible MMIO from a stuck bit. The wake window runs from will-power-on until 60 s after
 // has-powered-on. The submit, software-interrupt and forcewake paths never block: they update the record and wake a
 // writer thread, which publishes RPLPWakeLog on the registry root and rplp-wakelog in NVRAM (at most 48 writes per wake).
-uint64_t rplpWakeLog[rplpWakeWords] {2};
+uint64_t rplpWakeLog[rplpWakeWords] {3};
+void *rplpWakeOwner;   // the accelerator, as seen by the forcewake path
 bool rplpWakeLogEnabled;
 uint32_t rplpWakePhase;          // 0 awake, 1 after will-sleep, 2 the wake window
 uint32_t rplpWakeEngineReturned; // engine-start returns since will-power-on
@@ -142,6 +148,11 @@ thread_t rplpWakeLogThread;
 uint32_t rplpWakeLogDirty,rplpWakeLogNVRAMWanted;
 uint64_t rplpWakeNow() {uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&t);return t;}
 void rplpWakeLogPublish(bool nvram) {   // thread context only
+ __atomic_fetch_add(&rplpWakeLog[40],1ULL,__ATOMIC_RELAXED);rplpWakeLog[41]=rplpWakeNow();
+ if(auto a=static_cast<uint8_t *>(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE))) {
+  uint32_t c[3];memcpy(c,a+0x1290,sizeof(c));uint64_t f;memcpy(&f,a+0x1190,sizeof(f));
+  rplpWakeLog[42]=c[0];rplpWakeLog[43]=c[1];rplpWakeLog[44]=c[2];rplpWakeLog[45]=f;
+ }
  auto data=OSData::withBytes(rplpWakeLog,sizeof(rplpWakeLog));if(!data)return;
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeLog",data);
  if(nvram && __atomic_load_n(&rplpWakeLog[39],__ATOMIC_RELAXED)<rplpWakeNVRAMPerWake)
@@ -223,8 +234,9 @@ static void rplpWakeLogForceWake(void *owner,bool enable,unsigned domains) {
  const auto now=rplpWakeNow();rplpWakeLogFirst(36,now);
  if(!__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))__atomic_fetch_add(&rplpWakeLog[10],1ULL,__ATOMIC_RELAXED);
  __atomic_fetch_add(&rplpWakeLog[enable ? 37 : 38],1ULL,__ATOMIC_RELAXED);
- uint64_t render=UINT64_MAX,gt=UINT64_MAX,counts=UINT64_MAX;
+ uint64_t render=UINT64_MAX,gt=UINT64_MAX,rm=UINT64_MAX,g=UINT64_MAX;
  if(owner) {
+  __atomic_store_n(&rplpWakeOwner,owner,__ATOMIC_RELEASE);
   auto a=static_cast<uint8_t *>(owner);
   auto bar=*reinterpret_cast<volatile uint8_t **>(a+0x1240);
   if(bar) {
@@ -232,12 +244,12 @@ static void rplpWakeLogForceWake(void *owner,bool enable,unsigned domains) {
    gt=uint64_t(*reinterpret_cast<volatile uint32_t *>(bar+0xA188))|uint64_t(*reinterpret_cast<volatile uint32_t *>(bar+0x130044))<<32;
   }
   uint32_t c[3];memcpy(c,a+0x1290,sizeof(c));
-  counts=uint64_t(c[0]&0xFFFF)|uint64_t(c[1]&0xFFFF)<<16|uint64_t(c[2]&0xFFFF)<<32;
+  rm=uint64_t(c[0])|uint64_t(c[1])<<32;g=c[2];
  }
  const auto n=__atomic_fetch_add(&rplpWakeForceWakeSeq,1U,__ATOMIC_RELAXED);
- auto e=&rplpWakeLog[40+6*(n&3)];
- e[0]=now;e[1]=uint64_t(enable)|uint64_t(domains)<<8|uint64_t(n)<<32;e[2]=render;e[3]=gt;e[4]=counts;
- e[5]=__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE);
+ auto e=&rplpWakeLog[rplpWakeEventBase+6*(n%rplpWakeEvents)];
+ e[0]=now;e[1]=uint64_t(enable)|uint64_t(domains)<<8|uint64_t(n)<<32;e[2]=render;e[3]=gt;e[4]=rm;
+ e[5]=g|uint64_t(__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))<<32;
  rplpWakeLogKick(true);
 }
 static void rplpWakeLogEngine(bool done,bool result) {
@@ -9202,14 +9214,39 @@ void XE::wrapAlderLakeNPowerOverride(void *power,bool enable) {
 	display13FBPowerRecord(record,8,enable,result);IOLockUnlock(c.lock);
 	adlnPublishPowerRecord("N97FBPowerOverride",record);
 }
+// R-sleep cold prerequisites (opt-in: -wex-rplp-coldinit, Raptor Lake-P). The donor's cold power-well restore programs
+// the PCH raw clock from the strap and enables the PCH reset handshake before it requests power well 1; the plugin's
+// replacement did not. Both follow i915's cnp_rawclk and intel_pch_reset_handshake for this PCH generation; the raw
+// clock is written only when the register disagrees with the strap, the handshake bit only when clear. Every
+// register is recorded before and after in N97FBPowerRestoreWait[12..19]; nothing is written if MMIO reads all-ones.
+static void rplpColdPrerequisites(uint64_t *rw) {
+	auto &c=display13FBPower;rw[17]=0;
+	if(!checkKernelArgument("-wex-rplp-coldinit") || !c.map || !c.map->getVirtualAddress() || c.map->getLength()!=0x1000000)return;
+	auto bar=reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress());
+	auto rd=[&](uint32_t r) {return *reinterpret_cast<volatile uint32_t *>(bar+r);};
+	auto wr=[&](uint32_t r,uint32_t v) {*reinterpret_cast<volatile uint32_t *>(bar+r)=v;};
+	const uint32_t strap=rd(0xC2014),rawBefore=rd(0xC6204),rstBefore=rd(0x46408);
+	rw[12]=strap;rw[13]=rawBefore;rw[15]=rstBefore;rw[18]=rd(0x45504);rw[19]=rd(0x46000);
+	if(strap==UINT32_MAX || rawBefore==UINT32_MAX || rstBefore==UINT32_MAX) {rw[14]=rawBefore;rw[16]=rstBefore;return;}
+	// 24 MHz: divider 24; 19.2 MHz: divider 19, denominator 5 (encoded 4), numerator 1 (i915 cnp_rawclk, PCH >= ICP).
+	const uint32_t raw=(strap&0x100) ? (24U<<16) : ((19U<<16)|(4U<<26)|(1U<<11));
+	if(rawBefore!=raw)wr(0xC6204,raw);
+	rw[14]=rd(0xC6204);
+	if(!(rstBefore&0x10))wr(0x46408,rstBefore|0x10);
+	rw[16]=rd(0x46408);rw[17]=1;
+}
+
 void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	auto &c=display13FBPower;if(!c.lock || power!=c.power || !c.controller)return;
 	// N97FBPowerRestoreWait: schema, fuse wait us, FUSE_STATUS before/after, PWR_WELL_CTL before/after, status, domain,
 	// writes, waking, suspended after, owned after (round 45: the restore faulted on PG1's fuse with a 1 us wait).
-	uint64_t record[32] {},rw[12] {1};Display13Power::Result result;IOLockLock(c.lock);
+	// [12] strap 0xC2014, [13]/[14] RAWCLK 0xC6204 before/after, [15]/[16] NDE_RSTWRN_OPT 0x46408 before/after, [17] the
+	// prerequisites applied, [18] DC_STATE_EN 0x45504, [19] CDCLK_CTL 0x46000 (reads at entry).
+	uint64_t record[32] {},rw[20] {1};Display13Power::Result result;IOLockLock(c.lock);
 	Display13FBPowerIO io {c.map};uint32_t v;
 	rw[2]=Display13Power::valid(io,Display13Power::Fuses,v) ? v : UINT32_MAX;
 	rw[4]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
+	if(c.bridge.state.suspended)rplpColdPrerequisites(rw);
 	if(callbackXE->display13FBLifecycleHooksReady && c.bridge.begun && !c.bridge.state.faulted && !c.clockFaulted &&
 		Display13Power::objectAssociations(power,0x80,c.controller,0x1C20)) {
 		result=Display13Power::restore(io,c.bridge.state);
