@@ -315,6 +315,35 @@ template<class IO> Status bindOffPipe(IO &io,State &s,unsigned index) {
     }
     s.pipe[index]=next;s.released[index]={};s.selected|=bit;syncMasks(s);return Status::Complete;
 }
+// A real power loss resets a bank's plane buffer registers while this owner
+// retains its allocation. Before the resume proof, write the retained layout
+// back into a powered, stopped bank whose registers read reset (zero), so the
+// native path's later plane and watermark programming meets the layout it
+// left. The plane buffer registers go through the caller's writer (the native
+// register write), never this IO. Nothing is written when the bank still holds
+// a layout, when a plane or the cursor is live, or when the pipe is changing.
+// Trace: 0 primary read, 1 cursor read, 2 primary written, 3 cursor written, 4 applied.
+template<class IO,class Write> Status reestablish(IO &io,State &s,unsigned index,Write write,uint32_t *trace=nullptr) {
+    if(s.faulted)return Status::Faulted;
+    if(!s.begun || index>=3 || !(s.selected&(1U<<index)))return Status::Unavailable;
+    if(s.updating&(1U<<index))return fail(s,Status::Conflict);
+    auto &a=s.pipe[index];const auto bank=0x1000*index;
+    if(!Display13FBIRQ::powered(io.read(0x45404),index))return fail(s,Status::Power);
+    const auto primary=io.read(0x7027C+bank),cursor=io.read(0x7017C+bank);
+    if(trace) {trace[0]=primary;trace[1]=cursor;trace[2]=trace[3]=trace[4]=0;}
+    if(primary==UINT32_MAX || cursor==UINT32_MAX)return fail(s,Status::Readback);
+    if(primary || cursor)return Status::Complete;
+    if(!valid(a.primary) || (a.cursor.end && !valid(a.cursor)) || overlap(a.primary,a.cursor))return fail(s,Status::Range);
+    const auto conf=io.read(0x70008+bank),plane=io.read(0x70180+bank),cursorControl=io.read(0x70080+bank);
+    if(conf==UINT32_MAX || plane==UINT32_MAX || cursorControl==UINT32_MAX)return fail(s,Status::Readback);
+    if((conf&(Request|On)) || (plane&Request) || (cursorControl&63))return fail(s,Status::Conflict);
+    const auto p=hardwareRaw(s,index,a.primary),c=hardwareRaw(s,index,a.cursor);
+    if(p==UINT32_MAX || c==UINT32_MAX)return fail(s,Status::Range);
+    write(0x7027C+bank,p);if(c)write(0x7017C+bank,c);
+    if(trace) {trace[2]=p;trace[3]=c;trace[4]=1;}
+    if(!hardwareMatches(io,s,index,a.primary,a.cursor))return fail(s,Status::Readback);
+    return Status::Complete;
+}
 // Read-only admission for a retained, powered allocation. Global startup
 // preflights every eligible pipe before it makes any shared slice request.
 template<class IO> Status resumeProof(IO &io,State &s,unsigned index) {

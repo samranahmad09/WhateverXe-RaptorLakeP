@@ -33,6 +33,7 @@
 #include "kern_display13_fb_irq.hpp"
 #include "kern_display13_cursor.hpp"
 #include "kern_display13_dbuf.hpp"
+#include "kern_rplp_coldphy.hpp"
 #include "kern_display13_wm.hpp"
 #include "kern_display13_backlight.hpp"
 #include "kern_display13_ecbacklight.hpp"
@@ -133,8 +134,12 @@ constexpr unsigned rplpWakeWords=96,rplpWakeNVRAMPerWake=48,rplpWakeEvents=8,rpl
 // ns; enable | domains << 8 | sequence << 32; render request 0xA278 | ack 0xD84 << 32; GT request 0xA188 | ack 0x130044
 // << 32; the three regular reference counts at +0x1290/+0x1294/+0x1298 (16 bits each); engine-start returns so far.
 // The registers are read before the native call, so a panic inside it leaves the state that preceded it; all-ones
-// distinguishes inaccessible MMIO from a stuck bit. The wake window runs from will-power-on until 60 s after
-// has-powered-on. The submit, software-interrupt and forcewake paths never block: they update the record and wake a
+// distinguishes inaccessible MMIO from a stuck bit. The window runs from will-sleep until 60 s after has-powered-on:
+// the ring and the per-wake words restart at will-sleep, so a dispatch at the first instant of a wake is kept even
+// before this plugin hears of the wake (round 46's panic came before will-power-on). Word 46 counts the forcewake
+// calls the guard (-wex-rplp-fwguard) skipped, word 47 holds the first all-ones read of the cycle, and an event's
+// second word carries bit 1 when the guard skipped that call. During the sleep entry only an all-ones read goes to
+// NVRAM, so the entry's own traffic does not spend the budget before the wake. The submit, software-interrupt and forcewake paths never block: they update the record and wake a
 // writer thread, which publishes RPLPWakeLog on the registry root and rplp-wakelog in NVRAM (at most 48 writes per wake).
 uint64_t rplpWakeLog[rplpWakeWords] {3};
 void *rplpWakeOwner;   // the accelerator, as seen by the forcewake path
@@ -146,6 +151,8 @@ uint64_t rplpWakeWindowEnd;      // uptime ns; 0 until has-powered-on
 IOLock *rplpWakeLogLock;
 thread_t rplpWakeLogThread;
 uint32_t rplpWakeLogDirty,rplpWakeLogNVRAMWanted;
+bool rplpForceWakeGuardEnabled;    // -wex-rplp-fwguard, see xelpRegularForceWakeProtected
+uint64_t rplpForceWakeGuardSkips;
 uint64_t rplpWakeNow() {uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&t);return t;}
 void rplpWakeLogPublish(bool nvram) {   // thread context only
  __atomic_fetch_add(&rplpWakeLog[40],1ULL,__ATOMIC_RELAXED);rplpWakeLog[41]=rplpWakeNow();
@@ -183,13 +190,16 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
  rplpWakeLog[15]=type;rplpWakeLog[16+((n-1)&7)]=type;rplpWakeLog[24+((n-1)&7)]=now;
  bool nvram=false;
  switch(type) {
-  case kIOMessageSystemWillSleep: rplpWakeLog[3]=now;rplpWakeLog[7]=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);nvram=true;break;
-  case kIOMessageSystemWillPowerOn:
-   rplpWakeLog[4]=now;++rplpWakeLog[32];
+  case kIOMessageSystemWillSleep:
+   // The cycle's record restarts here, not at will-power-on, so the wake's first dispatch is never erased.
+   rplpWakeLog[3]=now;rplpWakeLog[4]=rplpWakeLog[5]=0;rplpWakeLog[7]=0;
    for(unsigned i=8;i<=10;++i)rplpWakeLog[i]=0;
    for(unsigned i=33;i<rplpWakeWords;++i)rplpWakeLog[i]=0;
    __atomic_store_n(&rplpWakeEngineReturned,0U,__ATOMIC_RELEASE);__atomic_store_n(&rplpWakeForceWakeSeq,0U,__ATOMIC_RELEASE);
-   rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,2U,__ATOMIC_RELEASE);nvram=true;break;
+   rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);nvram=true;break;
+  case kIOMessageSystemWillPowerOn:
+   rplpWakeLog[4]=now;++rplpWakeLog[32];
+   __atomic_store_n(&rplpWakePhase,2U,__ATOMIC_RELEASE);nvram=true;break;
   case kIOMessageSystemHasPoweredOn: rplpWakeLog[5]=now;rplpWakeWindowEnd=now+60000000000ULL;nvram=true;break;
   default: break;
  }
@@ -199,17 +209,23 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
  return kIOReturnSuccess;
 }
 bool rplpWakeInWindow() {
- if(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)!=2)return false;
+ const auto phase=__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE);
+ if(!phase)return false;
  const auto end=rplpWakeWindowEnd;
- if(end && rplpWakeNow()>=end) {__atomic_store_n(&rplpWakePhase,0U,__ATOMIC_RELEASE);return false;}
+ if(phase==2 && end && rplpWakeNow()>=end) {__atomic_store_n(&rplpWakePhase,0U,__ATOMIC_RELEASE);return false;}
  return true;
 }
+bool rplpWakeWaking() {return __atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==2;}
 void rplpWakeLogFirst(unsigned slot,uint64_t now) {uint64_t expected=0;__atomic_compare_exchange_n(&rplpWakeLog[slot],&expected,now,false,__ATOMIC_RELAXED,__ATOMIC_RELAXED);}
 }
 static void rplpWakeLogArm() {
  static bool armed;
- if(armed || !checkKernelArgument("-wex-rplp-wakelog"))return;
+ if(armed)return;
  armed=true;
+ // The forcewake guard is independent of the record: see xelpRegularForceWakeProtected.
+ rplpForceWakeGuardEnabled=checkKernelArgument("-wex-rplp-fwguard");
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeGuardArmed",rplpForceWakeGuardEnabled);
+ if(!checkKernelArgument("-wex-rplp-wakelog"))return;
  rplpWakeLogLock=IOLockAlloc();
  const bool thread=rplpWakeLogLock && kernel_thread_start(rplpWakeLogWriter,nullptr,&rplpWakeLogThread)==KERN_SUCCESS;
  const bool ok=thread && registerPrioritySleepWakeInterest(rplpWakeLogHandler,nullptr,nullptr)!=nullptr;
@@ -225,16 +241,24 @@ static void rplpWakeLogCount(RPLPWakeCounter which) {
   if(phase==1) {__atomic_fetch_add(&rplpWakeLog[7],1ULL,__ATOMIC_RELAXED);rplpWakeLogKick(false);}
  }
  if(!rplpWakeInWindow())return;
- rplpWakeLogFirst(which==RPLPWakeSubmit ? 34 : 35,rplpWakeNow());
- if(!__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))__atomic_fetch_add(&rplpWakeLog[which==RPLPWakeSubmit ? 8 : 9],1ULL,__ATOMIC_RELAXED);
- rplpWakeLogKick(which==RPLPWakeSubmit);
+ const bool waking=phase==2;
+ if(waking)rplpWakeLogFirst(which==RPLPWakeSubmit ? 34 : 35,rplpWakeNow());
+ if(waking && !__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))__atomic_fetch_add(&rplpWakeLog[which==RPLPWakeSubmit ? 8 : 9],1ULL,__ATOMIC_RELAXED);
+ rplpWakeLogKick(waking && which==RPLPWakeSubmit);
 }
-static void rplpWakeLogForceWake(void *owner,bool enable,unsigned domains) {
- if(!rplpWakeLogEnabled || !rplpWakeInWindow())return;
- const auto now=rplpWakeNow();rplpWakeLogFirst(36,now);
- if(!__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))__atomic_fetch_add(&rplpWakeLog[10],1ULL,__ATOMIC_RELAXED);
+// The guard skipped a native forcewake call: counted in word 46, and the record goes to NVRAM at once.
+static void rplpWakeLogGuardSkip() {
+ if(!rplpWakeLogEnabled)return;
+ __atomic_fetch_add(&rplpWakeLog[46],1ULL,__ATOMIC_RELAXED);rplpWakeLogKick(true);
+}
+// Returns the recorded event (six words) or nullptr when the record is off or the system is not in a sleep cycle.
+static uint64_t *rplpWakeLogForceWake(void *owner,bool enable,unsigned domains) {
+ if(!rplpWakeLogEnabled || !rplpWakeInWindow())return nullptr;
+ const bool waking=rplpWakeWaking();
+ const auto now=rplpWakeNow();if(waking)rplpWakeLogFirst(36,now);
+ if(waking && !__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))__atomic_fetch_add(&rplpWakeLog[10],1ULL,__ATOMIC_RELAXED);
  __atomic_fetch_add(&rplpWakeLog[enable ? 37 : 38],1ULL,__ATOMIC_RELAXED);
- uint64_t render=UINT64_MAX,gt=UINT64_MAX,rm=UINT64_MAX,g=UINT64_MAX;
+ uint64_t render=UINT64_MAX,gt=UINT64_MAX,rm=UINT64_MAX,g=UINT64_MAX;bool allOnes=false;
  if(owner) {
   __atomic_store_n(&rplpWakeOwner,owner,__ATOMIC_RELEASE);
   auto a=static_cast<uint8_t *>(owner);
@@ -242,15 +266,18 @@ static void rplpWakeLogForceWake(void *owner,bool enable,unsigned domains) {
   if(bar) {
    render=uint64_t(*reinterpret_cast<volatile uint32_t *>(bar+0xA278))|uint64_t(*reinterpret_cast<volatile uint32_t *>(bar+0xD84))<<32;
    gt=uint64_t(*reinterpret_cast<volatile uint32_t *>(bar+0xA188))|uint64_t(*reinterpret_cast<volatile uint32_t *>(bar+0x130044))<<32;
+   allOnes=(render>>32)==0xFFFFFFFF;
   }
   uint32_t c[3];memcpy(c,a+0x1290,sizeof(c));
   rm=uint64_t(c[0])|uint64_t(c[1])<<32;g=c[2];
  }
+ if(allOnes)rplpWakeLogFirst(47,now);
  const auto n=__atomic_fetch_add(&rplpWakeForceWakeSeq,1U,__ATOMIC_RELAXED);
  auto e=&rplpWakeLog[rplpWakeEventBase+6*(n%rplpWakeEvents)];
  e[0]=now;e[1]=uint64_t(enable)|uint64_t(domains)<<8|uint64_t(n)<<32;e[2]=render;e[3]=gt;e[4]=rm;
  e[5]=g|uint64_t(__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))<<32;
- rplpWakeLogKick(true);
+ rplpWakeLogKick(waking || allOnes);
+ return e;
 }
 static void rplpWakeLogEngine(bool done,bool result) {
  if(!rplpWakeLogEnabled)return;
@@ -4618,6 +4645,7 @@ struct Display13FBPowerContext {
     Display13WM::Latency latency;
     bool watermarkFaulted {};
     bool engineEnabled {};
+    bool coldResume {}; // Set by the power restore after a real power loss for the engine enable that follows.
     volatile uintptr_t arbitrationWriterBase {}; // Qualified in sleepable engine context.
     IOLock *lock {};
     void *power {}, *controller {}, *access {};
@@ -9020,6 +9048,11 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	auto &c=display13FBPower;
 	if(!c.lock || power!=c.power || !c.controller)return;
 	uint64_t record[32] {};IOLockLock(c.lock);
+	// N97FBColdResume (after a real power loss): 1 cold, 2 MBUS_CTL read, 3 after, 4 written, 5..9 the pipe A plane buffer
+	// trace (primary read, cursor read, primary written, cursor written, applied), 10 re-establish status, 11 clock
+	// status at entry, 12 clock restarted, 13..16 DBUF_CTL reads, 17 DBUF status, 18 engine enabled, 19 PW1 status,
+	// 20 clock status after.
+	const bool cold=c.coldResume;c.coldResume=false;uint64_t coldRecord[24] {1,cold};
 	Display13Power::Result acquired;
 	if(callbackXE->display13FBEngineEnableHookReady && c.bridge.begun && !c.bridge.state.faulted &&
 		!c.bridge.state.suspended && !c.clockFaulted && Display13Power::objectAssociations(power,0x80,c.controller,0x1C20)) {
@@ -9028,14 +9061,16 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	}
 	c.writes+=acquired.writes;
 	Display13FBClockIO clockIO {c.map};auto clock=Display13Clock::read(clockIO);
-	if(clock.status==Display13Clock::Status::Disabled && c.clockStopped && c.resumeClockHz &&
+	coldRecord[11]=static_cast<uint32_t>(clock.status);
+	// After a real power loss the PLL may be off without this owner having stopped it: restart it at the last clock.
+	if(clock.status==Display13Clock::Status::Disabled && (c.clockStopped || cold) && c.resumeClockHz &&
 		!c.bridge.state.faulted && !c.bridge.state.suspended && !c.clockFaulted && !c.dbuf.updating &&
 		!Display13WM::busyPipes(c.pipe)) {
 		Display13FBClockGuard guard;
 		if(adlnBeginClockGuard(guard)) {
 			const auto changed=Display13Clock::set(clockIO,c.resumeClockHz,{true,true,0});
 			if(changed.status==Display13Clock::ChangeStatus::Complete) {
-				clock=changed.after;c.clockStopped=false;adlnInvalidateWM();
+				clock=changed.after;c.clockStopped=false;adlnInvalidateWM();coldRecord[12]=1;
 				*reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(c.controller)+0xE98)=clock.nativeHz();
 			} else adlnFault(c.clockFaulted,__LINE__);
 			adlnEndClockGuard(guard,changed.status==Display13Clock::ChangeStatus::Complete || !changed.writes);
@@ -9047,6 +9082,26 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		Display13Power::objectAssociations(power,0x80,c.controller,0x1C20)) {
 		Display13FBDBUFIO io {c.map};
 		status=Display13DBUF::begin(io,c.dbuf,__builtin_popcount(callbackXE->adlnHDMIWiring.hdmi)>=3 ? 7U : 0U);
+		if(status==Display13DBUF::Status::Complete && cold) {
+			// A real power loss reset MBUS_CTL and the plane buffer registers while the DBUF state retains the layout the
+			// native path left (round 46: the resume proof refused with Conflict). Re-establish both before the proof, the
+			// plane buffer registers through the native register write, as this owner's cursor reservation does.
+			const auto mbus=io.read(0x4438C);coldRecord[2]=mbus;
+			if(mbus!=UINT32_MAX && mbus!=c.dbuf.mbus) {
+				*reinterpret_cast<volatile uint32_t *>(c.map->getVirtualAddress()+0x4438C)=c.dbuf.mbus;coldRecord[4]=1;
+			}
+			coldRecord[3]=io.read(0x4438C);
+			if(coldRecord[3]!=c.dbuf.mbus)status=Display13DBUF::fail(c.dbuf,Display13DBUF::Status::Readback);
+			for(unsigned i=0;i<4;++i)coldRecord[13+i]=io.read(Display13DBUF::regs[i]);
+			uint32_t trace[5] {};
+			if(status==Display13DBUF::Status::Complete && callbackXE->adlnWMWrite32 && c.access) {
+				auto writer=[&](uint32_t reg,uint32_t value) {reinterpret_cast<void (*)(void *,uint64_t,uint32_t)>(callbackXE->adlnWMWrite32)(c.access,reg,value);};
+				for(unsigned p=0;p<3 && status==Display13DBUF::Status::Complete;++p)if(c.dbuf.selected&(1U<<p))
+					status=Display13DBUF::reestablish(io,c.dbuf,p,writer,p ? nullptr : trace);
+			} else if(status==Display13DBUF::Status::Complete)status=Display13DBUF::Status::Unavailable;
+			for(unsigned i=0;i<5;++i)coldRecord[5+i]=trace[i];
+			coldRecord[10]=static_cast<uint32_t>(status);
+		}
 		if(status==Display13DBUF::Status::Complete) {
 			if(acquired.status==Display13Power::Status::Complete)status=Display13DBUF::resumeEngine(io,c.dbuf);
 			else status=Display13DBUF::Status::Power;
@@ -9054,6 +9109,7 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		if(status==Display13DBUF::Status::Complete)status=Display13DBUF::tracker(io,c.dbuf);
 	}
 	c.engineEnabled=status==Display13DBUF::Status::Complete;
+	if(cold)adlnInvalidateWM(); // The watermark registers were reset too: the next arm verifies the plan again.
     // This method already holds a sleepable owner lock. Qualify immutable BAR
     // binding here, then publish only the native VA for the nonblocking writer.
     const auto writerBase=c.engineEnabled && adlnWriterMappingBound() ? Display13FBMemory::field<uintptr_t>(c.access,0x50) : 0;
@@ -9068,8 +9124,13 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	for(unsigned i=0;i<4;++i) {record[17+i]=d.initial[i];record[21+i]=d.raw[i];}
     record[25]=writerBase!=0;
 	record[26]=d.selected;record[27]=static_cast<uint32_t>(acquired.status);record[28]=static_cast<uint32_t>(clock.status);
+	record[29]=cold;record[30]=coldRecord[10];record[31]=coldRecord[4];
 	IOLockUnlock(c.lock);
 	auto root=IORegistryEntry::getRegistryRoot();root->setProperty("N97FBEngine",record,sizeof(record));
+	if(cold) {
+		coldRecord[17]=static_cast<uint32_t>(status);coldRecord[18]=c.engineEnabled;coldRecord[19]=static_cast<uint32_t>(acquired.status);
+		coldRecord[20]=static_cast<uint32_t>(clock.status);root->setProperty("N97FBColdResume",coldRecord,sizeof(coldRecord));
+	}
 	if(!record[26] && !root->getProperty("N97FBEngineFirstEmptyResume"))
 		root->setProperty("N97FBEngineFirstEmptyResume",record,sizeof(record));
 }
@@ -9234,6 +9295,19 @@ static void rplpColdPrerequisites(uint64_t *rw) {
 	rw[14]=rd(0xC6204);
 	if(!(rstBefore&0x10))wr(0x46408,rstBefore|0x10);
 	rw[16]=rd(0x46408);rw[17]=1;
+	// The combo PHYs, as i915 initialises them after the handshake and before the first well (kern_rplp_coldphy.hpp).
+	// N97FBColdPHY: schema, count, then per PHY its status and the twelve record words.
+	struct PHYIO {
+		volatile uint8_t *bar;
+		uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}
+		void write(uint32_t r,uint32_t v) {*reinterpret_cast<volatile uint32_t *>(bar+r)=v;}
+	} phyIO {bar};
+	uint64_t phy[2+RPLPColdPHY::Count*(RPLPColdPHY::Words+1)] {1,RPLPColdPHY::Count};
+	for(unsigned i=0;i<RPLPColdPHY::Count;++i) {
+		auto r=phy+2+i*(RPLPColdPHY::Words+1);
+		r[0]=static_cast<uint32_t>(RPLPColdPHY::init(phyIO,i,r+1));
+	}
+	IORegistryEntry::getRegistryRoot()->setProperty("N97FBColdPHY",phy,sizeof(phy));
 }
 
 void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
@@ -9246,7 +9320,7 @@ void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	Display13FBPowerIO io {c.map};uint32_t v;
 	rw[2]=Display13Power::valid(io,Display13Power::Fuses,v) ? v : UINT32_MAX;
 	rw[4]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
-	if(c.bridge.state.suspended)rplpColdPrerequisites(rw);
+	const bool cold=c.bridge.state.suspended;if(cold)rplpColdPrerequisites(rw);
 	if(callbackXE->display13FBLifecycleHooksReady && c.bridge.begun && !c.bridge.state.faulted && !c.clockFaulted &&
 		Display13Power::objectAssociations(power,0x80,c.controller,0x1C20)) {
 		result=Display13Power::restore(io,c.bridge.state);
@@ -9261,7 +9335,7 @@ void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	display13FBPowerRecord(record,9,waking,result);IOLockUnlock(c.lock);
 	adlnPublishPowerRecord("N97FBPowerRestore",record);
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerRestoreWait",rw,sizeof(rw));
-	if(result.status==Display13Power::Status::Complete)wrapAlderLakeNEngineEnable(power);
+	if(result.status==Display13Power::Status::Complete) {c.coldResume=cold;wrapAlderLakeNEngineEnable(power);c.coldResume=false;}
 }
 
 void XE::wrapAlderLakeNPrimaryDBUF(OSObject *plane,uint32_t start,uint32_t end,bool wait) {
@@ -12682,8 +12756,23 @@ mach_vm_address_t xelpRegularForceWakeOriginal {};
 // Memory-only receipts: calls, masked entry, returns, max native ns,
 // >=100us, >=1ms, bypass, total native ns, >=10ms. No MMIO from readers.
 static uint64_t xelpForceWakeIRQ[9] {};
+// -wex-rplp-fwguard: the render acknowledgement register (0xD84) cannot legitimately read all-ones; that read means the
+// device is not decoding its registers (early in a wake, before its configuration space is restored). The native
+// acquire passes on such a read and its release then waits for a bit that never clears and panics (rounds 43 and 46).
+// Skipping the native call leaves the reference counts untouched, so acquire and release stay paired, and the engine
+// restart re-zeroes them. Checked at both native entry points.
+static bool rplpForceWakeGuarded(void *owner,uint64_t *event) {
+ if(!owner || !rplpForceWakeGuardEnabled)return false;
+ auto bar=*reinterpret_cast<volatile uint8_t **>(static_cast<uint8_t *>(owner)+0x1240);
+ if(!bar || *reinterpret_cast<volatile uint32_t *>(bar+0xD84)!=UINT32_MAX)return false;
+ __atomic_fetch_add(&rplpForceWakeGuardSkips,1ULL,__ATOMIC_RELAXED);
+ if(event)event[1]|=2;
+ rplpWakeLogGuardSkip();
+ return true;
+}
 void xelpRegularForceWakeProtected(void *owner,bool enable,unsigned domains) {
- rplpWakeLogForceWake(owner,enable,domains);
+ auto event=rplpWakeLogForceWake(owner,enable,domains);
+ if(rplpForceWakeGuarded(owner,event))return;
  uint64_t flags=0;
  if(owner)memcpy(&flags,static_cast<uint8_t *>(owner)+0x1190,sizeof(flags));
  if(!owner || !XELPForceWakeIRQ::required(flags,domains)) {
@@ -13785,6 +13874,7 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
 }
 
 void XE::wrapAlderLakeNExecutionWake(void *owner,bool enable,unsigned domains,unsigned client) {
+ if(rplpForceWakeGuarded(owner,nullptr))return;
  FunctionCast(wrapAlderLakeNExecutionWake,callbackXE->orgAlderLakeNExecutionWake)(owner,enable,domains,client);
  if(!callbackXE->adlnDetected || !enable || owner!=tglHost.owner)return;
  if(domains&4) {

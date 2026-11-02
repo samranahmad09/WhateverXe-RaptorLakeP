@@ -415,5 +415,53 @@ int main() {
         for(unsigned q=p+1;q<3;++q)if(mask&(1U<<q)) {const auto b=plannedLayout(mask,q);assert(!overlap(a.primary,b.primary) && !overlap(a.primary,b.cursor) && !overlap(a.cursor,b.primary) && !overlap(a.cursor,b.cursor));}
     }
     assert(plannedLayout(0,0).status==Status::Topology && plannedLayout(8,0).status==Status::Topology && plannedLayout(1,3).status==Status::Topology);
-    puts("AlderLakeN DBUF fixtures passed: absolute ownership / MBUS-relative native and MMIO, independent Linux examples, A register invariance, 12-bit ranges, boot topology, tracker preservation, primary/cursor allocation, slice lifetime, native update transaction, retirement conditions, slice release and failures");
+    // A real power loss (round 46): the plane buffer registers read reset while this owner retains pipe A's
+    // layout, so the resume proof refuses. Re-establishing the retained layout through the caller's writer first
+    // makes the proof hold, and the slices are requested again.
+    {IO io;State s;assert(begin(io,s)==Status::Complete);
+     io.r[0x7027C]=io.r[0x7017C]=0;io.r[0x70008]=0;io.r[0x70180]=0;
+     for(unsigned i=0;i<4;++i)io.r[regs[i]]&=~(Request|On);
+     assert(resumeEngine(io,s)==Status::Conflict && s.faulted);}
+    {IO io;State s;assert(begin(io,s)==Status::Complete && s.pipe[0].primary.end==2048 && !s.pipe[0].cursor.end);
+     io.r[0x7027C]=io.r[0x7017C]=0;io.r[0x70008]=0;io.r[0x70180]=0;
+     for(unsigned i=0;i<4;++i)io.r[regs[i]]&=~(Request|On);
+     std::vector<std::pair<uint32_t,uint32_t>> planeWrites;uint32_t trace[5] {};
+     auto writer=[&](uint32_t reg,uint32_t value) {planeWrites.emplace_back(reg,value);io.r[reg]=value;};
+     const auto writes=io.writes;
+     assert(reestablish(io,s,0,writer,trace)==Status::Complete && !s.faulted && io.writes==writes);
+     assert(planeWrites.size()==1 && planeWrites[0].first==0x7027C && planeWrites[0].second==0x07FF0000);
+     assert(trace[0]==0 && trace[1]==0 && trace[2]==0x07FF0000 && trace[3]==0 && trace[4]==1);
+     assert(resumeEngine(io,s)==Status::Complete && !s.faulted && s.consumers==3 && s.owned==3 && (s.powered&3)==3);
+     assert(tracker(io,s)==Status::Complete);
+     // A bank that holds its layout is left alone.
+     planeWrites.clear();
+     assert(reestablish(io,s,0,writer,trace)==Status::Complete && planeWrites.empty() && !trace[4] && trace[0]==0x07FF0000);}
+    // With a cursor reservation both registers come back, primary first.
+    {IO io;io.r[0x7027C]=0x07FF0028;io.r[0x7017C]=0x00270000;State s;
+     assert(begin(io,s)==Status::Complete && s.pipe[0].cursor.end==40 && s.pipe[0].primary.start==40);
+     io.r[0x7027C]=io.r[0x7017C]=0;io.r[0x70008]=0;io.r[0x70180]=0;
+     std::vector<std::pair<uint32_t,uint32_t>> planeWrites;
+     auto writer=[&](uint32_t reg,uint32_t value) {planeWrites.emplace_back(reg,value);io.r[reg]=value;};
+     assert(reestablish(io,s,0,writer)==Status::Complete && planeWrites.size()==2 && planeWrites[0].first==0x7027C &&
+            planeWrites[0].second==0x07FF0028 && planeWrites[1].first==0x7017C && planeWrites[1].second==0x00270000);
+     assert(resumeEngine(io,s)==Status::Complete && s.consumers==3);}
+    // Never under a live or changing pipe, a live plane or cursor, an unpowered bank, an unreadable register or an
+    // open transaction; nothing is written in any of those cases.
+    for(unsigned bad=0;bad<6;++bad) {IO io;State s;assert(begin(io,s)==Status::Complete);
+     io.r[0x7027C]=io.r[0x7017C]=0;io.r[0x70008]=0;io.r[0x70180]=0;
+     if(bad==0)io.r[0x70008]=Request;
+     if(bad==1)io.r[0x70180]=Request;
+     if(bad==2)io.r[0x70080]=0x27;
+     if(bad==3)io.r[0x45404]&=~(3U<<10);
+     if(bad==4)io.r[0x7027C]=UINT32_MAX;
+     if(bad==5)s.updating=1;
+     unsigned planeWrites=0;auto writer=[&](uint32_t,uint32_t) {++planeWrites;};
+     const auto expected=bad==3 ? Status::Power : bad==4 ? Status::Readback : Status::Conflict;
+     assert(reestablish(io,s,0,writer)==expected && s.faulted && !planeWrites && !io.writes);}
+    // A write that does not take faults the state instead of leaving a layout the proof would accept.
+    {IO io;State s;assert(begin(io,s)==Status::Complete);
+     io.r[0x7027C]=io.r[0x7017C]=0;io.r[0x70008]=0;io.r[0x70180]=0;
+     auto writer=[&](uint32_t,uint32_t) {};
+     assert(reestablish(io,s,0,writer)==Status::Readback && s.faulted);}
+    puts("AlderLakeN DBUF fixtures passed: absolute ownership / MBUS-relative native and MMIO, independent Linux examples, A register invariance, 12-bit ranges, boot topology, tracker preservation, primary/cursor allocation, slice lifetime, native update transaction, retirement conditions, slice release and failures, cold re-establishment");
 }
