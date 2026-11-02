@@ -6,39 +6,44 @@ A fork of [WhateverXe](https://github.com/b00t0x/WhateverXe) working toward macO
 **Raptor Lake-P** integrated graphics: the UHD and Iris Xe GPUs in 13th-generation Core H, P and U laptop
 processors, including the laptop's internal (eDP) panel.
 
-> **Status: the internal panel lights natively and the GPU accelerator runs on it (Metal); validation continues.**
+> **Status (2026-11-02): the internal panel lights natively, the GPU accelerator runs on it (Metal and OpenGL), brightness works; system sleep and wake is the open item.**
 > - Since 2026-10-20 the native Display 13 framebuffer path drives the reference machine's eDP panel (link
 >   training, 60 Hz mode, cursor, WindowServer desktop) with the `-wex-rplp-gt` boot argument, and the native
 >   accelerator starts on it: the Metal, OpenGL and video plugins attach, WindowServer renders through the GPU,
 >   and About This Mac reports 1536 MB for the iGPU.
-> - That build is `rplp-accel`: upstream 0.3.0 merged (one binary for Big Sur through Tahoe; the MMIO cache
->   bridges on the 20G1443 kernel bound to the BAR page range) plus the fork's panel path. `main` follows it.
+> - The branch is `rplp-accel`: upstream 0.3.0 merged (one binary for Big Sur through Tahoe; the MMIO cache
+>   bridges on the 20G1443 kernel bound to the BAR page range) plus the fork's panel path. `main` is older and is
+>   refreshed after validated rounds; upstream 0.6.1 is fetched and not merged yet.
 > - Display sleep and wake work (the interrupt re-arm at the pipe's activation boundary).
-> - OpenGL applications start since 2026-10-21: the accelerator's hardware-capabilities reply presents Tiger Lake
->   GT2 (9A49) to the prepatched user-mode OpenGL and video drivers, whose device lists end at Alder Lake-N
->   (`-wex-rplp-nocaps` keeps the physical ID; `-wex-rplp-capsadln` presents Alder Lake-N instead, an experiment).
->   Preview's image adjustments work; Chess and WebGL, which redraw 3D scenes continuously, show flicker and striped
->   faces while the GPU records no recovery. An offscreen readback test on the hardware renderer passes the
->   fixed-function, shader, texture, multisample and large-surface stages and isolates two sequences in which the
->   expected pixels are missing from the image read back: a program's clear and draw are absent when a readback with
->   no program bound followed an earlier program's draw, and a nearer triangle drawn right after a farther one is
->   absent once shaders ran on the same framebuffer (only a depth readback between the two draws restores it;
->   whether the work was dropped, rejected or read back stale is open). Those are the open OpenGL items. Hardware video: Safari playback works, but the screen recorder
->   crashes inside the video driver during a pixel transfer (open).
+> - OpenGL works since 2026-10-28. The accelerator's hardware-capabilities reply presents Tiger Lake GT2 (9A49) to
+>   the prepatched user-mode OpenGL and video drivers (since 2026-10-21; `-wex-rplp-nocaps` keeps the physical ID),
+>   and the plugin publishes five URB banks to them instead of the measured six (`wex-rplp-urb-banks=5`): the OpenGL
+>   driver then ends its vertex URB allocation at 320 KiB instead of 384 KiB, every offscreen readback probe passes,
+>   and Chess and WebGL render correctly. The driver's exact allocation rule is a follow-up. Hardware video: Safari
+>   playback works; the screen recorder crashes inside the video driver during a pixel transfer (open).
 > - Brightness works through the embedded controller since 2026-10-21: the display engine's PWM duty does not reach
 >   this panel, so `-wex-rplp-ecbl` forwards the framebuffer's duty writes to the firmware's WMI brightness method and
->   gives AppleBacklight the generic panel curves; the built-in display has its brightness slider and the panel follows it. The brightness keys work too once the
->   firmware is allowed to report them (two byte patches on the DSDT's key guards, or the usual `_OSI` to `XOSI` table, which
->   costs boot time here) and acidanthera's BrightnessKeys turns the notifications into key presses; both live in the EFI,
->   not in this plugin. Not validated yet: Metal workloads beyond the desktop, system sleep, 144 Hz, external outputs. The
->   findings describe each step.
+>   gives AppleBacklight the generic panel curves. The brightness keys work with two byte patches on the DSDT's key
+>   guards and acidanthera's BrightnessKeys, both in the EFI, not in this plugin.
+> - System sleep and wake, in progress (test rounds since 2026-10-29): the platform sleeps and wakes, the display
+>   engine comes back from a real power loss, and the panel does not light again yet. Four causes were found and
+>   fixed in turn, each one step further into the wake: a one-microsecond wait for a cold power well's fuse in the
+>   plugin's own restore (now 2 ms), the engine enable refusing the plane-buffer and MBUS registers the power loss
+>   resets (now re-established), the two combo PHYs losing their state (now re-initialised as i915 does), and, still
+>   open, the AUX A power well not acknowledging its request after the power loss; the current build records the PHY's
+>   AUX lane bit and the AUX channel's status with every power request and offers the lane-enable write i915 uses on
+>   Ice Lake as an experiment. A dispatch at the first instant of a wake into a device not yet decoding its registers
+>   panicked twice in a forcewake release; an opt-in guard skips those calls. The two-minute sleep entry is the
+>   graphics family's own sleep acknowledgement timing out; an experiment hides the driverless dGPU's placeholder
+>   framebuffer. Opt-in flags: `-wex-rplp-wakelog`, `-wex-rplp-fwguard`, `-wex-rplp-coldinit`, `-wex-rplp-auxlane`.
+>   Not validated yet: Metal workloads beyond the desktop, 144 Hz, external outputs.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
 > - Everything upstream supports (Tiger Lake, Alder Lake-N / Twin Lake) behaves exactly as in upstream.
 > - Hardware findings so far: [docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md).
 
 This is an independent hobby fork, not affiliated with the upstream author. Work that holds up on real
-hardware will be offered upstream. `main` follows the newest `rplp-*` branch.
+hardware will be offered upstream. `main` is refreshed from the newest `rplp-*` branch after validated rounds.
 
 ## Target hardware
 
@@ -75,8 +80,8 @@ every hardware rule.
 | R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Done: on the reference machine the macOS readout matches the Linux capture (all five fuses, 64 EU, 4 DSS) |
 | R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | Done on the reference machine: the BCS self-test passes and, since 2026-10-20, the native accelerator starts on the internal panel (branch `rplp-accel`) |
 | R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Done on the reference machine (2026-10-20): native desktop on the panel at 1920x1080, 60 Hz. Power sequencing, backlight and retraining are R4 |
-| R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | Not started |
-| R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | In progress: WindowServer is accelerated on the panel since 2026-10-20; stability, sleep/wake and workloads are unverified |
+| R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | In progress: brightness since 2026-10-21 (embedded-controller bridge), display sleep/wake done; system sleep/wake since 2026-10-29: four causes fixed in turn, the AUX A well's acknowledgement after a real power loss open; 144 Hz and retraining not started |
+| R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | In progress: WindowServer accelerated on the panel since 2026-10-20, OpenGL correct since 2026-10-28; system sleep/wake in progress (R4); workloads beyond the desktop and USB-C outputs unverified |
 
 The hardware inputs for R2-R4 are measured on the reference machine and listed in
 [docs/raptor-lake-p-findings.md](docs/raptor-lake-p-findings.md):
@@ -315,7 +320,7 @@ Alder Lake-N / Twin Lake.
 | `-wex-rplp-wakelog` | Raptor Lake-P only, diagnostic: records the system sleep and wake messages, the plugin's submit, software-interrupt and forcewake traffic relative to them (acquisitions and releases apart, with the raw forcewake request and acknowledgement registers and the reference counts read before each call of the wake window), and the accelerator's engine start and every return, as `RPLPWakeLog` on the registry root and `rplp-wakelog` in NVRAM, so a panic during a wake still leaves the sequence behind. The record runs from the sleep message through the wake, so a dispatch at the first instant of a wake is kept even before the plugin hears of the wake. Counts, timestamps and register reads only; nothing is deferred or refused. |
 | `-wex-rplp-coldinit` | Raptor Lake-P only, experimental: before a power-well restore after a real power loss, program the PCH raw clock from the strap, enable the PCH reset handshake and initialise the two combo PHYs the way Linux's i915 does before it requests power well 1 (each PHY is verified first and left alone when its state survived; `N97FBColdPHY`), with i915's Alder Lake-P workarounds around it (the FLR source disabled before the well, the DCPR_2 bits and the fatal error mask after MBUS). The raw clock is written only when its divider field reads zero. Registers are recorded before and after in `N97FBPowerRestoreWait` and `N97FBColdResume`; nothing is written when the registers already agree or read all-ones. |
 | `-wex-rplp-fwguard` | Raptor Lake-P only, experimental: before every forcewake call, read the render acknowledgement register and skip the native call when it reads all-ones, a value it cannot legitimately hold. That read means the device is not decoding its registers (early in a wake, before its configuration space is restored); the native acquire passes on it, and its release then waits for a bit that never clears and panics. The reference counts are untouched, so acquire and release stay paired. Skips are counted in the wake record (`-wex-rplp-wakelog`, word 46 and the event flag) and `RPLPForceWakeGuardArmed` says the guard is on. |
-| `-wex-rplp-auxlane` | Raptor Lake-P only, experiment: set the combo PHY's AUX lane enable bit (CL_DW12 bit 0) after a combo AUX power request and clear it before the release, as the native driver does; Linux's i915 does this on Ice Lake only, so it is an experiment for a wake after a real power loss whose AUX well gave no acknowledgement, not an established requirement. `N97FBAuxLane` records the last operation; without the flag the register is only read into `N97FBAcquireWait`. |
+| `-wex-rplp-auxlane` | Raptor Lake-P only, experiment: set the combo PHY's AUX lane enable bit (CL_DW12 bit 0) after a combo AUX power request and clear it before the release, the sequence Linux's i915 uses on Ice Lake and not on this generation, so it is an experiment for a wake after a real power loss whose AUX well gave no acknowledgement, not an established requirement. `N97FBAuxLane` records the last operation; without the flag the register is only read into `N97FBAcquireWait`. |
 | `-wex-rplp-warev3` | Raptor Lake-P only, diagnostic: hand revision 3 instead of the physical 4 to the kernel accelerator's workaround-table initialisation alone (the pre-revision-4 policies, 13 packed bits), to compare the OpenGL readback probes against the default. Can affect rendering, media, performance and stability; not a fix, not for daily use. `N97RPLPWARev3`. |
 | `wex-rplp-urb-banks=` | Raptor Lake-P only: publish this many URB (unified return buffer) banks, 1 to 8, to the drivers instead of the measured six. The user-mode OpenGL driver sizes its vertex-shader URB allocation from the count; with five the allocation ends at 320 KiB instead of 384 KiB and the missing-geometry defect described in the Raptor Lake-P notes is gone (every offscreen probe passes, Chess and the cube render correctly), so `=5` is the working configuration on this part until the exact allocation rule is carried in user mode. Costs some URB capacity for every consumer. The plugin's admission guards take the published count as their reference, and `RPLPURBBanksOverride` records an applied override. No leading dash: the kernel reads a dash-prefixed name as a flag and ignores its value. |
 | `-wex-rplp-gl-urb` | Experimental exact OpenGL URB allocation correction for qualified Raptor Lake-P A7A8 revision 04 on Big Sur 20G1443. Requires the pinned driver image accepted by the source. Keeps the physical six-bank capability and corrects only matching allocation packets in a validated mapped page; the on-disk bundle is unchanged. Disabled by default. Cannot be combined with `wex-rplp-urb-banks=`. Unknown OS, driver, file or validation state leaves the correction inactive; `RPLPGLURBReady` and `RPLPGLURBApplied` distinguish hook readiness from a corrected page. Hardware qualification is pending. |
