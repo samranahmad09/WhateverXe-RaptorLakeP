@@ -138,6 +138,7 @@
   "-wex-rplp-warev3": [],
   "-wex-rplp-coldinit": [],
   "-wex-rplp-fwguard": [],
+  "-wex-rplp-auxlane": [],
   "-wex-rplp-wakelog": [],
   "wex-rplp-urb-banks": [],
   "-wex-rplp-gl-urb": [],

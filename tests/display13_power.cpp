@@ -233,5 +233,15 @@ int main() {
      assert(ok(release(io,s,a)));empty(s);}
     {IO io;State s;Lease a;assert(initialize(io,s,All));auto r=acquire(io,s,a,bit(Domain::AUXA));
      assert(r.status==Status::Complete && !r.stateMissing && !r.stateWaitUs);assert(ok(release(io,s,a)));empty(s);}
+    // The host's AUX lane hook is called after a combo AUX request and before its release, never for PG or DDI wells;
+    // the plain IO above has no such member and is untouched.
+    {struct Lane {unsigned d;bool enable;size_t writes;};
+     struct LaneIO : IO {std::vector<Lane> lanes;void auxLane(unsigned d,bool enable) {lanes.push_back({d,enable,writes.size()});}} io;
+     State s;Lease a;assert(initialize(io,s,All) && ok(acquire(io,s,a,bit(Domain::AUXA))));
+     assert(io.lanes.size()==1 && io.lanes[0].d==unsigned(Domain::AUXA) && io.lanes[0].enable && io.lanes[0].writes==io.writes.size());
+     assert(ok(release(io,s,a)) && io.lanes.size()==2 && !io.lanes[1].enable && io.lanes[1].d==unsigned(Domain::AUXA) && io.lanes[1].writes<io.writes.size());empty(s);
+     Lease b;assert(ok(acquire(io,s,b,BootHDMIA)) && io.lanes.size()==2 && ok(release(io,s,b)) && io.lanes.size()==2);empty(s);
+     Lease c;assert(ok(acquire(io,s,c,bit(Domain::AUXB))) && ok(suspend(io,s)) && io.lanes.size()==4 && !io.lanes[3].enable);
+     assert(ok(restore(io,s)) && io.lanes.size()==5 && io.lanes[4].enable && io.lanes[4].d==unsigned(Domain::AUXB) && ok(release(io,s,c)));empty(s);}
     puts("PASS Display13 power requests: leases, suspend/restore without count duplication, borrowed requests, bounded faults. Synthetic IO only.");
 }

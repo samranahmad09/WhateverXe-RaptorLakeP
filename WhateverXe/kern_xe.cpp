@@ -153,6 +153,9 @@ thread_t rplpWakeLogThread;
 uint32_t rplpWakeLogDirty,rplpWakeLogNVRAMWanted;
 bool rplpForceWakeGuardEnabled;    // -wex-rplp-fwguard, see xelpRegularForceWakeProtected
 uint64_t rplpForceWakeGuardSkips;
+bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
+uint64_t rplpAuxLane[8] {1};       // N97FBAuxLane: schema, writes, last domain, last enable, before, after, calls with the flag off, unreadable
+void *rplpWakeStreamer;            // the render streamer, for its scheduling-paused word in the forcewake events
 uint64_t rplpWakeNow() {uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&t);return t;}
 void rplpWakeLogPublish(bool nvram) {   // thread context only
  __atomic_fetch_add(&rplpWakeLog[40],1ULL,__ATOMIC_RELAXED);rplpWakeLog[41]=rplpWakeNow();
@@ -225,6 +228,8 @@ static void rplpWakeLogArm() {
  // The forcewake guard is independent of the record: see xelpRegularForceWakeProtected.
  rplpForceWakeGuardEnabled=checkKernelArgument("-wex-rplp-fwguard");
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeGuardArmed",rplpForceWakeGuardEnabled);
+ rplpAuxLaneEnabled=checkKernelArgument("-wex-rplp-auxlane");
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPAuxLaneArmed",rplpAuxLaneEnabled);
  if(!checkKernelArgument("-wex-rplp-wakelog"))return;
  rplpWakeLogLock=IOLockAlloc();
  const bool thread=rplpWakeLogLock && kernel_thread_start(rplpWakeLogWriter,nullptr,&rplpWakeLogThread)==KERN_SUCCESS;
@@ -275,6 +280,8 @@ static uint64_t *rplpWakeLogForceWake(void *owner,bool enable,unsigned domains) 
  const auto n=__atomic_fetch_add(&rplpWakeForceWakeSeq,1U,__ATOMIC_RELAXED);
  auto e=&rplpWakeLog[rplpWakeEventBase+6*(n%rplpWakeEvents)];
  e[0]=now;e[1]=uint64_t(enable)|uint64_t(domains)<<8|uint64_t(n)<<32;e[2]=render;e[3]=gt;e[4]=rm;
+ // Bit 16: the render streamer's scheduling-paused word (a plain field, not MMIO), the native dispatch gate (Codex Q42.1).
+ if(auto st=static_cast<uint8_t *>(__atomic_load_n(&rplpWakeStreamer,__ATOMIC_ACQUIRE)))e[1]|=uint64_t(*reinterpret_cast<volatile uint32_t *>(st+0x1C00)&1U)<<16;
  e[5]=g|uint64_t(__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))<<32;
  rplpWakeLogKick(waking || allOnes);
  return e;
@@ -4939,6 +4946,21 @@ struct Display13FBPowerIO {
 	}
 	uint32_t read(uint32_t r) const {
 		return *reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress()+r);
+	}
+	// -wex-rplp-auxlane (experiment, Codex Q43): the combo PHY's AUX lane enable, CL_DW12 bit 0 (PHY A 0x162030 for AUX A,
+	// PHY B 0x6C030 for AUX B), set after the AUX request and cleared before its release, as the native driver does and
+	// i915 does on Ice Lake only. Without the flag the call only counts. N97FBAuxLane keeps the last operation.
+	void auxLane(unsigned d,bool enable) {
+		const uint32_t base=d==8 ? 0x162000U : d==6 ? 0x6C000U : 0U;
+		if(!base || !map || !map->getVirtualAddress() || map->getLength()!=0x1000000)return;
+		if(!rplpAuxLaneEnabled) {++rplpAuxLane[6];return;}
+		auto reg=reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress()+base+0x30);
+		const uint32_t before=*reg;rplpAuxLane[2]=d;rplpAuxLane[3]=enable;rplpAuxLane[4]=before;
+		if(before==UINT32_MAX) {++rplpAuxLane[7];return;}
+		const uint32_t after=enable ? (before|1U) : (before&~1U);
+		if(after!=before) {*reg=after;++rplpAuxLane[1];}
+		rplpAuxLane[5]=*reg;
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBAuxLane",rplpAuxLane,sizeof(rplpAuxLane));
 	}
 	void write(uint32_t r,uint32_t v) {
 		// Boot topology is read-only here. Only the power core may write its
@@ -9671,8 +9693,10 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 	IOWorkLoop *acquiredGate=nullptr;
 	Display13FBIRQ::PowerReleaseScope releaseScope;uint64_t irqRelease[12] {};
 	// N97FBAcquireWait: schema, sequence, operation, domain, status, state wait us, domains without a state bit, fuse wait
-	// us, PWR_WELL_CTL_AUX, PWR_WELL_CTL_DDI, PWR_WELL_CTL, DC_STATE_EN (reads after the operation).
-	uint64_t acquireWait[12] {1};
+	// us, PWR_WELL_CTL_AUX, PWR_WELL_CTL_DDI, PWR_WELL_CTL, DC_STATE_EN (reads after the operation), [12] the port's PHY
+	// CL_DW12 (combo ports A/B), [13] the port's AUX_CH_CTL after a completed AUX request, [14] the BIOS AUX copy 0x45440,
+	// [15] the BIOS DDI copy 0x45450.
+	uint64_t acquireWait[16] {1};
 	bool previousQuiescing=false;uint32_t previousBlocked=0;
 	bool disableEngine=false;
 	IOLockLock(c.lock);
@@ -9782,6 +9806,13 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 			acquireWait[9]=Display13Power::valid(io,Display13Power::DDI,v) ? v : UINT32_MAX;
 			acquireWait[10]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
 			acquireWait[11]=c.map && c.map->getVirtualAddress() ? *reinterpret_cast<volatile uint32_t *>(c.map->getVirtualAddress()+0x45504) : UINT32_MAX;
+			if(c.map && c.map->getVirtualAddress()) {
+				auto rd=[&](uint32_t reg) {return *reinterpret_cast<volatile uint32_t *>(c.map->getVirtualAddress()+reg);};
+				const uint32_t phyBase=operation>=3 && operation<=6 && domain<2 ? (domain ? 0x6C000U : 0x162000U) : 0U;
+				acquireWait[12]=phyBase ? rd(phyBase+0x30) : 0;
+				acquireWait[13]=(operation==5 || operation==6) && domain<3 && result.status==Display13Power::Status::Complete ? rd(0x64010+domain*0x100) : 0;
+				acquireWait[14]=rd(0x45440);acquireWait[15]=rd(0x45450);
+			}
 		}
 		if(releaseScope.held) {
 			auto &irq=display13FBIRQ;Display13FBIRQIO irqIO {irq.base};const auto saved=IOSimpleLockLockDisableInterrupt(irq.lock);
@@ -12793,8 +12824,10 @@ static uint64_t xelpForceWakeIRQ[9] {};
 // -wex-rplp-fwguard: the render acknowledgement register (0xD84) cannot legitimately read all-ones; that read means the
 // device is not decoding its registers (early in a wake, before its configuration space is restored). The native
 // acquire passes on such a read and its release then waits for a bit that never clears and panics (rounds 43 and 46).
-// Skipping the native call leaves the reference counts untouched, so acquire and release stay paired, and the engine
-// restart re-zeroes them. Checked at both native entry points.
+// At the regular entry the skip precedes the native counting, so that pair stays balanced; the low-level entry is reached
+// after the native regular path has counted, so a skip there can strand a hold or unbalance a count (Codex's review of
+// r330). This is panic avoidance with evidence, not a wake fix: the correction belongs at a serialized boundary that
+// retains pending work until the device is ready. The CSB reader treats a skipped acquisition as an unreachable device.
 static bool rplpForceWakeGuarded(void *owner,uint64_t *event) {
  if(!owner || !rplpForceWakeGuardEnabled)return false;
  auto bar=*reinterpret_cast<volatile uint8_t **>(static_cast<uint8_t *>(owner)+0x1240);
@@ -12853,7 +12886,7 @@ struct TGLCSBIO {
  volatile uint8_t *hwsp, *bar;
  uint32_t pointerReg {}, entryReg {}, modeReg {}, sampledTail {UINT32_MAX};
  unsigned engine, wakeVariant;
- bool mmioTail, awake {false};
+ bool mmioTail, awake {false}, unreachable {false};
  TGLCSBIO(void *object,uint32_t flags) : streamer(static_cast<uint8_t *>(object)),
   owner(*reinterpret_cast<uint8_t **>(streamer+0x10)),
   hwsp(*reinterpret_cast<volatile uint8_t **>(streamer+0x68)),
@@ -12869,10 +12902,20 @@ struct TGLCSBIO {
    PANIC("igfx","CSB12 invalid engine/MMIO layout e=%u ptr=%x entries=%x",engine,pointerReg,entryReg);
  }
  ~TGLCSBIO() { if (awake) tglCSBForceWake[wakeVariant](owner,false,7); }
- void acquire() { if (!awake) {tglCSBForceWake[wakeVariant](owner,true,7);awake=true;} }
+ // When -wex-rplp-fwguard skipped the acquisition the device is not decoding its registers: no hold to release, and no
+ // register read through this reader (Codex's review of r330: the reader believed itself awake after a skipped call).
+ void acquire() {
+  if (awake || unreachable) return;
+  const auto skips=__atomic_load_n(&rplpForceWakeGuardSkips,__ATOMIC_RELAXED);
+  tglCSBForceWake[wakeVariant](owner,true,7);
+  if (__atomic_load_n(&rplpForceWakeGuardSkips,__ATOMIC_RELAXED)!=skips) {unreachable=true;return;}
+  awake=true;
+ }
  uint32_t readTail() {
   if (!mmioTail) return sampledTail=*reinterpret_cast<volatile uint32_t *>(hwsp+0xBC);
-  acquire();return sampledTail=*reinterpret_cast<volatile uint32_t *>(bar+pointerReg)&15;
+  acquire();
+  if (unreachable) return sampledTail=*reinterpret_cast<volatile uint32_t *>(hwsp+0xBC); // the memory copy, never the dead pointer register
+  return sampledTail=*reinterpret_cast<volatile uint32_t *>(bar+pointerReg)&15;
  }
  void readFence() { __asm__ volatile("lfence" ::: "memory"); }
  uint64_t readEntry(uint32_t i) { return *reinterpret_cast<volatile uint64_t *>(hwsp+0x40+i*8); }
@@ -13752,7 +13795,7 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
  }
  auto x=static_cast<uint8_t *>(streamer); uint32_t n=arrsize(tglHost.submit);
  if (tglHost.owner && *reinterpret_cast<void **>(x+0x10)==tglHost.owner) {
-  n=__sync_fetch_and_add(&tglHost.submits,1);rplpWakeLogCount(RPLPWakeSubmit);
+  n=__sync_fetch_and_add(&tglHost.submits,1);__atomic_store_n(&rplpWakeStreamer,streamer,__ATOMIC_RELEASE);rplpWakeLogCount(RPLPWakeSubmit);
  }
  if (renderWakeOwner) {
   if (n<arrsize(tglHost.submit)) {

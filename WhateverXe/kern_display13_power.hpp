@@ -26,6 +26,11 @@ constexpr unsigned FuseWaitUs = 2000;
 // native transaction decide. PG and DDI wells stay strict.
 constexpr unsigned StateWaitUs = 10000;
 constexpr bool comboAux(unsigned d) { return d == 6 || d == 8 || d == 10; }
+// The combo PHY's AUX lane enable (CL_DW12 bit 0): the native driver writes it after an AUX request and before its wait
+// and clears it before the release; i915 does so on Ice Lake only. The host supplies it as an experiment
+// (-wex-rplp-auxlane) through an IO with auxLane(domain, enable); an IO without the member leaves the register alone.
+template<class IO> auto auxLaneHook(IO &io, unsigned d, bool enable, int) -> decltype(io.auxLane(d, enable), void()) { io.auxLane(d, enable); }
+template<class IO> void auxLaneHook(IO &, unsigned, bool, long) {}
 constexpr bool tcAux(unsigned d) { return d>=12 && d<Count && !(d&1); }
 constexpr bool tcDDI(unsigned d) { return d>=11 && d<Count && (d&1); }
 constexpr uint32_t control(unsigned d) { return (d == 5 || d == 7 || d == 9 || tcDDI(d)) ? DDI : (d == 6 || d == 8 || d == 10 || tcAux(d)) ? AUX : Driver; }
@@ -108,6 +113,7 @@ template<class IO> Status wait(IO &io, uint32_t reg, uint32_t mask, unsigned tim
 template<class IO> Status clear(IO &io, State &s, unsigned d, Result &r) {
     const uint32_t mask = 1U << d, reg = control(d), req = request(d);
     if (!(s.owned & mask)) return Status::Complete;
+    if (comboAux(d)) auxLaneHook(io, d, false, 0);
     uint32_t value;
     if (!valid(io, reg, value)) return Status::Unavailable;
     if (value & req) { io.write(reg, value & ~req); ++r.writes; }
@@ -175,6 +181,7 @@ template<class IO> Result acquire(IO &io, State &s, Lease &lease, uint32_t domai
             io.write(control(d), value | request(d)); ++r.writes;
             s.owned |= mask; added |= mask;
         } else if (!(s.owned & mask)) s.borrowed |= mask;
+        if (comboAux(d)) auxLaneHook(io, d, true, 0);
         if (!valid(io, control(d), value)) { r.status = Status::Unavailable; break; }
         if (!(value & request(d))) { r.status = Status::RequestLost; break; }
         // WA_14017248603 uses the ADL-P/N TC AUX 500ms enable budget.
@@ -282,6 +289,7 @@ template<class IO> Result restore(IO &io,State &s) {
         }
         if(!valid(io,control(d),value)) {r.status=Status::Unavailable;break;}
         if(!(value&request(d))) {r.status=Status::RequestLost;break;}
+        if(comboAux(d))auxLaneHook(io,d,true,0);
         {unsigned e=0;r.status=wait(io,control(d),enabled(d),tcAux(d)?500000:comboAux(d)?StateWaitUs:1000,&e);r.stateWaitUs+=e;}
         if(r.status==Status::StateTimeout && comboAux(d)) {r.stateMissing|=1U<<d;r.status=Status::Complete;}
         if(r.status==Status::Complete && tcAux(d))r.status=waitTCAuxHealth(io,d);
