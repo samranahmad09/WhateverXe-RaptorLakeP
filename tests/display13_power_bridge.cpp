@@ -244,7 +244,8 @@ int main() {
         !b.ddiRefs[0] && !b.ddiLease[0].owner && b.ddiRefs[1]==1 && b.ddiLease[1].owner &&
         b.state.refs[0]==2 && io.regs[DDI]==12);}
     {IO io;NativeBridge b;assert(ok(b.begin(io,1,3)) && ok(b.getAUX(io,1)));io.failAUXState=1;
-     auto r=b.getAUX(io,0);assert(r.status==Status::StateTimeout && r.domain==8 && b.state.faulted &&
-        !b.auxRefs[0] && !b.auxLease[0].owner && b.auxRefs[1]==1 && b.auxLease[1].owner && io.regs[AUX]==12);}
+     auto r=b.getAUX(io,0);assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXA) && !b.state.faulted &&
+        b.auxRefs[0]==1 && b.auxLease[0].owner && b.auxRefs[1]==1 && b.auxLease[1].owner && io.regs[AUX]==14);
+     assert(ok(b.putAUX(io,0)) && !b.auxRefs[0] && b.auxRefs[1]==1 && io.regs[AUX]==12);}
     puts("PASS native PowerWell bridge: PG ABI, explicit A/B/dual admission, independent DDI/AUX refs, boot protection and fault retention. Synthetic IO only.");
 }
