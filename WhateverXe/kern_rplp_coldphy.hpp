@@ -45,7 +45,8 @@ template<class IO> uint32_t verify(IO &io,unsigned phy,uint64_t *r=nullptr) {
         dw1=io.read(compDW(phy,1)),dw3=io.read(compDW(phy,3)),dw8=io.read(compDW(phy,8)),dw9=io.read(compDW(phy,9)),dw10=io.read(compDW(phy,10)),
         cl5=io.read(clDW(phy,5));
     if(r) {r[1]=dw3;r[2]=misc;r[3]=tx8;r[4]=pcs1;r[5]=dw0;r[6]=cl5;}
-    for(auto v:{misc,dw0,tx8,pcs1,dw1,dw3,dw8,dw9,dw10,cl5})if(v==UINT32_MAX)return Unreadable;
+    const uint32_t reads[] {misc,dw0,tx8,pcs1,dw1,dw3,dw8,dw9,dw10,cl5};
+    for(auto v:reads)if(v==UINT32_MAX)return Unreadable;
     Procmon p {};
     if(!procmon(dw3,p))return UnknownProcmon;
     uint32_t checks=0;
