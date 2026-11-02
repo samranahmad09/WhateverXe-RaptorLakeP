@@ -9051,8 +9051,9 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	// N97FBColdResume (after a real power loss): 1 cold, 2 MBUS_CTL read, 3 after, 4 written, 5..9 the pipe A plane buffer
 	// trace (primary read, cursor read, primary written, cursor written, applied), 10 re-establish status, 11 clock
 	// status at entry, 12 clock restarted, 13..16 DBUF_CTL reads, 17 DBUF status, 18 engine enabled, 19 PW1 status,
-	// 20 clock status after.
-	const bool cold=c.coldResume;c.coldResume=false;uint64_t coldRecord[24] {1,cold};
+	// 20 clock status after, 21/22 CHICKEN_DCPR_2 0x46434 before/after (Wa_14011508470), 23/24 DISPLAY_ERR_FATAL_MASK
+	// 0x4421C before/after (Wa_14011503030), 25..28 BW_BUDDY 0x45130, 0x45134, 0x45140, 0x45144 (reads only).
+	const bool cold=c.coldResume;c.coldResume=false;uint64_t coldRecord[32] {1,cold};
 	Display13Power::Result acquired;
 	if(callbackXE->display13FBEngineEnableHookReady && c.bridge.begun && !c.bridge.state.faulted &&
 		!c.bridge.state.suspended && !c.clockFaulted && Display13Power::objectAssociations(power,0x80,c.controller,0x1C20)) {
@@ -9107,6 +9108,18 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 			else status=Display13DBUF::Status::Power;
 		}
 		if(status==Display13DBUF::Status::Complete)status=Display13DBUF::tracker(io,c.dbuf);
+		if(cold && status==Display13DBUF::Status::Complete) {
+			// i915's display core init after MBUS, display version 13: Wa_14011508470 (CHICKEN_DCPR_2 bits 24 to 27) and
+			// Wa_14011503030 (the fatal error mask written all-ones). The bandwidth buddy registers are only read here.
+			const auto base=c.map->getVirtualAddress();
+			auto rd=[&](uint32_t r) {return *reinterpret_cast<volatile uint32_t *>(base+r);};
+			auto wr=[&](uint32_t r,uint32_t v) {*reinterpret_cast<volatile uint32_t *>(base+r)=v;};
+			const uint32_t dcpr2=rd(0x46434);coldRecord[21]=dcpr2;
+			if(dcpr2!=UINT32_MAX && (dcpr2&0x0F000000)!=0x0F000000)wr(0x46434,dcpr2|0x0F000000);
+			coldRecord[22]=rd(0x46434);
+			coldRecord[23]=rd(0x4421C);wr(0x4421C,UINT32_MAX);coldRecord[24]=rd(0x4421C);
+			coldRecord[25]=rd(0x45130);coldRecord[26]=rd(0x45134);coldRecord[27]=rd(0x45140);coldRecord[28]=rd(0x45144);
+		}
 	}
 	c.engineEnabled=status==Display13DBUF::Status::Complete;
 	if(cold)adlnInvalidateWM(); // The watermark registers were reset too: the next arm verifies the plan again.
@@ -9290,11 +9303,17 @@ static void rplpColdPrerequisites(uint64_t *rw) {
 	rw[12]=strap;rw[13]=rawBefore;rw[15]=rstBefore;rw[18]=rd(0x45504);rw[19]=rd(0x46000);
 	if(strap==UINT32_MAX || rawBefore==UINT32_MAX || rstBefore==UINT32_MAX) {rw[14]=rawBefore;rw[16]=rstBefore;return;}
 	// 24 MHz: divider 24; 19.2 MHz: divider 19, denominator 5 (encoded 4), numerator 1 (i915 cnp_rawclk, PCH >= ICP).
+	// Only an unprogrammed register (divider field zero) is written: the firmware's own value survives the sleep (round 47
+	// read 0x10120800, divider 18, where i915 writes 19) and is not this plugin's to change.
 	const uint32_t raw=(strap&0x100) ? (24U<<16) : ((19U<<16)|(4U<<26)|(1U<<11));
-	if(rawBefore!=raw)wr(0xC6204,raw);
+	if(!(rawBefore&0x03FF0000))wr(0xC6204,raw);
 	rw[14]=rd(0xC6204);
 	if(!(rstBefore&0x10))wr(0x46408,rstBefore|0x10);
 	rw[16]=rd(0x46408);rw[17]=1;
+	// Wa_16013190616 (i915, Alder Lake-P): the FLR source disabled in CHICKEN_DCPR_1 before power well 1 is requested.
+	const uint32_t dcpr=rd(0x46430);rw[20]=dcpr;
+	if(dcpr!=UINT32_MAX && !(dcpr&(1U<<15)))wr(0x46430,dcpr|(1U<<15));
+	rw[21]=rd(0x46430);
 	// The combo PHYs, as i915 initialises them after the handshake and before the first well (kern_rplp_coldphy.hpp).
 	// N97FBColdPHY: schema, count, then per PHY its status and the twelve record words.
 	struct PHYIO {
@@ -9315,8 +9334,10 @@ void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	// N97FBPowerRestoreWait: schema, fuse wait us, FUSE_STATUS before/after, PWR_WELL_CTL before/after, status, domain,
 	// writes, waking, suspended after, owned after (round 45: the restore faulted on PG1's fuse with a 1 us wait).
 	// [12] strap 0xC2014, [13]/[14] RAWCLK 0xC6204 before/after, [15]/[16] NDE_RSTWRN_OPT 0x46408 before/after, [17] the
-	// prerequisites applied, [18] DC_STATE_EN 0x45504, [19] CDCLK_CTL 0x46000 (reads at entry).
-	uint64_t record[32] {},rw[20] {1};Display13Power::Result result;IOLockLock(c.lock);
+	// prerequisites applied, [18] DC_STATE_EN 0x45504, [19] CDCLK_CTL 0x46000 (reads at entry), [20]/[21] CHICKEN_DCPR_1
+	// 0x46430 before/after (Wa_16013190616: the FLR source disabled before power well 1), [22] the restore's state wait us,
+	// [23] the domains whose state bit never came (combo AUX wells, kept).
+	uint64_t record[32] {},rw[26] {1};Display13Power::Result result;IOLockLock(c.lock);
 	Display13FBPowerIO io {c.map};uint32_t v;
 	rw[2]=Display13Power::valid(io,Display13Power::Fuses,v) ? v : UINT32_MAX;
 	rw[4]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
@@ -9330,6 +9351,7 @@ void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	rw[3]=Display13Power::valid(io,Display13Power::Fuses,v) ? v : UINT32_MAX;
 	rw[5]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
 	rw[1]=result.fuseWaitUs;rw[6]=static_cast<uint32_t>(result.status);rw[7]=result.domain;rw[8]=result.writes;
+	rw[22]=result.stateWaitUs;rw[23]=result.stateMissing;
 	rw[9]=waking;rw[10]=c.bridge.state.suspended;rw[11]=c.bridge.state.owned;
 	if(result.status!=Display13Power::Status::Complete)adlnFault(c.bridge.state.faulted,__LINE__);
 	display13FBPowerRecord(record,9,waking,result);IOLockUnlock(c.lock);
@@ -9648,6 +9670,9 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 	uint64_t record[32] {},check[21] {2,operation,domain},auxRecord[10] {},context[24] {},gateEvidence[8] {}; Display13Power::Result result;
 	IOWorkLoop *acquiredGate=nullptr;
 	Display13FBIRQ::PowerReleaseScope releaseScope;uint64_t irqRelease[12] {};
+	// N97FBAcquireWait: schema, sequence, operation, domain, status, state wait us, domains without a state bit, fuse wait
+	// us, PWR_WELL_CTL_AUX, PWR_WELL_CTL_DDI, PWR_WELL_CTL, DC_STATE_EN (reads after the operation).
+	uint64_t acquireWait[12] {1};
 	bool previousQuiescing=false;uint32_t previousBlocked=0;
 	bool disableEngine=false;
 	IOLockLock(c.lock);
@@ -9750,6 +9775,14 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
             case 6: result=c.bridge.putAUX(io,domain);break;
             default: result.status=Display13Power::Status::InvalidDomains;break;
 		}
+		acquireWait[1]=c.sequence+1;acquireWait[2]=operation;acquireWait[3]=domain;acquireWait[4]=static_cast<uint32_t>(result.status);
+		acquireWait[5]=result.stateWaitUs;acquireWait[6]=result.stateMissing;acquireWait[7]=result.fuseWaitUs;
+		{
+			uint32_t v;acquireWait[8]=Display13Power::valid(io,Display13Power::AUX,v) ? v : UINT32_MAX;
+			acquireWait[9]=Display13Power::valid(io,Display13Power::DDI,v) ? v : UINT32_MAX;
+			acquireWait[10]=Display13Power::valid(io,Display13Power::Driver,v) ? v : UINT32_MAX;
+			acquireWait[11]=c.map && c.map->getVirtualAddress() ? *reinterpret_cast<volatile uint32_t *>(c.map->getVirtualAddress()+0x45504) : UINT32_MAX;
+		}
 		if(releaseScope.held) {
 			auto &irq=display13FBIRQ;Display13FBIRQIO irqIO {irq.base};const auto saved=IOSimpleLockLockDisableInterrupt(irq.lock);
 			irqRelease[11]=releaseScope.parked;
@@ -9779,6 +9812,7 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 	IOLockUnlock(c.lock);
 	adlnPublishPowerRecord("N97FBPower",record);
 	if(display13TraceEnabled)IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerContext",context,sizeof(context));
+	if(acquireWait[1])IORegistryEntry::getRegistryRoot()->setProperty("N97FBAcquireWait",acquireWait,sizeof(acquireWait));
 	if(gateEvidence[0])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseGate",gateEvidence,sizeof(gateEvidence));
 	if(irqRelease[0])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseIRQ",irqRelease,sizeof(irqRelease));
     IORegistryEntry::getRegistryRoot()->setProperty("N97FBAUXPower",auxRecord,sizeof(auxRecord));

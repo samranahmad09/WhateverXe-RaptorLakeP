@@ -19,6 +19,13 @@ constexpr uint32_t Driver = 0x45404, DDI = 0x45454, AUX = 0x45444, Fuses = 0x420
 // A power well's fuse distribution takes real time after a cold enable (i915 allows 1 ms); 5 us and 1 us only ever
 // proved a fuse that was already distributed, which held at every DC-state exit and failed at the first wake from S3.
 constexpr unsigned FuseWaitUs = 2000;
+// The combo AUX IO wells (A, B, C) have no specified acknowledgement time: i915 waits 1 ms and only warns when the
+// state bit has not come (ADL-P marks these wells "fixed enable delay"). Round 47: AUX A gave no acknowledgement
+// within 1 ms after a real power loss and the bridge faulted on it, which ended the panel's link training. Wait longer,
+// and when the bit still has not come keep the request and the lease, record the domain and the wait, and let the
+// native transaction decide. PG and DDI wells stay strict.
+constexpr unsigned StateWaitUs = 10000;
+constexpr bool comboAux(unsigned d) { return d == 6 || d == 8 || d == 10; }
 constexpr bool tcAux(unsigned d) { return d>=12 && d<Count && !(d&1); }
 constexpr bool tcDDI(unsigned d) { return d>=11 && d<Count && (d&1); }
 constexpr uint32_t control(unsigned d) { return (d == 5 || d == 7 || d == 9 || tcDDI(d)) ? DDI : (d == 6 || d == 8 || d == 10 || tcAux(d)) ? AUX : Driver; }
@@ -46,7 +53,7 @@ enum class Status : uint32_t {
 };
 struct Result {
     Status status {Status::NotReady};
-    uint32_t domain {Count}, writes {}, rollbackFailed {}, forcedOn {}, fuseWaitUs {};
+    uint32_t domain {Count}, writes {}, rollbackFailed {}, forcedOn {}, fuseWaitUs {}, stateWaitUs {}, stateMissing {};
 };
 struct State {
     bool ready {}, faulted {}, suspended {};
@@ -171,7 +178,8 @@ template<class IO> Result acquire(IO &io, State &s, Lease &lease, uint32_t domai
         if (!valid(io, control(d), value)) { r.status = Status::Unavailable; break; }
         if (!(value & request(d))) { r.status = Status::RequestLost; break; }
         // WA_14017248603 uses the ADL-P/N TC AUX 500ms enable budget.
-        r.status = wait(io, control(d), enabled(d), tcAux(d)?500000:1000);
+        { unsigned e = 0; r.status = wait(io, control(d), enabled(d), tcAux(d) ? 500000 : comboAux(d) ? StateWaitUs : 1000, &e); r.stateWaitUs += e; }
+        if (r.status == Status::StateTimeout && comboAux(d)) { r.stateMissing |= mask; r.status = Status::Complete; }
         if (r.status != Status::Complete) break;
         if(tcAux(d)) {
             r.status=waitTCAuxHealth(io,d);if(r.status!=Status::Complete)break;
@@ -274,7 +282,8 @@ template<class IO> Result restore(IO &io,State &s) {
         }
         if(!valid(io,control(d),value)) {r.status=Status::Unavailable;break;}
         if(!(value&request(d))) {r.status=Status::RequestLost;break;}
-        r.status=wait(io,control(d),enabled(d),tcAux(d)?500000:1000);
+        {unsigned e=0;r.status=wait(io,control(d),enabled(d),tcAux(d)?500000:comboAux(d)?StateWaitUs:1000,&e);r.stateWaitUs+=e;}
+        if(r.status==Status::StateTimeout && comboAux(d)) {r.stateMissing|=1U<<d;r.status=Status::Complete;}
         if(r.status==Status::Complete && tcAux(d))r.status=waitTCAuxHealth(io,d);
         if(r.status!=Status::Complete)break;
         if(d<5) {unsigned e=0;r.status=wait(io,Fuses,fuse(d),FuseWaitUs,&e);r.fuseWaitUs+=e;}

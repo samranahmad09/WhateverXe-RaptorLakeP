@@ -178,10 +178,12 @@ int main() {
       State s; Lease a; assert(initialize(io,s) && ok(acquire(io,s,a,bit(Domain::AUXB))));
       assert(ok(release(io,s,a)) && !(io.regs[0x45444]&8) && (io.regs[0x45444]&4) &&
           io.regs[0x45440]==8 && io.regs[0x4544C]==8); }
+    // A combo AUX well without an acknowledgement is kept (see the round 47 cases below), its request and PW1 held.
     { IO io; State s; Lease a; assert(initialize(io,s));io.failedEnable=4;
       auto r=acquire(io,s,a,bit(Domain::AUXB));
-      assert(r.status==Status::StateTimeout && r.domain==6 && s.faulted && !a.owner && !s.owned &&
-          !(io.regs[0x45444]&8) && !(io.regs[0x45404]&2)); }
+      assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXB) && r.stateWaitUs==StateWaitUs && !s.faulted && a.owner==&s &&
+          (s.owned&bit(Domain::AUXB)) && (io.regs[0x45444]&8) && (io.regs[0x45404]&2));
+      assert(ok(release(io,s,a)) && !(io.regs[0x45444]&8) && !(io.regs[0x45404]&2)); empty(s); }
     { IO io; State s; Lease a; assert(initialize(io,s));io.deny=0x45444;
       assert(acquire(io,s,a,bit(Domain::AUXB)).status==Status::Unavailable && io.writes.empty()); }
     // A domains are opt-in; old B callers retain their seven-domain mask.
@@ -217,5 +219,19 @@ int main() {
      State s;Lease a;assert(initialize(io,s,All));auto r=acquire(io,s,a,BootHDMIA);
      assert(r.status==Status::StateTimeout && r.domain==unsigned(Domain::DDIA) && io.time==1000);
      assert(!a.owner && !r.rollbackFailed && s.faulted && io.regs[DDI]==0xc);empty(s);}
+    // The combo AUX wells acknowledge in their own time (round 47: AUX A gave none within 1 ms after a real power
+    // loss). A missing acknowledgement keeps the request and the lease, counts the reference, records the domain and
+    // the wait, and faults nothing; the release still clears the request. PG and DDI wells stay strict (above).
+    {IO io;io.failedEnableReg=AUX;io.failedEnable=1;State s;Lease a;assert(initialize(io,s,All));
+     auto r=acquire(io,s,a,bit(Domain::AUXA));
+     assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXA) && r.stateWaitUs==StateWaitUs && io.time==StateWaitUs);
+     assert(a.owner==&s && s.refs[unsigned(Domain::AUXA)]==1 && s.refs[0]==1 && !s.faulted && (io.regs[AUX]&2) && !(io.regs[AUX]&1));
+     assert(ok(release(io,s,a)) && !(io.regs[AUX]&2));empty(s);}
+    {IO io;State s;Lease a;assert(initialize(io,s,All) && ok(acquire(io,s,a,bit(Domain::AUXA))) && ok(suspend(io,s)));
+     io.failedEnableReg=AUX;io.failedEnable=1;auto r=restore(io,s);
+     assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXA) && r.stateWaitUs==StateWaitUs && !s.suspended && !s.faulted && (s.owned&bit(Domain::AUXA)));
+     assert(ok(release(io,s,a)));empty(s);}
+    {IO io;State s;Lease a;assert(initialize(io,s,All));auto r=acquire(io,s,a,bit(Domain::AUXA));
+     assert(r.status==Status::Complete && !r.stateMissing && !r.stateWaitUs);assert(ok(release(io,s,a)));empty(s);}
     puts("PASS Display13 power requests: leases, suspend/restore without count duplication, borrowed requests, bounded faults. Synthetic IO only.");
 }
