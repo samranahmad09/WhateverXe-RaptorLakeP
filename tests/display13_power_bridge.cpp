@@ -141,9 +141,12 @@ int main() {
     { IO io; NativeBridge b; io.regs[0x45444]=0xC;
       assert(ok(b.begin(io)) && ok(b.getAUX(io,1)) && ok(b.putAUX(io,1)) && io.writes.empty() &&
           (b.state.borrowed&0x40) && io.regs[0x45444]==0xC); }
+    // A combo AUX well without an acknowledgement is kept (round 47, i915's own treatment): the lease, the references
+    // and the request stand, nothing faults, and the put still clears the request.
     { IO io; NativeBridge b;assert(ok(b.begin(io)));io.failAUX=true;
-      auto r=b.getAUX(io,1);assert(r.status==Status::StateTimeout && b.state.faulted && !b.auxRefs[1] &&
-          !b.auxLease[1].owner && b.state.refs[0]==2 && !b.state.refs[6] && !(io.regs[0x45444]&8)); }
+      auto r=b.getAUX(io,1);assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXB) && r.stateWaitUs==StateWaitUs &&
+          !b.state.faulted && b.auxRefs[1]==1 && b.auxLease[1].owner && b.state.refs[0]==3 && b.state.refs[6]==1 && (io.regs[0x45444]&8));
+      assert(ok(b.putAUX(io,1)) && !b.auxRefs[1] && !b.state.refs[6] && b.state.refs[0]==2 && !(io.regs[0x45444]&8)); }
     { IO io; NativeBridge b; assert(ok(b.begin(io)) && ok(b.getAUX(io,1)) && ok(suspend(io,b.state)));
       assert(b.getAUX(io,1).status==Status::NotReady && b.putAUX(io,1).status==Status::NotReady && b.auxRefs[1]==1);
       assert(ok(restore(io,b.state)) && ok(b.putAUX(io,1)) && !b.auxRefs[1]); }
@@ -172,7 +175,8 @@ int main() {
     {IO io;NativeBridge b;assert(ok(b.begin(io,0,7)));io.failDDIState=16;
      assert(b.getDDI(io,2).status==Status::StateTimeout && b.state.faulted && !b.ddiRefs[2]);}
     {IO io;NativeBridge b;assert(ok(b.begin(io,0,7)));io.failAUXState=16;
-     assert(b.getAUX(io,2).status==Status::StateTimeout && b.state.faulted && !b.auxRefs[2]);}
+     auto r=b.getAUX(io,2);assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXC) && !b.state.faulted && b.auxRefs[2]==1);
+     assert(ok(b.putAUX(io,2)) && !b.auxRefs[2]);}
     assert(nativeDomains(1)==415 && nativeDomains(2)==127 && nativeDomains(3)==511);
     assert(!nativeDomains(0) && nativeDomains(4)==1567 && !nativeDomains(UINT32_MAX));
     // Invalid port selection cannot initialize the bridge or touch hardware.
