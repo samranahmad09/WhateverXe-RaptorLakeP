@@ -34,9 +34,9 @@ processors, including the laptop's internal (eDP) panel.
 >   Alder Lake-P workarounds applied). Still open: the panel's link training fails about two seconds into every wake
 >   with all of that restored, and the plugin's own release gate then refused the native driver's tear-down of the
 >   DDI A well (fixed: a port-only release of stopped pipes proceeds). The current build records the port's registers
->   at boot, after the cold resume and at each power request, and offers two opt-in restores of boot state the power
->   loss takes, each in i915's resume order: the panel power sequencer's delays and the port PLL with its clock
->   select. A dispatch at the first instant of a wake into a device not yet decoding its registers panicked twice in
+>   at boot, after the cold resume, at each power request and every 25 ms through a wake's bring-up, restores the
+>   MBUS credit words on a cold resume, and keeps two opt-in restores (the panel power sequencer's delays, the port
+>   PLL with its clock select) that the native driver's own wake sequence makes redundant. A dispatch at the first instant of a wake into a device not yet decoding its registers panicked twice in
 >   a forcewake release; an opt-in guard skips those calls. The two-minute sleep entry is the graphics family's own
 >   sleep acknowledgement timing out. Opt-in flags: `-wex-rplp-wakelog`, `-wex-rplp-fwguard`, `-wex-rplp-coldinit`,
 >   `-wex-rplp-auxlane`, `-wex-rplp-coldpps`, `-wex-rplp-coldpll`.
