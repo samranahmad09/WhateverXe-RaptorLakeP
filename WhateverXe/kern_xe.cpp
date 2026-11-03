@@ -212,6 +212,44 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
   acknowledgeSleepWakeNotification(static_cast<IOPowerStateChangeNotification *>(argument)->powerRef);
  return kIOReturnSuccess;
 }
+// N97FBPortTrace: from every power-well restore, the panel port's registers every 25 ms for four seconds, in a thread
+// of its own (the native path's bring-up, the link training and its tear-down run inside that window, and no power
+// request sees the training itself). Header: schema, cold, start uptime ns, samples taken, interval us, the wake
+// count; then per sample: uptime ns, PP_STATUS, PP_CONTROL, DPLL0_ENABLE, DPCLKA_CFGCR0, DDI_BUF_CTL A, DP_TP_CTL A,
+// DP_TP_STATUS A, PORT_CL_DW10 A, PORT_CL_DW12 A, DDI_AUX_CTL A, PWR_WELL_CTL_DDI. Reads only; published twice on the
+// way and once at the end.
+constexpr unsigned rplpPortTraceSamples=160,rplpPortTraceWordsPerSample=12,rplpPortTraceHeader=8;
+constexpr uint32_t rplpPortTraceRegs[rplpPortTraceWordsPerSample-1] {0xC7200,0xC7204,0x46010,0x164280,0x64000,0x60540,0x60544,0x162028,0x162030,0x64010,0x45454};
+uint64_t rplpPortTrace[rplpPortTraceHeader+rplpPortTraceSamples*rplpPortTraceWordsPerSample];
+IOLock *rplpPortTraceLock;thread_t rplpPortTraceThread;
+uint32_t rplpPortTraceWanted;bool rplpPortTraceCold;volatile uint8_t *rplpPortTraceBar;
+void rplpPortTraceKick(volatile uint8_t *bar,bool cold) {   // the power-well restore, any context
+ if(!rplpPortTraceLock || !bar)return;
+ rplpPortTraceBar=bar;rplpPortTraceCold=cold;
+ __atomic_store_n(&rplpPortTraceWanted,1U,__ATOMIC_RELEASE);
+ IOLockWakeup(rplpPortTraceLock,&rplpPortTraceThread,true);
+}
+void rplpPortTraceWorker(void *,wait_result_t) {
+ for(;;) {
+  IOLockLock(rplpPortTraceLock);
+  while(!__atomic_load_n(&rplpPortTraceWanted,__ATOMIC_ACQUIRE))IOLockSleep(rplpPortTraceLock,&rplpPortTraceThread,THREAD_UNINT);
+  __atomic_store_n(&rplpPortTraceWanted,0U,__ATOMIC_RELEASE);
+  const auto bar=rplpPortTraceBar;const bool cold=rplpPortTraceCold;
+  IOLockUnlock(rplpPortTraceLock);
+  if(!bar)continue;
+  auto &t=rplpPortTrace;memset(t,0,sizeof(t));
+  t[0]=1;t[1]=cold;t[2]=rplpWakeNow();t[4]=25000;t[5]=rplpWakeLog[32];
+  for(unsigned s=0;s<rplpPortTraceSamples;++s) {
+   auto e=t+rplpPortTraceHeader+s*rplpPortTraceWordsPerSample;
+   e[0]=rplpWakeNow();
+   for(unsigned i=0;i+1<rplpPortTraceWordsPerSample;++i)e[1+i]=*reinterpret_cast<volatile uint32_t *>(bar+rplpPortTraceRegs[i]);
+   t[3]=s+1;
+   if(s==39 || s==79)IORegistryEntry::getRegistryRoot()->setProperty("N97FBPortTrace",t,sizeof(t));
+   IOSleep(25);
+  }
+  IORegistryEntry::getRegistryRoot()->setProperty("N97FBPortTrace",t,sizeof(t));
+ }
+}
 bool rplpWakeInWindow() {
  const auto phase=__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE);
  if(!phase)return false;
@@ -234,6 +272,9 @@ static void rplpWakeLogArm() {
  if(!checkKernelArgument("-wex-rplp-wakelog"))return;
  rplpWakeLogLock=IOLockAlloc();
  const bool thread=rplpWakeLogLock && kernel_thread_start(rplpWakeLogWriter,nullptr,&rplpWakeLogThread)==KERN_SUCCESS;
+ rplpPortTraceLock=IOLockAlloc();
+ if(rplpPortTraceLock && kernel_thread_start(rplpPortTraceWorker,nullptr,&rplpPortTraceThread)!=KERN_SUCCESS) {IOLockFree(rplpPortTraceLock);rplpPortTraceLock=nullptr;}
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPPortTraceArmed",rplpPortTraceLock!=nullptr);
  const bool ok=thread && registerPrioritySleepWakeInterest(rplpWakeLogHandler,nullptr,nullptr)!=nullptr;
  rplpWakeLogEnabled=ok;rplpWakeLog[1]=ok;
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeLogArmed",ok);
@@ -4659,6 +4700,11 @@ struct Display13FBPowerContext {
     // power loss (kern_rplp_port.hpp).
     uint64_t portBoot[RPLPPort::Words] {};bool portBootValid {};
     uint64_t powerRing[16*8] {},portRing[8*RPLPPort::Words] {};uint32_t ringNext {};
+    // Both rings as they stood at the first DDI release of a wake (the native path's tear-down after a failed link
+    // training, Codex Q45), so the requests before it survive whatever follows; cleared by the restore.
+    uint64_t powerRingFrozen[16*8] {},portRingFrozen[8*RPLPPort::Words] {};bool ringFrozen {};
+    // The MBUS credit words as the firmware left them (N97FBCreditBoot), restored on a cold resume.
+    uint64_t creditBoot[RPLPPort::Credits] {};bool creditBootValid {};
     volatile uintptr_t arbitrationWriterBase {}; // Qualified in sleepable engine context.
     IOLock *lock {};
     void *power {}, *controller {}, *access {};
@@ -9102,6 +9148,7 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	if(!cold && !c.portBootValid && acquired.status==Display13Power::Status::Complete && c.map && c.map->getVirtualAddress()) {
 		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
 		RPLPPort::snapshot(portIO,c.portBoot);c.portBoot[31]=rplpUptimeNs();c.portBootValid=true;portBootTaken=true;
+		RPLPPort::snapshotCredits(portIO,c.creditBoot);c.creditBootValid=true;
 	}
 	// After a real power loss the PLL may be off without this owner having stopped it: restart it at the last clock.
 	if(clock.status==Display13Clock::Status::Disabled && (c.clockStopped || cold) && c.resumeClockHz &&
@@ -9166,9 +9213,17 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	// (kern_rplp_port.hpp): -wex-rplp-coldpps rewrites the panel power sequencer's delays, -wex-rplp-coldpll re-enables the
 	// port's PLL and selects it for the port. N97FBColdPPS / N97FBColdPLL: schema, flag, reference valid, status, the eight
 	// record words. N97FBPortCold: the port's registers after them (the snapshot order, [31] uptime ns).
-	uint64_t portCold[RPLPPort::Words] {},ppsRecord[12] {1},pllRecord[12] {1};bool portColdTaken=false;
+	// N97FBColdMBUSCredits: schema, flag (-wex-rplp-coldinit), reference valid, status, then the twelve record words of
+	// RPLPPort::restoreCredits (the ABOX 0/1 and the three DBOX words back to the firmware's boot values where a power
+	// loss reset them; i915 writes the DBOX words in every modeset, the native path's own cold branch writes both).
+	uint64_t portCold[RPLPPort::Words] {},ppsRecord[12] {1},pllRecord[12] {1},creditRecord[16] {1};bool portColdTaken=false;
 	if(cold && c.map && c.map->getVirtualAddress()) {
 		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
+		creditRecord[1]=checkKernelArgument("-wex-rplp-coldinit");creditRecord[2]=c.creditBootValid;
+		if(creditRecord[1] && c.creditBootValid && acquired.status==Display13Power::Status::Complete) {
+			uint64_t r[12] {};creditRecord[3]=static_cast<uint32_t>(RPLPPort::restoreCredits(portIO,c.creditBoot,r));
+			for(unsigned i=0;i<12;++i)creditRecord[4+i]=r[i];
+		}
 		ppsRecord[1]=checkKernelArgument("-wex-rplp-coldpps");pllRecord[1]=checkKernelArgument("-wex-rplp-coldpll");
 		ppsRecord[2]=pllRecord[2]=c.portBootValid;
 		const bool powered=acquired.status==Display13Power::Status::Complete;
@@ -9205,10 +9260,13 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		coldRecord[17]=static_cast<uint32_t>(status);coldRecord[18]=c.engineEnabled;coldRecord[19]=static_cast<uint32_t>(acquired.status);
 		coldRecord[20]=static_cast<uint32_t>(clock.status);root->setProperty("N97FBColdResume",coldRecord,sizeof(coldRecord));
 	}
-	if(portBootTaken)root->setProperty("N97FBPortBoot",c.portBoot,sizeof(c.portBoot));
+	if(portBootTaken) {
+		root->setProperty("N97FBPortBoot",c.portBoot,sizeof(c.portBoot));root->setProperty("N97FBCreditBoot",c.creditBoot,sizeof(c.creditBoot));
+	}
 	if(portColdTaken) {
 		root->setProperty("N97FBPortCold",portCold,sizeof(portCold));
 		root->setProperty("N97FBColdPPS",ppsRecord,sizeof(ppsRecord));root->setProperty("N97FBColdPLL",pllRecord,sizeof(pllRecord));
+		root->setProperty("N97FBColdMBUSCredits",creditRecord,sizeof(creditRecord));
 	}
 	if(!record[26] && !root->getProperty("N97FBEngineFirstEmptyResume"))
 		root->setProperty("N97FBEngineFirstEmptyResume",record,sizeof(record));
@@ -9420,9 +9478,13 @@ void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	rw[22]=result.stateWaitUs;rw[23]=result.stateMissing;
 	rw[9]=waking;rw[10]=c.bridge.state.suspended;rw[11]=c.bridge.state.owned;
 	if(result.status!=Display13Power::Status::Complete)adlnFault(c.bridge.state.faulted,__LINE__);
+	c.ringFrozen=false;
 	display13FBPowerRecord(record,9,waking,result);IOLockUnlock(c.lock);
 	adlnPublishPowerRecord("N97FBPowerRestore",record);
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerRestoreWait",rw,sizeof(rw));
+	// The port trace runs from here through the native path's bring-up (N97FBPortTrace), cold or not.
+	if(c.map && c.map->getVirtualAddress() && c.map->getLength()==0x1000000)
+		rplpPortTraceKick(reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress()),cold);
 	if(result.status==Display13Power::Status::Complete) {c.coldResume=cold;wrapAlderLakeNEngineEnable(power);c.coldResume=false;}
 }
 
@@ -9740,7 +9802,7 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 	// us, PWR_WELL_CTL_AUX, PWR_WELL_CTL_DDI, PWR_WELL_CTL, DC_STATE_EN (reads after the operation), [12] the port's PHY
 	// CL_DW12 (combo ports A/B), [13] the port's AUX_CH_CTL after a completed AUX request, [14] the BIOS AUX copy 0x45440,
 	// [15] the BIOS DDI copy 0x45450.
-	uint64_t acquireWait[16] {1};
+	uint64_t acquireWait[16] {1};bool frozenNow=false;
 	bool previousQuiescing=false;uint32_t previousBlocked=0;
 	bool disableEngine=false;
 	IOLockLock(c.lock);
@@ -9879,6 +9941,10 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 				RPLPPort::snapshot(portIO,*reinterpret_cast<uint64_t (*)[RPLPPort::Words]>(p));p[30]=acquireWait[1];p[31]=t;
 			}
 			++c.ringNext;
+			if(operation==4 && !c.ringFrozen && rplpWakeInWindow()) {
+				memcpy(c.powerRingFrozen,c.powerRing,sizeof(c.powerRing));memcpy(c.portRingFrozen,c.portRing,sizeof(c.portRing));
+				c.ringFrozen=true;frozenNow=true;
+			}
 		}
 		if(releaseScope.held) {
 			auto &irq=display13FBIRQ;Display13FBIRQIO irqIO {irq.base};const auto saved=IOSimpleLockLockDisableInterrupt(irq.lock);
@@ -9913,6 +9979,10 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 		IORegistryEntry::getRegistryRoot()->setProperty("N97FBAcquireWait",acquireWait,sizeof(acquireWait));
 		IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerRing",c.powerRing,sizeof(c.powerRing));
 		IORegistryEntry::getRegistryRoot()->setProperty("N97FBPortRing",c.portRing,sizeof(c.portRing));
+	}
+	if(frozenNow) {
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerRingAtPutDDI",c.powerRingFrozen,sizeof(c.powerRingFrozen));
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBPortRingAtPutDDI",c.portRingFrozen,sizeof(c.portRingFrozen));
 	}
 	if(gateEvidence[0])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseGate",gateEvidence,sizeof(gateEvidence));
 	if(irqRelease[0])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseIRQ",irqRelease,sizeof(irqRelease));

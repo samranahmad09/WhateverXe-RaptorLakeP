@@ -120,6 +120,32 @@ int main() {
         assert(restorePLL(io,one,delay,r)==Status::Applied && r[0]==1 && io.writes[0].first==0x46014 && io.writes[1]==std::make_pair(0x16428CU,0x1111U) &&
             io.writes[2]==std::make_pair(0x164290U,0x2222U) && io.r[0x164280]==0x01000801 && io.r[0x46010]==0);
     }
+    {   // MBUS credits: a cold wake reset three of five words -> the boot values written back, the others left alone.
+        struct CIO {
+            std::map<uint32_t,uint32_t> r;std::vector<std::pair<uint32_t,uint32_t>> writes;uint32_t allones {~0U};
+            uint32_t read(uint32_t reg) {assert(r.count(reg));return reg==allones ? UINT32_MAX : r[reg];}
+            void write(uint32_t reg,uint32_t v) {assert(r.count(reg));writes.emplace_back(reg,v);r[reg]=v;}
+        } io;
+        for(auto reg:CreditRegs)io.r[reg]=0;
+        io.r[0x45038]=0x111010;io.r[0x45048]=0x111010;io.r[0x7003C]=0x4802;io.r[0x7103C]=0x4802;io.r[0x7203C]=0x4802;
+        uint64_t boot[Credits] {};snapshotCredits(io,boot);
+        assert(boot[0]==0x111010 && boot[2]==0x4802 && boot[4]==0x4802);
+        io.r[0x45038]=0;io.r[0x7003C]=0;io.r[0x7203C]=0;uint64_t r[12] {};
+        assert(restoreCredits(io,boot,r)==Status::Applied && r[10]==0x15 && r[11]==0 && io.writes.size()==3);
+        assert(io.writes[0]==std::make_pair(0x45038U,0x111010U) && io.writes[1]==std::make_pair(0x7003CU,0x4802U) && io.writes[2]==std::make_pair(0x7203CU,0x4802U));
+        assert(r[0]==0 && r[1]==0x111010 && r[5]==0x111010 && r[7]==0x4802 && r[9]==0x4802);
+        io.writes.clear();
+        assert(restoreCredits(io,boot,r)==Status::Skipped && io.writes.empty() && r[10]==0);
+        // An unreadable word is skipped and reported; an empty boot reference writes nothing; a write that does not take.
+        io.allones=0x45048;io.r[0x7103C]=0;
+        assert(restoreCredits(io,boot,r)==Status::Applied && r[10]==(1U<<3) && r[11]==(1U<<1) && io.writes.size()==1);
+        io.allones=~0U;io.writes.clear();
+        uint64_t none[Credits];for(auto &v:none)v=UINT32_MAX;
+        assert(restoreCredits(io,none,r)==Status::NoReference && io.writes.empty() && r[11]==0x1F);
+        struct Stuck : CIO {void write(uint32_t reg,uint32_t v) {writes.emplace_back(reg,v);if(reg!=0x7003C)r[reg]=v;}} stuck;
+        stuck.r=io.r;stuck.r[0x7003C]=0;
+        assert(restoreCredits(stuck,boot,r)==Status::Mismatch && r[10]==(1U<<2));
+    }
     puts("rplp_port ok");
     return 0;
 }
