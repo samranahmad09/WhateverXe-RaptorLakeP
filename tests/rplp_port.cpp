@@ -33,8 +33,8 @@ struct IO {
         }
     }
 };
-static unsigned waited;
-static void wait(unsigned us) {waited+=us;}
+static unsigned delayed; // `wait` would collide with the C library's wait() that macOS's stdlib declares.
+static void delay(unsigned us) {delayed+=us;}
 int main() {
     {   // A snapshot reads every register in order and marks its schema.
         IO io;io.booted();uint64_t w[Words] {};
@@ -71,53 +71,53 @@ int main() {
         assert(restorePPS(io,boot,r)==Status::Mismatch && r[6]==1 && r[4]==0);
     }
     {   // PLL: DPLL0 lost -> powered, programmed, enabled and locked, then selected and ungated for port A, in i915's order.
-        IO io;io.lost();uint64_t r[8] {};waited=0;
-        assert(restorePLL(io,boot,wait,r)==Status::Applied);
+        IO io;io.lost();uint64_t r[8] {};delayed=0;
+        assert(restorePLL(io,boot,delay,r)==Status::Applied);
         const std::vector<std::pair<uint32_t,uint32_t>> expected {
             {0x46010,PLLPowerEnable},{0x164284,0x01C001A5},{0x164288,0x00000488},{0x164B00,0x50000000|(3U<<25)},
             {0x46010,PLLPowerEnable|PLLPowerState|PLLEnable},{0x164280,0x01000C00},{0x164280,0x01000800}};
         assert(io.writes==expected);
         assert(r[0]==0 && r[1]==0 && r[2]==(PLLPowerEnable|PLLPowerState) && r[3]==(PLLPowerEnable|PLLPowerState|PLLEnable|PLLLock) &&
-            r[4]==0x01000C00 && r[5]==0x01000800 && r[6]==1 && r[7]==0 && waited==0);
+            r[4]==0x01000C00 && r[5]==0x01000800 && r[6]==1 && r[7]==0 && delayed==0);
         assert(io.r[0x46010]==(PLLEnable|PLLLock|PLLPowerEnable|PLLPowerState));
     }
     {   // PLL: the AFC startup field already right -> DIV0 not written; a reference without DIV0 -> DIV0 untouched.
         IO io;io.lost();io.r[0x164B00]=0x50000000|(3U<<25);uint64_t r[8] {};
-        assert(restorePLL(io,boot,wait,r)==Status::Applied && io.writes.size()==6);
+        assert(restorePLL(io,boot,delay,r)==Status::Applied && io.writes.size()==6);
         for(auto &w:io.writes)assert(w.first!=0x164B00);
         uint64_t noDiv[Words];for(unsigned i=0;i<Words;++i)noDiv[i]=boot[i];noDiv[PLL0Div0]=UINT32_MAX;
         IO other;other.lost();other.r[0x164B00]=0;
-        assert(restorePLL(other,noDiv,wait,r)==Status::Applied && other.r[0x164B00]==0);
+        assert(restorePLL(other,noDiv,delay,r)==Status::Applied && other.r[0x164B00]==0);
     }
     {   // PLL: running (the state survived, or the native path's own enable) -> nothing written; the reference's port
         // clock gated at boot -> nothing to recreate; a reference selecting DPLL4 -> unsupported, nothing written.
         IO io;io.booted();uint64_t r[8] {};
-        assert(restorePLL(io,boot,wait,r)==Status::Skipped && io.writes.empty());
+        assert(restorePLL(io,boot,delay,r)==Status::Skipped && io.writes.empty());
         IO lockedOnly;lockedOnly.lost();lockedOnly.r[0x46010]=PLLEnable;
-        assert(restorePLL(lockedOnly,boot,wait,r)==Status::Skipped && lockedOnly.writes.empty());
+        assert(restorePLL(lockedOnly,boot,delay,r)==Status::Skipped && lockedOnly.writes.empty());
         uint64_t gated[Words];for(unsigned i=0;i<Words;++i)gated[i]=boot[i];gated[ClockSelect]=0x01000C00;
         IO lost;lost.lost();
-        assert(restorePLL(lost,gated,wait,r)==Status::Skipped && lost.writes.empty());
+        assert(restorePLL(lost,gated,delay,r)==Status::Skipped && lost.writes.empty());
         uint64_t dpll4[Words];for(unsigned i=0;i<Words;++i)dpll4[i]=boot[i];dpll4[ClockSelect]=0x01000802;
-        assert(restorePLL(lost,dpll4,wait,r)==Status::Unsupported && lost.writes.empty() && r[0]==2);
+        assert(restorePLL(lost,dpll4,delay,r)==Status::Unsupported && lost.writes.empty() && r[0]==2);
         uint64_t off[Words];for(unsigned i=0;i<Words;++i)off[i]=boot[i];off[PLL0Enable]=PLLPowerEnable|PLLPowerState;
-        assert(restorePLL(lost,off,wait,r)==Status::NoReference && lost.writes.empty());
+        assert(restorePLL(lost,off,delay,r)==Status::NoReference && lost.writes.empty());
         uint64_t empty[Words] {};
-        assert(restorePLL(lost,empty,wait,r)==Status::NoReference && lost.writes.empty()); // An empty reference holds no PLL.
+        assert(restorePLL(lost,empty,delay,r)==Status::NoReference && lost.writes.empty()); // An empty reference holds no PLL.
         lost.allones=0x46010;
-        assert(restorePLL(lost,boot,wait,r)==Status::Unreadable && lost.writes.empty());
+        assert(restorePLL(lost,boot,delay,r)==Status::Unreadable && lost.writes.empty());
     }
     {   // PLL: the power state never comes -> stop after the power enable; the lock never comes -> stop before the clock select.
-        IO io;io.lost();io.neverPower=true;uint64_t r[8] {};waited=0;
-        assert(restorePLL(io,boot,wait,r)==Status::Timeout && r[7]==1 && io.writes.size()==1 && waited==1000);
-        IO lock;lock.lost();lock.neverLock=true;waited=0;
-        assert(restorePLL(lock,boot,wait,r)==Status::Timeout && r[7]==2 && lock.writes.size()==5 && waited==1000 && lock.r[0x164280]==0x01000C00);
+        IO io;io.lost();io.neverPower=true;uint64_t r[8] {};delayed=0;
+        assert(restorePLL(io,boot,delay,r)==Status::Timeout && r[7]==1 && io.writes.size()==1 && delayed==1000);
+        IO lock;lock.lost();lock.neverLock=true;delayed=0;
+        assert(restorePLL(lock,boot,delay,r)==Status::Timeout && r[7]==2 && lock.writes.size()==5 && delayed==1000 && lock.r[0x164280]==0x01000C00);
     }
     {   // PLL: DPLL1 selected at boot -> the DPLL1 registers.
         uint64_t one[Words];for(unsigned i=0;i<Words;++i)one[i]=boot[i];
         one[ClockSelect]=0x01000801;one[PLL1Enable]=PLLEnable|PLLLock|PLLPowerEnable|PLLPowerState;one[PLL1CFGCR0]=0x1111;one[PLL1CFGCR1]=0x2222;one[PLL1Div0]=UINT32_MAX;
         IO io;io.lost();uint64_t r[8] {};
-        assert(restorePLL(io,one,wait,r)==Status::Applied && r[0]==1 && io.writes[0].first==0x46014 && io.writes[1]==std::make_pair(0x16428CU,0x1111U) &&
+        assert(restorePLL(io,one,delay,r)==Status::Applied && r[0]==1 && io.writes[0].first==0x46014 && io.writes[1]==std::make_pair(0x16428CU,0x1111U) &&
             io.writes[2]==std::make_pair(0x164290U,0x2222U) && io.r[0x164280]==0x01000801 && io.r[0x46010]==0);
     }
     puts("rplp_port ok");
