@@ -179,8 +179,19 @@ int main() {
      mapped.reads.clear();assert(!quiescentPipes(mapped,state,1,0,2) && mapped.reads.empty());
      assert(!quiescentPipes(mapped,state,32,0,0) && mapped.reads.empty());
      assert(!quiescentPipes(mapped,state,32,0,8) && mapped.reads.empty());
-     assert(!quiescentPipes(mapped,state,32,1,2));
-     state.enabled=true;assert(!quiescentPipes(mapped,state,32,0,2));
+     // A port-only release of a stopped pipe proceeds with handlers or the
+     // master live; a running pipe, a pipe active in software, a release that
+     // includes PW1, or an enabled DDI buffer still refuse, each with its step.
+     uint32_t why=99;
+     assert(quiescentPipes(mapped,state,32,1,2,&why) && why==0);
+     assert(!quiescentPipes(live,state,32,1,2,&why) && why==3);
+     State software=state;software.active=3;assert(!quiescentPipes(mapped,software,32,1,2,&why) && why==3);
+     assert(!quiescentPipes(mapped,state,33,1,7,&why) && why==3);
+     auto buffered=mapped;buffered.r[0x64100]=Enable;assert(!quiescentPipes(buffered,state,32,1,2,&why) && why==6);
+     assert(!quiescentPipes(pending,state,32,1,2,&why) && why==4);
+     assert(!quiescentPipes(live,state,32,0,2,&why) && why==7); // No live interrupt: the running consumer is the step.
+     state.enabled=true;assert(quiescentPipes(mapped,state,32,0,2,&why) && why==0);
+     assert(!quiescentPipes(mapped,state,32,0,8,&why) && why==1);
     }
     // Explicitly qualified A+B pipes get separate IRQ banks/DSB completions.
     // The unchanged live call-site default must still reject this topology.
@@ -374,7 +385,8 @@ int main() {
      assert(!quiescent(a,state,128,0));a.r[0x64000]=0;
      assert(!quiescent(a,state,128,0));a.r[0x70008]=0;
      assert(quiescent(a,state,128,0));state.enabled=true;
-     assert(!quiescent(a,state,128,0));}
+     assert(quiescent(a,state,128,0)); // Port-only, every pipe stopped: proceeds with the master enabled.
+     state.active=1;assert(!quiescent(a,state,128,0));}
     {IO b;State state;b.r[0x70008]=0;assert(quiescent(b,state,32,0));
      for(auto reg:b.reads)assert(reg!=0x64000);}
     // Firmware left Type-C hotplug enabled in the north display HPD bank (0x4447c: TC1|TC2|TBT1|TBT2).

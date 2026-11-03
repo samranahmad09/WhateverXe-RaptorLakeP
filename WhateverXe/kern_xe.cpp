@@ -34,6 +34,7 @@
 #include "kern_display13_cursor.hpp"
 #include "kern_display13_dbuf.hpp"
 #include "kern_rplp_coldphy.hpp"
+#include "kern_rplp_port.hpp"
 #include "kern_display13_wm.hpp"
 #include "kern_display13_backlight.hpp"
 #include "kern_display13_ecbacklight.hpp"
@@ -4653,6 +4654,11 @@ struct Display13FBPowerContext {
     bool watermarkFaulted {};
     bool engineEnabled {};
     bool coldResume {}; // Set by the power restore after a real power loss for the engine enable that follows.
+    // The panel's port as the firmware left it (N97FBPortBoot, the first engine enable that is not a cold resume) and
+    // the last power requests with the port's state at each (N97FBPowerRing, N97FBPortRing), for a wake after a real
+    // power loss (kern_rplp_port.hpp).
+    uint64_t portBoot[RPLPPort::Words] {};bool portBootValid {};
+    uint64_t powerRing[16*8] {},portRing[8*RPLPPort::Words] {};uint32_t ringNext {};
     volatile uintptr_t arbitrationWriterBase {}; // Qualified in sleepable engine context.
     IOLock *lock {};
     void *power {}, *controller {}, *access {};
@@ -4666,6 +4672,12 @@ struct Display13FBPowerContext {
     uint64_t powerContext[24] {1}; // Bounded CPU-only execution-context evidence.
 };
 static Display13FBPowerContext display13FBPower;
+struct RPLPPortIO {
+	volatile uint8_t *bar;
+	uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}
+	void write(uint32_t r,uint32_t v) {*reinterpret_cast<volatile uint32_t *>(bar+r)=v;}
+};
+static uint64_t rplpUptimeNs() {uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&t);return t;}
 // AlderLakeN start bypasses the generic TGL framebuffer path and its power sampler.
 // Use the retained, uncached BAR owner. These GT mirrors require no forcewake,
 // mailbox transaction, MMIO write or native policy intervention.
@@ -9085,6 +9097,12 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	c.writes+=acquired.writes;
 	Display13FBClockIO clockIO {c.map};auto clock=Display13Clock::read(clockIO);
 	coldRecord[11]=static_cast<uint32_t>(clock.status);
+	// The port as the firmware left it, once, at the first engine enable that is not a cold resume (N97FBPortBoot).
+	bool portBootTaken=false;
+	if(!cold && !c.portBootValid && acquired.status==Display13Power::Status::Complete && c.map && c.map->getVirtualAddress()) {
+		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
+		RPLPPort::snapshot(portIO,c.portBoot);c.portBoot[31]=rplpUptimeNs();c.portBootValid=true;portBootTaken=true;
+	}
 	// After a real power loss the PLL may be off without this owner having stopped it: restart it at the last clock.
 	if(clock.status==Display13Clock::Status::Disabled && (c.clockStopped || cold) && c.resumeClockHz &&
 		!c.bridge.state.faulted && !c.bridge.state.suspended && !c.clockFaulted && !c.dbuf.updating &&
@@ -9143,6 +9161,27 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 			coldRecord[25]=rd(0x45130);coldRecord[26]=rd(0x45134);coldRecord[27]=rd(0x45140);coldRecord[28]=rd(0x45144);
 		}
 	}
+	// Round 48: with the wells, the clock, the buffers and the PHYs restored, the native path's link training still failed
+	// on every cold wake. Two opt-in restores of boot state a power loss takes, each verify-first and after i915's resume
+	// (kern_rplp_port.hpp): -wex-rplp-coldpps rewrites the panel power sequencer's delays, -wex-rplp-coldpll re-enables the
+	// port's PLL and selects it for the port. N97FBColdPPS / N97FBColdPLL: schema, flag, reference valid, status, the eight
+	// record words. N97FBPortCold: the port's registers after them (the snapshot order, [31] uptime ns).
+	uint64_t portCold[RPLPPort::Words] {},ppsRecord[12] {1},pllRecord[12] {1};bool portColdTaken=false;
+	if(cold && c.map && c.map->getVirtualAddress()) {
+		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
+		ppsRecord[1]=checkKernelArgument("-wex-rplp-coldpps");pllRecord[1]=checkKernelArgument("-wex-rplp-coldpll");
+		ppsRecord[2]=pllRecord[2]=c.portBootValid;
+		const bool powered=acquired.status==Display13Power::Status::Complete;
+		if(ppsRecord[1] && c.portBootValid && powered) {
+			uint64_t r[8] {};ppsRecord[3]=static_cast<uint32_t>(RPLPPort::restorePPS(portIO,c.portBoot,r));
+			for(unsigned i=0;i<8;++i)ppsRecord[4+i]=r[i];
+		}
+		if(pllRecord[1] && c.portBootValid && powered) {
+			uint64_t r[8] {};pllRecord[3]=static_cast<uint32_t>(RPLPPort::restorePLL(portIO,c.portBoot,[](unsigned us) {IODelay(us);},r));
+			for(unsigned i=0;i<8;++i)pllRecord[4+i]=r[i];
+		}
+		RPLPPort::snapshot(portIO,portCold);portCold[31]=rplpUptimeNs();portColdTaken=true;
+	}
 	c.engineEnabled=status==Display13DBUF::Status::Complete;
 	if(cold)adlnInvalidateWM(); // The watermark registers were reset too: the next arm verifies the plan again.
     // This method already holds a sleepable owner lock. Qualify immutable BAR
@@ -9165,6 +9204,11 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	if(cold) {
 		coldRecord[17]=static_cast<uint32_t>(status);coldRecord[18]=c.engineEnabled;coldRecord[19]=static_cast<uint32_t>(acquired.status);
 		coldRecord[20]=static_cast<uint32_t>(clock.status);root->setProperty("N97FBColdResume",coldRecord,sizeof(coldRecord));
+	}
+	if(portBootTaken)root->setProperty("N97FBPortBoot",c.portBoot,sizeof(c.portBoot));
+	if(portColdTaken) {
+		root->setProperty("N97FBPortCold",portCold,sizeof(portCold));
+		root->setProperty("N97FBColdPPS",ppsRecord,sizeof(ppsRecord));root->setProperty("N97FBColdPLL",pllRecord,sizeof(pllRecord));
 	}
 	if(!record[26] && !root->getProperty("N97FBEngineFirstEmptyResume"))
 		root->setProperty("N97FBEngineFirstEmptyResume",record,sizeof(record));
@@ -9689,7 +9733,7 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 		IOLockLock(c.lock);const bool enable=!c.engineEnabled && !c.bridge.state.suspended && !c.bridge.state.faulted;IOLockUnlock(c.lock);
 		if(enable)wrapAlderLakeNEngineEnable(power);
 	}
-	uint64_t record[32] {},check[21] {2,operation,domain},auxRecord[10] {},context[24] {},gateEvidence[8] {}; Display13Power::Result result;
+	uint64_t record[32] {},check[24] {3,operation,domain},auxRecord[10] {},context[24] {},gateEvidence[8] {}; Display13Power::Result result;
 	IOWorkLoop *acquiredGate=nullptr;
 	Display13FBIRQ::PowerReleaseScope releaseScope;uint64_t irqRelease[12] {};
 	// N97FBAcquireWait: schema, sequence, operation, domain, status, state wait us, domains without a state bit, fuse wait
@@ -9751,6 +9795,12 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 		}
 		const auto affected=Display13FBIRQ::affectedPipes(released,ddiA,ddiB,ddiC,tcPipes[0],tcPipes[1],tcPipes[2],tcPipes[3]);
 		check[16]=affected;check[17]=mapValid;check[18]=ddiA;check[19]=ddiB;check[20]=known;
+		// [21] the release gate's preconditions (bit 0 released, 1 gate ready, 2 DBUF not updating, 3 no busy watermark on an
+		// affected pipe, 4 IRQ owner, 5 entered, 6 not quiescing, 7 multi-output wiring), [22] the IRQ state at the gate
+		// (handlers, enabled << 16, active << 17), [23] the step the quiescence proof refused (round 48: the first fault
+		// was a refused port release after the failed link training, and these words did not exist).
+		check[21]=(released?1:0)|(gateReady?2:0)|(c.dbuf.updating?0:4)|((Display13WM::busyPipes(c.pipe,true)&affected)?0:8)|
+			(adlnIRQOwner(static_cast<IOService *>(c.controller))?16:0)|(Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring)?128:0);
 		bool gateReady=true;
 		if(released && Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring)) {
 			const bool bound=c.workLoop && Display13FBMemory::field<IOWorkLoop *>(c.controller,0xE00)==c.workLoop;
@@ -9769,6 +9819,7 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 			!(Display13WM::busyPipes(c.pipe,true)&affected) && adlnIRQOwner(static_cast<IOService *>(c.controller))) {
 			auto &irq=display13FBIRQ;Display13FBIRQIO irqIO {irq.base};
 			const auto saved=IOSimpleLockLockDisableInterrupt(irq.lock);
+			check[21]|=32|(irq.quiescing?0:64);check[22]=irq.handlers|(irq.state.enabled?1ULL<<16:0)|(uint64_t(irq.state.active&7)<<17);
 			if(Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring)) {
 				const auto queued=__atomic_load_n(reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(c.controller)+0xE08),__ATOMIC_ACQUIRE);
 				const auto aux=__atomic_load_n(reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(c.controller)+0xE0C),__ATOMIC_ACQUIRE);
@@ -9783,7 +9834,9 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 				irqRelease[9]=static_cast<uint32_t>(status);releaseAllowed=status==Display13FBIRQ::Status::Complete;
 				if(releaseScope.held) {irq.quiescing=true;irq.blockedPipes=affected;}
 			} else {
-				releaseAllowed=!irq.quiescing && Display13FBIRQ::quiescentPipes(irqIO,irq.state,released,irq.handlers,affected);
+				uint32_t why=0;
+				releaseAllowed=!irq.quiescing && Display13FBIRQ::quiescentPipes(irqIO,irq.state,released,irq.handlers,affected,&why);
+				check[23]=why;
 				if(releaseAllowed) {irq.quiescing=true;irq.blockedPipes=affected;}
 			}
 			IOSimpleLockUnlockEnableInterrupt(irq.lock,saved);
@@ -9814,6 +9867,19 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 				acquireWait[14]=rd(0x45440);acquireWait[15]=rd(0x45450);
 			}
 		}
+		// N97FBPowerRing (16 entries of 8: sequence, operation, domain, status, uptime ns, PWR_WELL_CTL_AUX, DDI, CTL) and
+		// N97FBPortRing (8 entries in kern_rplp_port.hpp's order, [30] sequence, [31] uptime ns): the last requests with the
+		// port's state at each, for a wake's sequence (round 48: only the last request survived in N97FBAcquireWait).
+		{
+			const auto t=rplpUptimeNs();auto e=c.powerRing+8*(c.ringNext%16);
+			e[0]=acquireWait[1];e[1]=operation;e[2]=domain;e[3]=acquireWait[4];e[4]=t;e[5]=acquireWait[8];e[6]=acquireWait[9];e[7]=acquireWait[10];
+			if(c.map && c.map->getVirtualAddress()) {
+				RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
+				auto p=c.portRing+RPLPPort::Words*(c.ringNext%8);
+				RPLPPort::snapshot(portIO,*reinterpret_cast<uint64_t (*)[RPLPPort::Words]>(p));p[30]=acquireWait[1];p[31]=t;
+			}
+			++c.ringNext;
+		}
 		if(releaseScope.held) {
 			auto &irq=display13FBIRQ;Display13FBIRQIO irqIO {irq.base};const auto saved=IOSimpleLockLockDisableInterrupt(irq.lock);
 			irqRelease[11]=releaseScope.parked;
@@ -9843,7 +9909,11 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 	IOLockUnlock(c.lock);
 	adlnPublishPowerRecord("N97FBPower",record);
 	if(display13TraceEnabled)IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerContext",context,sizeof(context));
-	if(acquireWait[1])IORegistryEntry::getRegistryRoot()->setProperty("N97FBAcquireWait",acquireWait,sizeof(acquireWait));
+	if(acquireWait[1]) {
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBAcquireWait",acquireWait,sizeof(acquireWait));
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerRing",c.powerRing,sizeof(c.powerRing));
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBPortRing",c.portRing,sizeof(c.portRing));
+	}
 	if(gateEvidence[0])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseGate",gateEvidence,sizeof(gateEvidence));
 	if(irqRelease[0])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseIRQ",irqRelease,sizeof(irqRelease));
     IORegistryEntry::getRegistryRoot()->setProperty("N97FBAUXPower",auxRecord,sizeof(auxRecord));

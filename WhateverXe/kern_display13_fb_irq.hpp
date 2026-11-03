@@ -386,26 +386,38 @@ template<class IO> Status hotplugOnly(IO &io,State &s,bool preservePipeStatus=fa
 }
 // The runtime supplies one mask to WM checks, this hardware proof and its
 // access block. Never silently derive a different DDI mapping inside the proof.
-template<class IO> bool quiescentPipes(IO &io,const State &s,uint32_t domains,unsigned handlers,uint32_t pipes) {
+// `why` (optional) receives the step that refused: 1 inputs, 2 master unreadable,
+// 3 live interrupts with an active domain, 4 pending pipe interrupt, 5 wells
+// unreadable, 6 DDI buffer enabled, 7 consumers running, 8 bank unmasked.
+template<class IO> bool quiescentPipes(IO &io,const State &s,uint32_t domains,unsigned handlers,uint32_t pipes,uint32_t *why=nullptr) {
+    auto refuse=[&](uint32_t step) {if(why)*why=step;return false;};
+    if(why)*why=0;
     const auto required=affectedPipes(domains,0,0,0,0,0,0,0);
-    if((pipes&~7U) || (pipes&required)!=required || ((domains&portPowerDomains()) && !pipes))return false;
+    if((pipes&~7U) || (pipes&required)!=required || ((domains&portPowerDomains()) && !pipes))return refuse(1);
     if(!domains)return true;
     const auto master=io.read(Master);
-    if(master==UINT32_MAX)return false;
+    if(master==UINT32_MAX)return refuse(2);
     // An inactive B/C well can be released while A keeps displaying. The
     // donor's temporary PG3 scope must not force the active HDMI pipe off.
     const bool active=(domains&1) || (domains&portPowerDomains()) || (pipes&s.active);
-    if(active && (handlers || s.enabled || (master&Enable)))return false;
-    if(master&(pipes<<16))return false;
-    const auto wells=io.read(Driver);if(wells==UINT32_MAX)return false;
+    // A port-only release (no PW1, no pipe well) whose affected pipes are
+    // verifiably stopped proceeds with native handlers or the master live: the
+    // tear-down after a failed link training releases the port with its
+    // interrupts registered, and refusing it latched the bridge before the
+    // native path could try again. Nothing displays on a stopped pipe.
+    const bool portOnly=!(domains&~portPowerDomains()),stopped=consumersStopped(io,pipes);
+    const bool idlePort=portOnly && stopped && !(pipes&s.active);
+    if(active && (handlers || s.enabled || (master&Enable)) && !idlePort)return refuse(3);
+    if(master&(pipes<<16))return refuse(4);
+    const auto wells=io.read(Driver);if(wells==UINT32_MAX)return refuse(5);
     for(unsigned port=0;port<7;++port)if(domains&(Display13Power::ddiDomain(port)|(port>=3?Display13Power::auxDomain(port):0))) {
         const auto ddi=io.read(0x64000+port*0x100);
-        if(ddi==UINT32_MAX || (ddi&Enable))return false;
+        if(ddi==UINT32_MAX || (ddi&Enable))return refuse(6);
     }
-    if(!consumersStopped(io,pipes))return false;
+    if(!stopped)return refuse(7);
     for(unsigned p=0;p<3;++p)if((pipes&(1U<<p)) && powered(wells,p)) {
         // No bank notification is unmasked for a domain about to disappear.
-        if(!active && (io.read(PipeIIR(p)+4)&~io.read(PipeIIR(p)-4)))return false;
+        if(!active && (io.read(PipeIIR(p)+4)&~io.read(PipeIIR(p)-4)))return refuse(8);
     }
     return true;
 }
