@@ -9795,12 +9795,6 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 		}
 		const auto affected=Display13FBIRQ::affectedPipes(released,ddiA,ddiB,ddiC,tcPipes[0],tcPipes[1],tcPipes[2],tcPipes[3]);
 		check[16]=affected;check[17]=mapValid;check[18]=ddiA;check[19]=ddiB;check[20]=known;
-		// [21] the release gate's preconditions (bit 0 released, 1 gate ready, 2 DBUF not updating, 3 no busy watermark on an
-		// affected pipe, 4 IRQ owner, 5 entered, 6 not quiescing, 7 multi-output wiring), [22] the IRQ state at the gate
-		// (handlers, enabled << 16, active << 17), [23] the step the quiescence proof refused (round 48: the first fault
-		// was a refused port release after the failed link training, and these words did not exist).
-		check[21]=(released?1:0)|(gateReady?2:0)|(c.dbuf.updating?0:4)|((Display13WM::busyPipes(c.pipe,true)&affected)?0:8)|
-			(adlnIRQOwner(static_cast<IOService *>(c.controller))?16:0)|(Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring)?128:0);
 		bool gateReady=true;
 		if(released && Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring)) {
 			const bool bound=c.workLoop && Display13FBMemory::field<IOWorkLoop *>(c.controller,0xE00)==c.workLoop;
@@ -9815,6 +9809,12 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 			}
 			gateEvidence[6]=gateReady;
 		}
+		// [21] the release gate's preconditions (bit 0 released, 1 gate ready, 2 DBUF not updating, 3 no busy watermark on an
+		// affected pipe, 4 IRQ owner, 5 entered, 6 not quiescing, 7 multi-output wiring), [22] the IRQ state at the gate
+		// (handlers, enabled << 16, active << 17), [23] the step the quiescence proof refused (round 48: the first fault
+		// was a refused port release after the failed link training, and these words did not exist).
+		check[21]=(released?1:0)|(gateReady?2:0)|(c.dbuf.updating?0:4)|((Display13WM::busyPipes(c.pipe,true)&affected)?0:8)|
+			(adlnIRQOwner(static_cast<IOService *>(c.controller))?16:0)|(Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring)?128:0);
 		if(released && gateReady && !c.dbuf.updating &&
 			!(Display13WM::busyPipes(c.pipe,true)&affected) && adlnIRQOwner(static_cast<IOService *>(c.controller))) {
 			auto &irq=display13FBIRQ;Display13FBIRQIO irqIO {irq.base};
