@@ -26,8 +26,9 @@ constexpr uint32_t Regs[] {
     0xA090,0xA094,0xA008,0xA024,0xA210,0x138060,0x138108
 };
 constexpr unsigned Count=sizeof(Regs)/sizeof(Regs[0]);
-// The record: the registers in that order, then uptime ns, when (0 boot, 1 after a cold restore, 2 the trace's end),
-// cold, and the wake generation.
+// The record: the registers in that order, then uptime ns, when (0 the first engine enable, 1 after a cold restore,
+// 2 the trace's end, 3 the accelerator's engine start returned, 4 will-sleep), cold | 2 when the three forcewake
+// domains were held through the native path's counted request for the reads, and the wake generation.
 constexpr unsigned Words=Count+4;
 template<class IO> void snapshot(IO &io,uint64_t *w,uint32_t when,uint32_t cold,uint64_t generation,uint64_t now) {
     for(unsigned i=0;i<Count;++i)w[i]=io.read(Regs[i]);

@@ -168,10 +168,85 @@ uint64_t rplpForceWakeWait[12] {1};
 constexpr unsigned rplpWakeSWIRQFirst=16,rplpWakeSWIRQLast=8;
 uint64_t rplpWakeSWIRQ[8+3*(rplpWakeSWIRQFirst+rplpWakeSWIRQLast)] {1};
 uint32_t rplpWakeSWIRQRing;
+// RPLPWakeForceWakeFirst: the first sixteen forcewake calls after will-power-on, six words each as in RPLPWakeLog
+// (the log's own ring keeps the last eight). RPLPWakeSubmits: the first sixteen submissions after will-power-on
+// (schema, count, kept; then per submission: uptime ns, the engine | flags << 8, the status page's tail word, the
+// streamer's 0x1C00 word). Round 52: with the device-ready wait the accelerator's first forcewake waited 8 ms and
+// proceeded, and still nothing of the GT was re-initialised; the sequence of its early wake work is the record now.
+constexpr unsigned rplpWakeFirstFWCount=16,rplpWakeSubmitFirst=16;
+uint64_t rplpWakeFirstFW[6*rplpWakeFirstFWCount];uint32_t rplpWakeFirstFWNext;
+uint64_t rplpWakeSubmits[8+4*rplpWakeSubmitFirst] {1};
+// RPLPWakePCI: the device's configuration space at will-sleep (words 4..11: vendor/device, command, BAR0 low/high,
+// BAR2 low/high, BAR4, PMCSR), at will-power-on before (12..19) and after (20..27) the optional restore; [1] the
+// flag, [2]/[3] the two uptimes, [28] the actions taken (1 D0 written, 2 BAR0, 4 BAR2, 8 BAR4, 16 the command
+// register, 32 the D3 settling wait), [29] the power management capability's offset, [31] uptime after. With
+// -wex-rplp-pciwake the plugin's priority sleep/wake handler, first in line at will-power-on, puts the device back
+// into D0 and rewrites the BARs and the command register from the sleep copy where they differ, so the accelerator's
+// own wake work (4 ms after the notice in rounds 51 and 52) reaches a device that decodes; without it the family's
+// own restore does the same about 20 ms later, after that work has run.
+constexpr unsigned rplpWakePCIWords=32;
+uint64_t rplpWakePCI[rplpWakePCIWords] {1};
+bool rplpPCIWakeEnabled;           // -wex-rplp-pciwake
+IOPCIDevice *rplpWakePCIDevice;    // the selected GPU, set at device selection
+// N97GTSleep: the GT's registers at will-sleep, with the forcewake domains held (kern_rplp_gt.hpp).
+uint64_t rplpGTSleep[RPLPGT::Words];bool rplpGTSleepValid;
+void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
 uint64_t rplpAuxLane[8] {1};       // N97FBAuxLane: schema, writes, last domain, last enable, before, after, calls with the flag off, unreadable
 void *rplpWakeStreamer;            // the render streamer, for its scheduling-paused word in the forcewake events
 uint64_t rplpWakeNow() {uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&t);return t;}
+// A GT snapshot through the accelerator's register window with the three forcewake domains requested through its own
+// counted entry for the reads (a read of a power-gated domain returns zero otherwise: round 52's trace-end snapshot
+// read every ring register as zero with no forcewake held, which decided nothing). Without the owner or its window
+// the record is zeros with the time and the reason.
+void rplpGTSnapshotAwake(void *owner,uint64_t *w,uint32_t when,uint32_t cold,uint64_t generation) {
+ auto bar=owner ? *reinterpret_cast<volatile uint8_t **>(static_cast<uint8_t *>(owner)+0x1240) : nullptr;
+ for(unsigned i=0;i<RPLPGT::Words;++i)w[i]=0;
+ w[RPLPGT::Count]=rplpWakeNow();w[RPLPGT::Count+1]=when;w[RPLPGT::Count+2]=cold;w[RPLPGT::Count+3]=generation;
+ if(!bar)return;
+ struct IO {volatile uint8_t *bar;uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}} io {bar};
+ const bool held=rplpGTForceWake && *reinterpret_cast<volatile uint32_t *>(bar+0xD84)!=UINT32_MAX;
+ if(held)rplpGTForceWake(owner,true,7);
+ RPLPGT::snapshot(io,w,when,cold|(held ? 2U : 0U),generation,rplpWakeNow());
+ if(held)rplpGTForceWake(owner,false,7);
+}
+// The device's configuration space (RPLPWakePCI above): eight words.
+unsigned rplpWakePCIPM() {
+ auto pci=rplpWakePCIDevice;if(!pci)return 0;
+ unsigned ptr=pci->configRead8(0x34)&0xFCU;
+ for(unsigned i=0;i<48 && ptr>=0x40;++i) {
+  const auto id=pci->configRead8(ptr);
+  if(id==1)return ptr;
+  if(id==0xFF)return 0;
+  ptr=pci->configRead8(ptr+1)&0xFCU;
+ }
+ return 0;
+}
+void rplpWakePCIRead(uint64_t *w,unsigned pm) {
+ auto pci=rplpWakePCIDevice;
+ w[0]=pci->configRead32(0);w[1]=pci->configRead16(4);w[2]=pci->configRead32(0x10);w[3]=pci->configRead32(0x14);
+ w[4]=pci->configRead32(0x18);w[5]=pci->configRead32(0x1C);w[6]=pci->configRead32(0x20);w[7]=pm ? pci->configRead16(pm+4) : UINT32_MAX;
+}
+void rplpWakePCISleep() {
+ if(!rplpWakePCIDevice)return;auto &p=rplpWakePCI;
+ p[29]=rplpWakePCIPM();p[2]=rplpWakeNow();rplpWakePCIRead(p+4,static_cast<unsigned>(p[29]));
+}
+void rplpWakePCIWake() {
+ if(!rplpWakePCIDevice)return;auto &p=rplpWakePCI;auto pci=rplpWakePCIDevice;
+ const auto pm=static_cast<unsigned>(p[29]);
+ p[1]=rplpPCIWakeEnabled;p[3]=rplpWakeNow();rplpWakePCIRead(p+12,pm);
+ uint64_t actions=0;
+ // Only the device read at will-sleep, and only what differs from that copy: D0 first (and the settling time the
+ // specification gives a device leaving D3), the 64-bit BARs high word first, the command register last.
+ if(rplpPCIWakeEnabled && p[2] && p[12]==p[4] && p[4]!=UINT32_MAX) {
+  if(pm && p[19]!=UINT32_MAX && (p[19]&3U)) {pci->configWrite16(pm+4,static_cast<uint16_t>(p[19]&~3ULL));IOSleep(10);actions|=1|32;}
+  if(p[14]!=p[6] || p[15]!=p[7]) {pci->configWrite32(0x14,static_cast<uint32_t>(p[7]));pci->configWrite32(0x10,static_cast<uint32_t>(p[6]));actions|=2;}
+  if(p[16]!=p[8] || p[17]!=p[9]) {pci->configWrite32(0x1C,static_cast<uint32_t>(p[9]));pci->configWrite32(0x18,static_cast<uint32_t>(p[8]));actions|=4;}
+  if(p[18]!=p[10]) {pci->configWrite32(0x20,static_cast<uint32_t>(p[10]));actions|=8;}
+  if((p[13]&7U)!=(p[5]&7U)) {pci->configWrite16(4,static_cast<uint16_t>(p[5]));actions|=16;}
+ }
+ rplpWakePCIRead(p+20,pm);p[28]=actions;p[31]=rplpWakeNow();
+}
 void rplpWakeLogPublish(bool nvram) {   // thread context only
  __atomic_fetch_add(&rplpWakeLog[40],1ULL,__ATOMIC_RELAXED);rplpWakeLog[41]=rplpWakeNow();
  if(auto a=static_cast<uint8_t *>(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE))) {
@@ -182,6 +257,10 @@ void rplpWakeLogPublish(bool nvram) {   // thread context only
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeLog",data);
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeWait",rplpForceWakeWait,sizeof(rplpForceWakeWait));
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeSWIRQ",rplpWakeSWIRQ,sizeof(rplpWakeSWIRQ));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeForceWakeFirst",rplpWakeFirstFW,sizeof(rplpWakeFirstFW));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeSubmits",rplpWakeSubmits,sizeof(rplpWakeSubmits));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakePCI",rplpWakePCI,sizeof(rplpWakePCI));
+ if(rplpGTSleepValid)IORegistryEntry::getRegistryRoot()->setProperty("N97GTSleep",rplpGTSleep,sizeof(rplpGTSleep));
  if(nvram && __atomic_load_n(&rplpWakeLog[39],__ATOMIC_RELAXED)<rplpWakeNVRAMPerWake)
   if(auto options=IORegistryEntry::fromPath("/options",gIODTPlane)) {
    __atomic_fetch_add(&rplpWakeLog[39],1ULL,__ATOMIC_RELAXED);
@@ -216,10 +295,14 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
    for(unsigned i=8;i<=10;++i)rplpWakeLog[i]=0;
    for(unsigned i=33;i<rplpWakeWords;++i)rplpWakeLog[i]=0;
    memset(rplpWakeSWIRQ,0,sizeof(rplpWakeSWIRQ));rplpWakeSWIRQ[0]=1;__atomic_store_n(&rplpWakeSWIRQRing,0U,__ATOMIC_RELEASE);
+   memset(rplpWakeFirstFW,0,sizeof(rplpWakeFirstFW));__atomic_store_n(&rplpWakeFirstFWNext,0U,__ATOMIC_RELEASE);
+   memset(rplpWakeSubmits,0,sizeof(rplpWakeSubmits));rplpWakeSubmits[0]=1;
+   memset(rplpWakePCI,0,sizeof(rplpWakePCI));rplpWakePCI[0]=1;rplpWakePCISleep();
+   rplpGTSnapshotAwake(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE),rplpGTSleep,4,0,rplpWakeLog[32]);rplpGTSleepValid=true;
    __atomic_store_n(&rplpWakeEngineReturned,0U,__ATOMIC_RELEASE);__atomic_store_n(&rplpWakeForceWakeSeq,0U,__ATOMIC_RELEASE);
    rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);nvram=true;break;
   case kIOMessageSystemWillPowerOn:
-   rplpWakeLog[4]=now;++rplpWakeLog[32];
+   rplpWakeLog[4]=now;++rplpWakeLog[32];rplpWakePCIWake();
    __atomic_store_n(&rplpWakePhase,2U,__ATOMIC_RELEASE);nvram=true;break;
   case kIOMessageSystemHasPoweredOn: rplpWakeLog[5]=now;rplpWakeWindowEnd=now+60000000000ULL;nvram=true;break;
   default: break;
@@ -266,10 +349,15 @@ void rplpPortTraceWorker(void *,wait_result_t) {
    IOSleep(25);
   }
   IORegistryEntry::getRegistryRoot()->setProperty("N97FBPortTrace",t,sizeof(t));
-  // N97GTWake: the GT's registers four seconds after the restore (kern_rplp_gt.hpp, reads only).
+  // N97GTWake: the GT's registers four seconds after the restore, with the forcewake domains held through the
+  // accelerator's counted entry when the accelerator is known (kern_rplp_gt.hpp, reads only).
   {
-   struct GTIO {volatile uint8_t *bar;uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}} gtIO {bar};
-   uint64_t g[RPLPGT::Words];RPLPGT::snapshot(gtIO,g,2,cold,rplpWakeLog[32],rplpWakeNow());
+   uint64_t g[RPLPGT::Words];
+   if(auto owner=__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE))rplpGTSnapshotAwake(owner,g,2,cold,rplpWakeLog[32]);
+   else {
+    struct GTIO {volatile uint8_t *bar;uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}} gtIO {bar};
+    RPLPGT::snapshot(gtIO,g,2,cold,rplpWakeLog[32],rplpWakeNow());
+   }
    IORegistryEntry::getRegistryRoot()->setProperty("N97GTWake",g,sizeof(g));
   }
  }
@@ -293,6 +381,8 @@ static void rplpWakeLogArm() {
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeGuardArmed",rplpForceWakeGuardEnabled);
  rplpForceWakeWaitEnabled=checkKernelArgument("-wex-rplp-fwwait");
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeWaitArmed",rplpForceWakeWaitEnabled);
+ rplpPCIWakeEnabled=checkKernelArgument("-wex-rplp-pciwake");
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPPCIWakeArmed",rplpPCIWakeEnabled);
  rplpAuxLaneEnabled=checkKernelArgument("-wex-rplp-auxlane");
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPAuxLaneArmed",rplpAuxLaneEnabled);
  if(!checkKernelArgument("-wex-rplp-wakelog"))return;
@@ -340,6 +430,18 @@ static void rplpWakeLogSWIRQ(void *streamer,int count) {
  s[7]=n<rplpWakeSWIRQFirst ? n+1 : rplpWakeSWIRQFirst+rplpWakeSWIRQLast;
  if(n<rplpWakeSWIRQFirst || !(n&4095))rplpWakeLogKick(false);
 }
+// One submission of a wake (RPLPWakeSubmits above): the first sixteen after will-power-on.
+static void rplpWakeLogSubmit(void *streamer,uint32_t flags) {
+ if(!rplpWakeLogEnabled || !streamer || !rplpWakeWaking())return;
+ auto &s=rplpWakeSubmits;const auto n=__atomic_fetch_add(&s[1],1ULL,__ATOMIC_RELAXED);
+ if(n>=rplpWakeSubmitFirst)return;
+ auto x=static_cast<uint8_t *>(streamer);
+ auto descriptor=*reinterpret_cast<uint8_t **>(x+0x28);auto hwsp=*reinterpret_cast<volatile uint8_t **>(x+0x68);
+ auto e=&s[8+4*n];e[0]=rplpWakeNow();e[1]=uint64_t(descriptor ? descriptor[0] : 0xFFU)|uint64_t(flags)<<8;
+ e[2]=hwsp ? *reinterpret_cast<volatile uint32_t *>(hwsp+0xBC) : UINT32_MAX;
+ uint32_t w;memcpy(&w,x+0x1C00,sizeof(w));e[3]=w;
+ s[2]=n+1;rplpWakeLogKick(false);
+}
 // The guard skipped a native forcewake call: counted in word 46, and the record goes to NVRAM at once.
 static void rplpWakeLogGuardSkip() {
  if(!rplpWakeLogEnabled)return;
@@ -372,6 +474,10 @@ static uint64_t *rplpWakeLogForceWake(void *owner,bool enable,unsigned domains) 
  // Bit 16: the render streamer's scheduling-paused word (a plain field, not MMIO), the native dispatch gate (Codex Q42.1).
  if(auto st=static_cast<uint8_t *>(__atomic_load_n(&rplpWakeStreamer,__ATOMIC_ACQUIRE)))e[1]|=uint64_t(*reinterpret_cast<volatile uint32_t *>(st+0x1C00)&1U)<<16;
  e[5]=g|uint64_t(__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))<<32;
+ if(waking) {
+  const auto f=__atomic_fetch_add(&rplpWakeFirstFWNext,1U,__ATOMIC_RELAXED);
+  if(f<rplpWakeFirstFWCount)memcpy(&rplpWakeFirstFW[6*f],e,6*sizeof(uint64_t));
+ }
  rplpWakeLogKick(waking || allOnes);
  return e;
 }
@@ -4596,7 +4702,7 @@ void XE::processKernel(KernelPatcher &patcher, DeviceInfo *info) {
 	auto physicalGPU = OSDynamicCast(IOPCIDevice, info->videoBuiltin);
 	selectProfile(XELP::deviceProfile(physicalGPU));
     if(!xeProfile.admitted())return;
-    xelpSelectedGPU=physicalGPU;xelpSelectedProfile=xeProfile;
+    xelpSelectedGPU=physicalGPU;xelpSelectedProfile=xeProfile;rplpWakePCIDevice=physicalGPU;
 	if (adlnDetected) {
         xelpReadFirmware(physicalGPU);
         tglDeviceId=physicalGPU->configRead16(2);
@@ -12988,6 +13094,12 @@ bool XE::wrapTGLAcceleratorEngine(IOService *that) {
 	tglObserveAccelerator(that, 6, false, 0, 0);
 	const bool result = FunctionCast(wrapTGLAcceleratorEngine, callbackXE->orgTGLAcceleratorEngine)(that);
 	tglObserveAccelerator(that, 6, true, result, 0);
+	// N97GTEngineStart: the GT's registers as the accelerator's engine start leaves them (the reference a wake is read
+	// against; the first engine enable's snapshot predates the accelerator), with the forcewake domains held.
+	{
+		uint64_t g[RPLPGT::Words];rplpGTSnapshotAwake(that,g,3,0,rplpWakeLog[32]);
+		IORegistryEntry::getRegistryRoot()->setProperty("N97GTEngineStart",g,sizeof(g));
+	}
 	tglFBIRQEnd(irq,result);
 	if (tglHost.owner==that) tglHostPublish();
 	rplpWakeScope.result=result;
@@ -13279,6 +13391,7 @@ bool XE::installTGLCSB12(KernelPatcher &patcher,size_t index,mach_vm_address_t a
   auto p=patcher.solveSymbol<mach_vm_address_t>(index,wake[i],address,size);
   ok=ok && p==address+wakeOffsets[i];tglCSBForceWake[i]=reinterpret_cast<TGLCSBForceWake>(p);
  }
+ if(ok)rplpGTForceWake=tglCSBForceWake[0];
  // Both native TGL and Display13 filters can dispatch GT submission in IRQ.
  // Qualify the common counted entry before installing any CSB submission hooks.
  // Keep its native refcounts/client/ACK; do not substitute the uncounted client.
@@ -14077,6 +14190,7 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
  auto x=static_cast<uint8_t *>(streamer); uint32_t n=arrsize(tglHost.submit);
  if (tglHost.owner && *reinterpret_cast<void **>(x+0x10)==tglHost.owner) {
   n=__sync_fetch_and_add(&tglHost.submits,1);__atomic_store_n(&rplpWakeStreamer,streamer,__ATOMIC_RELEASE);rplpWakeLogCount(RPLPWakeSubmit);
+  rplpWakeLogSubmit(streamer,flags);
  }
  if (renderWakeOwner) {
   if (n<arrsize(tglHost.submit)) {
