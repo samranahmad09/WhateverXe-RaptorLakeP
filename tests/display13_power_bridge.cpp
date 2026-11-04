@@ -247,5 +247,31 @@ int main() {
      auto r=b.getAUX(io,0);assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXA) && !b.state.faulted &&
         b.auxRefs[0]==1 && b.auxLease[0].owner && b.auxRefs[1]==1 && b.auxLease[1].owner && io.regs[AUX]==14);
      assert(ok(b.putAUX(io,0)) && !b.auxRefs[0] && b.auxRefs[1]==1 && io.regs[AUX]==12);}
+    // A standing AUX reference (holdAUX): taken over the firmware's request at boot without a write, invisible to the
+    // native counts, it keeps the native path's get/put from touching the well, and a restore after a power loss
+    // recreates the request; refused before begin, for an unselected port and when already held.
+    {IO io;io.regs[0x45444]=3;NativeBridge b;
+     assert(b.holdAUX(io,0).status==Status::NotReady);
+     assert(ok(b.begin(io,0,1)) && (b.state.borrowed&bit(Domain::AUXA)) && !b.state.refs[8]);io.writes.clear();
+     assert(b.holdAUX(io,1).status==Status::InvalidDomains);
+     assert(ok(b.holdAUX(io,0)) && io.writes.empty() && b.state.refs[8]==1 && b.auxStandingPorts==1 && b.auxStanding[0].owner &&
+            !b.nativeAUXRefs(0) && !(b.state.owned&bit(Domain::AUXA)) && io.regs[0x45444]==3);
+     assert(b.holdAUX(io,0).status==Status::Unbalanced && b.state.refs[8]==1);
+     assert(ok(b.getAUX(io,0)) && b.auxRefs[0]==1 && b.state.refs[8]==2 && io.writes.empty());
+     assert(ok(b.putAUX(io,0)) && !b.auxRefs[0] && b.state.refs[8]==1 && io.writes.empty() && io.regs[0x45444]==3);
+     uint8_t p[0x80] {},ctl[0xC60] {};*reinterpret_cast<void **>(ctl+0xC8)=p;*reinterpret_cast<void **>(ctl+0xC40)=ctl;
+     assert(publishObject(b,p,sizeof(p),ctl,sizeof(ctl)) && !*reinterpret_cast<uint32_t *>(p+0x54));
+     // Sleep: the borrowed request is not ours to clear; the power loss clears it; the restore recreates it as ours.
+     assert(ok(suspend(io,b.state)) && io.regs[0x45444]==3 && b.state.refs[8]==1);
+     io.regs[0x45444]=0;io.regs[0x45454]=0;io.regs[0x45404]=0;io.writes.clear();
+     assert(ok(restore(io,b.state)) && (io.regs[0x45444]&3)==3 && (b.state.owned&bit(Domain::AUXA)) && b.state.refs[8]==1);
+     io.writes.clear();
+     assert(ok(b.getAUX(io,0)) && ok(b.putAUX(io,0)) && io.writes.empty() && (io.regs[0x45444]&3)==3 && b.state.refs[8]==1);}
+    // Without the firmware's request the standing reference makes the request itself and tolerates a missing state bit.
+    {IO io;NativeBridge b;io.failAUXState=1;
+     assert(ok(b.begin(io,0,1)) && !(b.state.borrowed&bit(Domain::AUXA)));io.writes.clear();
+     auto r=b.holdAUX(io,0);
+     assert(r.status==Status::Complete && r.stateMissing==bit(Domain::AUXA) && r.writes==1 && (io.regs[0x45444]&2) && !(io.regs[0x45444]&1) &&
+            (b.state.owned&bit(Domain::AUXA)) && b.state.refs[8]==1 && !b.state.faulted);}
     puts("PASS native PowerWell bridge: PG ABI, explicit A/B/dual admission, independent DDI/AUX refs, boot protection and fault retention. Synthetic IO only.");
 }

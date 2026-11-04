@@ -37,6 +37,15 @@ struct NativeBridge {
     State state;
     Lease pgLease[4], ddiLease[7], auxLease[7];
     uint32_t pgRefs[4] {}, ddiRefs[7] {}, auxRefs[7] {};
+    // A standing reference on a port's AUX IO well (holdAUX, -wex-rplp-auxstanding). The firmware's request found set
+    // at boot had no reference in this object, so a cold resume's restore recreated every other boot-time request and
+    // not that one; the native path's per-transaction get/put then toggled the well physically, and once it had
+    // powered down during a wake's link bring-up it never acknowledged again (round 50), while at boot the standing
+    // request kept it up through the same transactions. With the reference the restore recreates the request after a
+    // power loss and the native path's requests only count, as they did at boot. Linux's i915 holds the AUX power
+    // domain of a DisplayPort encoder for as long as its link is up. Never part of the native 5-slot accounting.
+    Lease auxStanding[7];
+    uint32_t auxStandingPorts {};
     uint32_t selectedPorts {2};
     unsigned bootPort {1}; // Boot pipe remains A until path admission is generalized.
     bool begun {};
@@ -163,6 +172,15 @@ struct NativeBridge {
             if (r.status != Status::Complete) return r;
         }
         --auxRefs[port]; r.status = Status::Complete;
+        return r;
+    }
+    template<class IO> Result holdAUX(IO &io, unsigned port) {
+        Result r;
+        if (!begun || state.faulted || state.suspended) return r;
+        if (!acceptsPort(port)) { r.status = Status::InvalidDomains; return r; }
+        if (auxStanding[port].owner) { r.status = Status::Unbalanced; return r; }
+        r = acquire(io,state,auxStanding[port],auxDomain(port));
+        if (r.status == Status::Complete) auxStandingPorts |= 1U << port;
         return r;
     }
     // Native boot allocation skips getPG, while free always puts PG. Transfer

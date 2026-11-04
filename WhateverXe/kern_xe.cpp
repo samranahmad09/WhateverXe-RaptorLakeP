@@ -4700,12 +4700,13 @@ struct Display13FBPowerContext {
     // the last power requests with the port's state at each (N97FBPowerRing, N97FBPortRing), for a wake after a real
     // power loss (kern_rplp_port.hpp).
     uint64_t portBoot[RPLPPort::Words] {};bool portBootValid {};
-    uint64_t powerRing[32*8] {},portRing[12*RPLPPort::Words] {};uint32_t ringNext {};
+    static constexpr unsigned RingWords=16;
+    uint64_t powerRing[32*RingWords] {},portRing[12*RPLPPort::Words] {};uint32_t ringNext {};
     // Both rings as they stood at the first DDI release of a wake (the native path's tear-down after a failed link
     // training, Codex Q45), so the requests before it survive whatever follows; cleared by the restore.
-    uint64_t powerRingFrozen[32*8] {},portRingFrozen[12*RPLPPort::Words] {};bool ringFrozen {};
-    // The combo PHYs' words as the firmware left them (N97FBPHYBoot, kern_rplp_coldphy.hpp), recreated on a cold resume
-    // with -wex-rplp-coldphyboot.
+    uint64_t powerRingFrozen[32*RingWords] {},portRingFrozen[12*RPLPPort::Words] {};bool ringFrozen {};
+    // The combo PHYs' words as the firmware left them (N97FBPHYFirmware, kern_rplp_coldphy.hpp), recreated on a cold
+    // resume with -wex-rplp-coldphyboot.
     uint64_t phyBoot[RPLPColdPHY::Count*RPLPColdPHY::BootWords] {};bool phyBootValid {};
     // The MBUS credit words as the firmware left them (N97FBCreditBoot), restored on a cold resume.
     uint64_t creditBoot[RPLPPort::Credits] {};bool creditBootValid {};
@@ -5010,8 +5011,8 @@ struct Display13FBPowerIO {
 		return *reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress()+r);
 	}
 	// -wex-rplp-auxlane (experiment, Codex Q43): the combo PHY's AUX lane enable, CL_DW12 bit 0 (PHY A 0x162030 for AUX A,
-	// PHY B 0x6C030 for AUX B), set after the AUX request and cleared before its release, as the native driver does and
-	// i915 does on Ice Lake only. Without the flag the call only counts. N97FBAuxLane keeps the last operation.
+	// PHY B 0x6C030 for AUX B), set after the AUX request and cleared once its release has taken, as the native driver
+	// does and i915 does on Ice Lake only. Without the flag the call only counts. N97FBAuxLane keeps the last operation.
 	void auxLane(unsigned d,bool enable) {
 		const uint32_t base=d==8 ? 0x162000U : d==6 ? 0x6C000U : 0U;
 		if(!base || !map || !map->getVirtualAddress() || map->getLength()!=0x1000000)return;
@@ -9270,7 +9271,7 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	}
 	if(portBootTaken) {
 		root->setProperty("N97FBPortBoot",c.portBoot,sizeof(c.portBoot));root->setProperty("N97FBCreditBoot",c.creditBoot,sizeof(c.creditBoot));
-		root->setProperty("N97FBPHYBoot",c.phyBoot,sizeof(c.phyBoot));
+		root->setProperty("N97FBPHYFirmware",c.phyBoot,sizeof(c.phyBoot));
 	}
 	if(portColdTaken) {
 		root->setProperty("N97FBPortCold",portCold,sizeof(portCold));
@@ -9454,8 +9455,8 @@ static void rplpColdPrerequisites(uint64_t *rw) {
 		uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}
 		void write(uint32_t r,uint32_t v) {*reinterpret_cast<volatile uint32_t *>(bar+r)=v;}
 	} phyIO {bar};
-	// -wex-rplp-coldphyboot: the firmware's own PHY words (N97FBPHYBoot, the first engine enable) in place of i915's table
-	// and the common-lane bits a power loss clears written back (kern_rplp_coldphy.hpp init with a boot reference).
+	// -wex-rplp-coldphyboot: the firmware's own PHY words (N97FBPHYFirmware, the first engine enable) in place of i915's
+	// table and the common-lane bits a power loss clears written back (kern_rplp_coldphy.hpp init with a boot reference).
 	const bool phyBoot=checkKernelArgument("-wex-rplp-coldphyboot") && c.phyBootValid;
 	uint64_t phy[2+RPLPColdPHY::Count*(RPLPColdPHY::Words+1)] {phyBoot ? 2U : 1U,RPLPColdPHY::Count};
 	for(unsigned i=0;i<RPLPColdPHY::Count;++i) {
@@ -9768,6 +9769,21 @@ void XE::wrapAlderLakeNPowerInit(void *power,void *controller) {
 			}
 			if(boot)result=c.bridge.begin(io,bootPort,Display13FBTopology::policyPorts(callbackXE->adlnHDMIWiring,xelpPanelPolicy()));
 			else {result.status=Display13Power::Status::InvalidDomains;adlnFault(c.bridge.state.faulted,__LINE__);}
+			// -wex-rplp-auxstanding: a standing reference on the boot port's AUX IO well (kern_display13_power_bridge.hpp
+			// holdAUX), so that a power-well restore after a real power loss recreates the request the firmware had left set.
+			// N97FBAUXStanding: schema, port, status, the request found set at boot, PWR_WELL_CTL_AUX after, the bridge's
+			// references on the well, writes, the state wait us | the domains without a state bit << 32.
+			if(result.status==Display13Power::Status::Complete && checkKernelArgument("-wex-rplp-auxstanding")) {
+				uint64_t standing[8] {1,bootPort};
+				standing[3]=(c.bridge.state.borrowed&Display13Power::auxDomain(bootPort)) ? 1 : 0;
+				const auto held=c.bridge.holdAUX(io,bootPort);
+				standing[2]=static_cast<uint32_t>(held.status);standing[6]=held.writes;
+				standing[4]=io.read(Display13Power::AUX);
+				if(Display13Power::auxDomain(bootPort))standing[5]=c.bridge.state.refs[__builtin_ctz(Display13Power::auxDomain(bootPort))];
+				standing[7]=held.stateWaitUs|(uint64_t(held.stateMissing)<<32);
+				IORegistryEntry::getRegistryRoot()->setProperty("N97FBAUXStanding",standing,sizeof(standing));
+				if(held.status!=Display13Power::Status::Complete) {result=held;adlnFault(c.bridge.state.faulted,__LINE__);}
+			}
 			// The firmware's PHY tuning for the panel, before the native driver's first link training.
 			if(result.status==Display13Power::Status::Complete && bootPort==0 && xelpPanelPolicy())adlnPHYBootSnapshot(io);
 			if(result.status==Display13Power::Status::Complete && !Display13Power::publishObject(c.bridge,power,0x80,controller,0xC60)) {
@@ -9922,6 +9938,12 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 		}
 		check[15]=releaseAllowed;
 		gateEvidence[7]=releaseAllowed;
+		const auto entryNs=rplpUptimeNs();uint64_t auxBefore=UINT32_MAX,cl12Before=0;
+		{
+			uint32_t v;if(Display13Power::valid(io,Display13Power::AUX,v))auxBefore=v;
+			if(c.map && c.map->getVirtualAddress() && operation>=3 && operation<=6 && domain<2)
+				cl12Before=*reinterpret_cast<volatile uint32_t *>(c.map->getVirtualAddress()+(domain ? 0x6C000U : 0x162000U)+0x30);
+		}
 		if(releaseAllowed)switch(operation) {
 			case 1: result=c.bridge.getPG(io,domain);break;
 			case 2: result=c.bridge.putPG(io,domain);break;
@@ -9946,12 +9968,25 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 				acquireWait[14]=rd(0x45440);acquireWait[15]=rd(0x45450);
 			}
 		}
-		// N97FBPowerRing (16 entries of 8: sequence, operation, domain, status, uptime ns, PWR_WELL_CTL_AUX, DDI, CTL) and
-		// N97FBPortRing (8 entries in kern_rplp_port.hpp's order, [30] sequence, [31] uptime ns): the last requests with the
-		// port's state at each, for a wake's sequence (round 48: only the last request survived in N97FBAcquireWait).
+		// N97FBPowerRing (32 entries of RingWords: sequence, operation, domain, status, uptime ns, PWR_WELL_CTL_AUX, DDI, CTL,
+		// [8] entry uptime ns, [9] PWR_WELL_CTL_AUX and [10] the port's CL_DW12 before the operation, [11] CL_DW12 after,
+		// [12] the BIOS AUX copy, [13] DC_STATE_EN, [14] the port's AUX_CH_CTL after, [15] the state wait us | the domains
+		// without a state bit << 32 | the bridge's references on the operation's well << 48) and N97FBPortRing (12 entries
+		// in kern_rplp_port.hpp's order, [30] sequence, [31] uptime ns): the last requests with the port's state at each,
+		// for a wake's sequence (round 48: only the last request survived in N97FBAcquireWait; round 50: the boundary
+		// between an acknowledged AUX request and the first unacknowledged one lay between two entries).
 		{
-			const auto t=rplpUptimeNs();auto e=c.powerRing+8*(c.ringNext%32);
+			const auto t=rplpUptimeNs();auto e=c.powerRing+c.RingWords*(c.ringNext%32);
 			e[0]=acquireWait[1];e[1]=operation;e[2]=domain;e[3]=acquireWait[4];e[4]=t;e[5]=acquireWait[8];e[6]=acquireWait[9];e[7]=acquireWait[10];
+			uint64_t auxCtlAfter=0;uint32_t wellRefs=0;
+			if(c.map && c.map->getVirtualAddress() && (operation==5 || operation==6) && domain<3)
+				auxCtlAfter=*reinterpret_cast<volatile uint32_t *>(c.map->getVirtualAddress()+0x64010+domain*0x100);
+			if(operation>=3 && operation<=6 && domain<7) {
+				const auto dom=operation<5 ? Display13Power::ddiDomain(domain) : Display13Power::auxDomain(domain);
+				if(dom)wellRefs=c.bridge.state.refs[__builtin_ctz(dom)];
+			}
+			e[8]=entryNs;e[9]=auxBefore;e[10]=cl12Before;e[11]=acquireWait[12];e[12]=acquireWait[14];e[13]=acquireWait[11];e[14]=auxCtlAfter;
+			e[15]=(acquireWait[5]&0xFFFFFFFFULL)|((acquireWait[6]&0xFFFFULL)<<32)|(uint64_t(wellRefs&0xFFU)<<48);
 			if(c.map && c.map->getVirtualAddress()) {
 				RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
 				auto p=c.portRing+RPLPPort::Words*(c.ringNext%12);

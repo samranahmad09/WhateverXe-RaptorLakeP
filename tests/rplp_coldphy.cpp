@@ -95,10 +95,15 @@ int main() {
      assert(bootUsable(boot) && boot[5]==0x11112222 && boot[7]==(CLPowerDownEnable|3|0x40) && boot[8]==0x30000 && boot[9]==0x90);
      IO cold;cold.lost(0);cold.r[clDW(0,5)]=0x40;cold.r[clDW(0,10)]=0x3000a;cold.r[clDW(0,12)]=0xc0;
      uint64_t r[Words];
-     assert(init(cold,0,r,boot)==Status::Initialised && r[12]==1 && r[13]==(1|2|4|8|16|32) && r[9]==0 && r[8]==11);
+     assert(init(cold,0,r,boot)==Status::Initialised && r[12]==1 && r[13]==(1|2|4|8|16) && r[9]==0 && r[8]==10 && r[16]==(1|2|4|8|16));
      assert(cold.r[compDW(0,9)]==0x11112222 && cold.r[compDW(0,10)]==0x33334444 && (cold.r[compDW(0,1)]&ProcmonDW1Mask)==0x00AA00BB);
-     assert((cold.r[clDW(0,5)]&3)==3 && (cold.r[clDW(0,5)]&CLPowerDownEnable) && cold.r[clDW(0,10)]==0x30000 && cold.r[clDW(0,12)]==0x80);
-     assert(r[14]==0x80 && r[15]==0x30000 && verify(cold,0)==(8|16|32));
+     assert((cold.r[clDW(0,5)]&3)==3 && (cold.r[clDW(0,5)]&CLPowerDownEnable) && cold.r[clDW(0,10)]==0x30000 && cold.r[clDW(0,12)]==0xc0);
+     assert(r[14]==0xc0 && r[15]==0x30000 && verify(cold,0)==(8|16|32));
+     for(auto &e:cold.writes)assert(e.first!=clDW(0,12)); // Recorded, never written.
+     // A written word that does not take is reported: written but not verified, and the status says so.
+     {struct Stuck : IO {void write(uint32_t reg,uint32_t value) {IO::write(reg,reg==clDW(0,10) ? (value|0xA) : value);}} stuck;
+      stuck.lost(0);stuck.r[clDW(0,5)]=0x40;stuck.r[clDW(0,10)]=0x3000a;uint64_t r3[Words];
+      assert(init(stuck,0,r3,boot)==Status::Mismatch && (r3[13]&16) && !(r3[16]&16) && (r3[16]&(1|2|4|8)) && (r3[9]&Unverified) && !(r3[9]&~Unverified));}
      uint64_t bad[BootWords];for(unsigned i=0;i<BootWords;++i)bad[i]=boot[i];bad[1]&=~CompInit;
      IO again;again.lost(0);uint64_t r2[Words];
      assert(init(again,0,r2,bad)==Status::Initialised && r2[12]==0 && r2[13]==0 && r2[8]==9 && verify(again,0)==0);
@@ -106,7 +111,7 @@ int main() {
      IO third;third.lost(0);
      assert(init(third,0,r2,bad)==Status::Initialised && r2[12]==0 && verify(third,0)==0);
      IO same;same.lost(0);same.r[clDW(0,5)]=3;same.r[clDW(0,10)]=0x30000;same.r[clDW(0,12)]=0x90;
-     assert(init(same,0,r2,boot)==Status::Initialised && r2[13]==(1|2|4) && r2[8]==9 && same.r[clDW(0,12)]==0x90);
+     assert(init(same,0,r2,boot)==Status::Initialised && r2[13]==(1|2|4) && r2[8]==9 && same.r[clDW(0,12)]==0x90 && r2[16]==(1|2|4|8|16));
      IO fine;fine.programmed(0);fine.r[compDW(0,9)]=0x11112222;fine.r[compDW(0,10)]=0x33334444;fine.r[compDW(0,1)]=0x00AA00BB;
      fine.r[clDW(0,5)]=CLPowerDownEnable|3|0x40;fine.r[clDW(0,10)]=0x30000;fine.r[clDW(0,12)]=0x90;
      assert(verify(fine,0)==(8|16|32) && init(fine,0,r2,boot)==Status::Initialised && r2[13]==(1|2|4) && verify(fine,0)==(8|16|32));

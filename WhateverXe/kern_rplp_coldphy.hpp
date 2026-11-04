@@ -33,16 +33,17 @@ inline bool procmon(uint32_t dw3,Procmon &p) {
 // Verification bits (zero means every check held): 1 enabled (PHY_MISC's compensation power-down bit clear and
 // COMP_DW0's init bit set), 2 TX_DW8 ODCC clock select and divider, 4 PCS_DW1 DCC mode, 8/16/32 the three procmon
 // words, 64 IREFGEN on the master PHY (A), 128 CL_DW5 power-down enable, 256 a register read all-ones, 512 unknown
-// process/voltage information.
-constexpr uint32_t Unreadable=256,UnknownProcmon=512;
+// process/voltage information, 1024 a boot word written back did not read back (init with a boot reference only).
+constexpr uint32_t Unreadable=256,UnknownProcmon=512,Unverified=1024;
 enum class Status : uint32_t {Verified,Initialised,Unreadable,UnknownProcmon,Mismatch};
-// Per-PHY record, sixteen words: 0 checks before, 1 COMP_DW3, 2 PHY_MISC before, 3 TX_DW8 lane 0 before, 4 PCS_DW1
+// Per-PHY record, seventeen words: 0 checks before, 1 COMP_DW3, 2 PHY_MISC before, 3 TX_DW8 lane 0 before, 4 PCS_DW1
 // lane 0 before, 5 COMP_DW0 before, 6 CL_DW5 before, 7 applied, 8 writes, 9 checks after, 10 COMP_DW0 after,
-// 11 CL_DW5 after, 12 boot reference used, 13 the boot words recreated (bit 0 COMP_DW1, 1 COMP_DW9, 2 COMP_DW10,
-// 3 CL_DW5 bits 1:0, 4 CL_DW10 bits 3:0, 5 CL_DW12 outside bits 0 and 4), 14 CL_DW12 after, 15 CL_DW10 after.
-constexpr unsigned Words=16;
-// The PHY's words as the firmware left them, twelve per PHY (N97FBPHYBoot): PHY_MISC, COMP_DW0, COMP_DW1, COMP_DW3,
-// COMP_DW8, COMP_DW9, COMP_DW10, CL_DW5, CL_DW10, CL_DW12, TX_DW8 lane 0, PCS_DW1 lane 0.
+// 11 CL_DW5 after, 12 boot reference used, 13 the boot words written (bit 0 COMP_DW1, 1 COMP_DW9, 2 COMP_DW10,
+// 3 CL_DW5 bits 1:0, 4 CL_DW10 bits 3:0), 14 CL_DW12 after, 15 CL_DW10 after, 16 the boot words that read back as
+// the firmware had them afterwards (same bits; a written word that is not in it did not take).
+constexpr unsigned Words=17;
+// The PHY's words as the firmware left them, twelve per PHY (N97FBPHYFirmware): PHY_MISC, COMP_DW0, COMP_DW1,
+// COMP_DW3, COMP_DW8, COMP_DW9, COMP_DW10, CL_DW5, CL_DW10, CL_DW12, TX_DW8 lane 0, PCS_DW1 lane 0.
 constexpr unsigned BootWords=12;
 template<class IO> void snapshot(IO &io,unsigned phy,uint64_t *w) {
     w[0]=io.read(Misc[phy]);w[1]=io.read(compDW(phy,0));w[2]=io.read(compDW(phy,1));w[3]=io.read(compDW(phy,3));
@@ -79,11 +80,12 @@ template<class IO> uint32_t verify(IO &io,unsigned phy,uint64_t *r=nullptr) {
 // DCC run once on every lane, the procmon reference values, IREFGEN on the master, COMP_INIT, CL power-down enable.
 // With a usable boot reference (`boot`, BootWords, opt-in), the procmon words come from the firmware's own values
 // instead of i915's table, and after the sequence the common-lane bits the firmware had set and a power loss clears
-// are written back where they differ: CL_DW5 bits 1:0 (i915 sets them in its DP enable: "SUS Clock Config 11b"),
-// CL_DW10 bits 3:0 and CL_DW12 outside bits 0 and 4 (bit 0 is the AUX lane enable the native path toggles, bit 4
-// follows the AUX well request). Round 49: with the i915 sequence alone the AUX A IO well never reported its state bit
-// after the power loss while the DDI A IO well did; the firmware's PHY state is the one the panel ran with at boot.
-constexpr uint32_t SusClockConfigMask=3U,CLDW10LowMask=0xFU,CLDW12ExcludedMask=0x11U;
+// are written back where they differ: CL_DW5 bits 1:0 (i915 sets them in its DP enable: "SUS Clock Config 11b") and
+// CL_DW10 bits 3:0. CL_DW12 is recorded only: bit 0 is the AUX lane enable the native path toggles, bit 4 follows the
+// AUX well request, and its upper bits read as status (round 50: written back, they kept the power-loss value, then
+// returned to the boot value by themselves while the AUX well was up). Round 49: with the i915 sequence alone the
+// AUX A IO well never reported its state bit after the power loss while the DDI A IO well did.
+constexpr uint32_t SusClockConfigMask=3U,CLDW10LowMask=0xFU;
 template<class IO> Status init(IO &io,unsigned phy,uint64_t *r,const uint64_t *boot=nullptr) {
     for(unsigned i=0;i<Words;++i)r[i]=0;
     const auto checks=verify(io,phy,r);r[0]=checks;
@@ -110,19 +112,21 @@ template<class IO> Status init(IO &io,unsigned phy,uint64_t *r,const uint64_t *b
     if(useBoot) {
         v=io.read(clDW(phy,10));
         if((v&CLDW10LowMask)!=(uint32_t(boot[8])&CLDW10LowMask)) {write(clDW(phy,10),(v&~CLDW10LowMask)|(uint32_t(boot[8])&CLDW10LowMask));recreated|=16;}
-        v=io.read(clDW(phy,12));
-        if((v&~CLDW12ExcludedMask)!=(uint32_t(boot[9])&~CLDW12ExcludedMask)) {write(clDW(phy,12),(v&CLDW12ExcludedMask)|(uint32_t(boot[9])&~CLDW12ExcludedMask));recreated|=32;}
     }
     r[7]=1;r[8]=writes;r[13]=recreated;
     auto after=verify(io,phy);
+    uint32_t verified=0;
     if(useBoot) {
         // The table's procmon checks do not apply to the firmware's values; the firmware's own words must read back.
         after&=~(8U|16U|32U);
-        if((io.read(compDW(phy,1))&ProcmonDW1Mask)!=p.dw1)after|=8;
-        if(io.read(compDW(phy,9))!=p.dw9)after|=16;
-        if(io.read(compDW(phy,10))!=p.dw10)after|=32;
+        if((io.read(compDW(phy,1))&ProcmonDW1Mask)!=p.dw1)after|=8;else verified|=1;
+        if(io.read(compDW(phy,9))!=p.dw9)after|=16;else verified|=2;
+        if(io.read(compDW(phy,10))!=p.dw10)after|=32;else verified|=4;
+        if((io.read(clDW(phy,5))&SusClockConfigMask)==(uint32_t(boot[7])&SusClockConfigMask))verified|=8;
+        if((io.read(clDW(phy,10))&CLDW10LowMask)==(uint32_t(boot[8])&CLDW10LowMask))verified|=16;
+        if(recreated&~verified)after|=Unverified;
     }
-    r[9]=after;r[10]=io.read(compDW(phy,0));r[11]=io.read(clDW(phy,5));r[14]=io.read(clDW(phy,12));r[15]=io.read(clDW(phy,10));
+    r[9]=after;r[10]=io.read(compDW(phy,0));r[11]=io.read(clDW(phy,5));r[14]=io.read(clDW(phy,12));r[15]=io.read(clDW(phy,10));r[16]=verified;
     return after ? Status::Mismatch : Status::Initialised;
 }
 }

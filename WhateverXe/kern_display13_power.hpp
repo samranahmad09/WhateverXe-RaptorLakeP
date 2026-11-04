@@ -27,7 +27,7 @@ constexpr unsigned FuseWaitUs = 2000;
 constexpr unsigned StateWaitUs = 10000;
 constexpr bool comboAux(unsigned d) { return d == 6 || d == 8 || d == 10; }
 // The combo PHY's AUX lane enable (CL_DW12 bit 0): the native driver writes it after an AUX request and before its wait
-// and clears it before the release; i915 does so on Ice Lake only. The host supplies it as an experiment
+// and clears it once the release has taken; i915 does so on Ice Lake only. The host supplies it as an experiment
 // (-wex-rplp-auxlane) through an IO with auxLane(domain, enable); an IO without the member leaves the register alone.
 template<class IO> auto auxLaneHook(IO &io, unsigned d, bool enable, int) -> decltype(io.auxLane(d, enable), void()) { io.auxLane(d, enable); }
 template<class IO> void auxLaneHook(IO &, unsigned, bool, long) {}
@@ -113,12 +113,12 @@ template<class IO> Status wait(IO &io, uint32_t reg, uint32_t mask, unsigned tim
 template<class IO> Status clear(IO &io, State &s, unsigned d, Result &r) {
     const uint32_t mask = 1U << d, reg = control(d), req = request(d);
     if (!(s.owned & mask)) return Status::Complete;
-    if (comboAux(d)) auxLaneHook(io, d, false, 0);
     uint32_t value;
     if (!valid(io, reg, value)) return Status::Unavailable;
     if (value & req) { io.write(reg, value & ~req); ++r.writes; }
     if (!valid(io, reg, value)) return Status::Unavailable;
     if (value & req) return Status::ReleaseFailed;
+    if (comboAux(d)) auxLaneHook(io, d, false, 0); // Once the request is clear, the order the native path uses.
     s.owned &= ~mask;
     if (value & enabled(d)) r.forcedOn |= mask;
     return Status::Complete;
