@@ -143,6 +143,7 @@
   "-wex-rplp-coldpll": [],
   "-wex-rplp-coldphyboot": [],
   "-wex-rplp-auxstanding": [],
+  "-wex-rplp-fwwait": [],
   "-wex-rplp-wakelog": [],
   "wex-rplp-urb-banks": [],
   "-wex-rplp-gl-urb": [],

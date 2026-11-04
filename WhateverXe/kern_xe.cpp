@@ -35,6 +35,7 @@
 #include "kern_display13_dbuf.hpp"
 #include "kern_rplp_coldphy.hpp"
 #include "kern_rplp_port.hpp"
+#include "kern_rplp_gt.hpp"
 #include "kern_display13_wm.hpp"
 #include "kern_display13_backlight.hpp"
 #include "kern_display13_ecbacklight.hpp"
@@ -154,6 +155,19 @@ thread_t rplpWakeLogThread;
 uint32_t rplpWakeLogDirty,rplpWakeLogNVRAMWanted;
 bool rplpForceWakeGuardEnabled;    // -wex-rplp-fwguard, see xelpRegularForceWakeProtected
 uint64_t rplpForceWakeGuardSkips;
+bool rplpForceWakeWaitEnabled;     // -wex-rplp-fwwait, see rplpForceWakeGuarded
+constexpr unsigned rplpForceWakeWaitSteps=5000;   // 100 us each: half a second at most
+// RPLPForceWakeWait: schema, waits, total ns, the longest ns, timeouts, the first wait's uptime ns, the last wait's
+// uptime ns, the last wait's ns, its steps, the last waited event's second word (enable | domains << 8 | sequence << 32).
+uint64_t rplpForceWakeWait[12] {1};
+// RPLPWakeSWIRQ: the accelerator's streamer software interrupts of a wake (round 51: 37,000 a second after the wake,
+// with no hardware interrupt reaching the accelerator). Words: schema, calls since will-power-on, in its first second,
+// in its first five seconds, in its first thirty seconds, will-power-on ns, the last call's uptime ns, events kept;
+// then 24 events of three words (the first sixteen calls, then a ring of the last eight): uptime ns; the count
+// argument | the streamer's paused byte << 32 | its 0x1C3C byte << 40; its 0x1C38 word | its 0x1C00 word << 32.
+constexpr unsigned rplpWakeSWIRQFirst=16,rplpWakeSWIRQLast=8;
+uint64_t rplpWakeSWIRQ[8+3*(rplpWakeSWIRQFirst+rplpWakeSWIRQLast)] {1};
+uint32_t rplpWakeSWIRQRing;
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
 uint64_t rplpAuxLane[8] {1};       // N97FBAuxLane: schema, writes, last domain, last enable, before, after, calls with the flag off, unreadable
 void *rplpWakeStreamer;            // the render streamer, for its scheduling-paused word in the forcewake events
@@ -166,6 +180,8 @@ void rplpWakeLogPublish(bool nvram) {   // thread context only
  }
  auto data=OSData::withBytes(rplpWakeLog,sizeof(rplpWakeLog));if(!data)return;
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeLog",data);
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeWait",rplpForceWakeWait,sizeof(rplpForceWakeWait));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeSWIRQ",rplpWakeSWIRQ,sizeof(rplpWakeSWIRQ));
  if(nvram && __atomic_load_n(&rplpWakeLog[39],__ATOMIC_RELAXED)<rplpWakeNVRAMPerWake)
   if(auto options=IORegistryEntry::fromPath("/options",gIODTPlane)) {
    __atomic_fetch_add(&rplpWakeLog[39],1ULL,__ATOMIC_RELAXED);
@@ -199,6 +215,7 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
    rplpWakeLog[3]=now;rplpWakeLog[4]=rplpWakeLog[5]=0;rplpWakeLog[7]=0;
    for(unsigned i=8;i<=10;++i)rplpWakeLog[i]=0;
    for(unsigned i=33;i<rplpWakeWords;++i)rplpWakeLog[i]=0;
+   memset(rplpWakeSWIRQ,0,sizeof(rplpWakeSWIRQ));rplpWakeSWIRQ[0]=1;__atomic_store_n(&rplpWakeSWIRQRing,0U,__ATOMIC_RELEASE);
    __atomic_store_n(&rplpWakeEngineReturned,0U,__ATOMIC_RELEASE);__atomic_store_n(&rplpWakeForceWakeSeq,0U,__ATOMIC_RELEASE);
    rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);nvram=true;break;
   case kIOMessageSystemWillPowerOn:
@@ -249,6 +266,12 @@ void rplpPortTraceWorker(void *,wait_result_t) {
    IOSleep(25);
   }
   IORegistryEntry::getRegistryRoot()->setProperty("N97FBPortTrace",t,sizeof(t));
+  // N97GTWake: the GT's registers four seconds after the restore (kern_rplp_gt.hpp, reads only).
+  {
+   struct GTIO {volatile uint8_t *bar;uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}} gtIO {bar};
+   uint64_t g[RPLPGT::Words];RPLPGT::snapshot(gtIO,g,2,cold,rplpWakeLog[32],rplpWakeNow());
+   IORegistryEntry::getRegistryRoot()->setProperty("N97GTWake",g,sizeof(g));
+  }
  }
 }
 bool rplpWakeInWindow() {
@@ -268,6 +291,8 @@ static void rplpWakeLogArm() {
  // The forcewake guard is independent of the record: see xelpRegularForceWakeProtected.
  rplpForceWakeGuardEnabled=checkKernelArgument("-wex-rplp-fwguard");
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeGuardArmed",rplpForceWakeGuardEnabled);
+ rplpForceWakeWaitEnabled=checkKernelArgument("-wex-rplp-fwwait");
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeWaitArmed",rplpForceWakeWaitEnabled);
  rplpAuxLaneEnabled=checkKernelArgument("-wex-rplp-auxlane");
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPAuxLaneArmed",rplpAuxLaneEnabled);
  if(!checkKernelArgument("-wex-rplp-wakelog"))return;
@@ -293,6 +318,27 @@ static void rplpWakeLogCount(RPLPWakeCounter which) {
  if(waking)rplpWakeLogFirst(which==RPLPWakeSubmit ? 34 : 35,rplpWakeNow());
  if(waking && !__atomic_load_n(&rplpWakeEngineReturned,__ATOMIC_ACQUIRE))__atomic_fetch_add(&rplpWakeLog[which==RPLPWakeSubmit ? 8 : 9],1ULL,__ATOMIC_RELAXED);
  rplpWakeLogKick(waking && which==RPLPWakeSubmit);
+}
+// One streamer software interrupt of a wake (RPLPWakeSWIRQ above): counted against will-power-on, the first sixteen
+// and the last eight kept with the streamer's own words.
+static void rplpWakeLogSWIRQ(void *streamer,int count) {
+ if(!rplpWakeLogEnabled || !streamer || !rplpWakeWaking())return;
+ const auto base=rplpWakeLog[4];if(!base)return;
+ const auto now=rplpWakeNow();auto &s=rplpWakeSWIRQ;
+ const auto n=__atomic_fetch_add(&s[1],1ULL,__ATOMIC_RELAXED);
+ const auto dt=now>base ? now-base : 0;
+ if(dt<1000000000ULL)__atomic_fetch_add(&s[2],1ULL,__ATOMIC_RELAXED);
+ if(dt<5000000000ULL)__atomic_fetch_add(&s[3],1ULL,__ATOMIC_RELAXED);
+ if(dt<30000000000ULL)__atomic_fetch_add(&s[4],1ULL,__ATOMIC_RELAXED);
+ s[5]=base;s[6]=now;
+ auto x=static_cast<uint8_t *>(streamer);
+ uint32_t w38,w00;memcpy(&w38,x+0x1C38,sizeof(w38));memcpy(&w00,x+0x1C00,sizeof(w00));
+ uint64_t *e;
+ if(n<rplpWakeSWIRQFirst)e=&s[8+3*n];
+ else e=&s[8+3*(rplpWakeSWIRQFirst+(__atomic_fetch_add(&rplpWakeSWIRQRing,1U,__ATOMIC_RELAXED)%rplpWakeSWIRQLast))];
+ e[0]=now;e[1]=uint64_t(uint32_t(count))|uint64_t(x[0x1C00])<<32|uint64_t(x[0x1C3C])<<40;e[2]=uint64_t(w38)|uint64_t(w00)<<32;
+ s[7]=n<rplpWakeSWIRQFirst ? n+1 : rplpWakeSWIRQFirst+rplpWakeSWIRQLast;
+ if(n<rplpWakeSWIRQFirst || !(n&4095))rplpWakeLogKick(false);
 }
 // The guard skipped a native forcewake call: counted in word 46, and the record goes to NVRAM at once.
 static void rplpWakeLogGuardSkip() {
@@ -4708,6 +4754,9 @@ struct Display13FBPowerContext {
     // The combo PHYs' words as the firmware left them (N97FBPHYFirmware, kern_rplp_coldphy.hpp), recreated on a cold
     // resume with -wex-rplp-coldphyboot.
     uint64_t phyBoot[RPLPColdPHY::Count*RPLPColdPHY::BootWords] {};bool phyBootValid {};
+    // The GT's interrupt, forcewake, command-streamer and power registers as the accelerator left them at boot
+    // (N97GTBoot, kern_rplp_gt.hpp), read again after a cold restore and at the end of the port trace.
+    uint64_t gtBoot[RPLPGT::Words] {};bool gtBootValid {};
     // The MBUS credit words as the firmware left them (N97FBCreditBoot), restored on a cold resume.
     uint64_t creditBoot[RPLPPort::Credits] {};bool creditBootValid {};
     volatile uintptr_t arbitrationWriterBase {}; // Qualified in sleepable engine context.
@@ -5842,7 +5891,7 @@ bool XE::processDisplay13FramebufferIRQ(KernelPatcher &patcher,size_t index,mach
 
 // hwConfigureVBLInterrupt calls, kept as plain counters: the hook may run under the native simple lock
 // with interrupts disabled. Published as N97FBIRQVBL by the thread-context wrappers.
-static struct {volatile uint64_t calls,enables,disables,rearms,lastPipe,lastEnabled,lastStatus,lastRearmStatus;} adlnVBLConfigure;
+static struct {volatile uint64_t calls,enables,disables,rearms,lastPipe,lastEnabled,lastStatus,lastRearmStatus,lastMasterAfter,lastGfxAfter;} adlnVBLConfigure;
 static void adlnNoteVBLConfigure(unsigned pipe,bool enabled,Display13FBIRQ::Status status,bool rearmed,Display13FBIRQ::Status rearm) {
 	auto &v=adlnVBLConfigure;++v.calls;if(enabled)++v.enables;else ++v.disables;
 	if(rearmed) {++v.rearms;v.lastRearmStatus=static_cast<uint32_t>(rearm);}
@@ -5850,8 +5899,19 @@ static void adlnNoteVBLConfigure(unsigned pipe,bool enabled,Display13FBIRQ::Stat
 }
 static void adlnPublishVBLConfigure() {
 	auto &v=adlnVBLConfigure;
-	uint64_t r[9] {1,v.calls,v.enables,v.disables,v.rearms,v.lastPipe,v.lastEnabled,v.lastStatus,v.lastRearmStatus};
+	uint64_t r[11] {1,v.calls,v.enables,v.disables,v.rearms,v.lastPipe,v.lastEnabled,v.lastStatus,v.lastRearmStatus,v.lastMasterAfter,v.lastGfxAfter};
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBIRQVBL",r,sizeof(r));
+}
+// N97FBIRQLive: the IRQ bridge's counters and flags on demand (no MMIO, no lock), so a wake's interrupt flow shows in
+// the heartbeat without a republish (round 51: N97FBIRQ, written at the enable call, stayed stale through the wake).
+static bool display13FBIRQLiveSerialize(void *,void *,OSSerialize *serializer) {
+	auto &c=display13FBIRQ;auto &s=c.state;auto &v=adlnVBLConfigure;
+	uint64_t q[32] {1,s.begun,s.enabled,s.faulted,static_cast<uint32_t>(c.status),s.active,s.configured,s.lastMaster,s.interrupts,
+		s.vblanks[0],s.vblanks[1],s.vblanks[2],s.flips[0],s.flips[1],s.flips[2],s.underruns[0],s.underruns[1],s.underruns[2],
+		c.handlers,c.quiescing,c.blockedPipes,rplpUptimeNs(),v.calls,v.enables,v.disables,v.rearms,v.lastPipe,v.lastEnabled,v.lastStatus,
+		v.lastRearmStatus,v.lastMasterAfter,v.lastGfxAfter};
+	auto data=OSData::withBytes(q,sizeof(q));if(!data)return false;
+	const bool ok=data->serialize(serializer);data->release();return ok;
 }
 IOReturn XE::wrapDisplay13FBEnableIRQ(IOService *controller) {
 	if(!callbackXE->display13FBIRQReady || !adlnIRQOwner(controller))return kIOReturnNotReady;
@@ -5939,6 +5999,7 @@ void XE::wrapDisplay13FBConfigureVBL(IOService *controller,IOService *fb,OSObjec
 			c.status=Display13FBIRQ::enable(io,c.state,excluded,adlnSharedGT(controller),1,
 				Display13FBTopology::policyPorts(callbackXE->adlnHDMIWiring,xelpPanelPolicy()));
 			rearmed=true;rearm=c.status;
+			adlnVBLConfigure.lastMasterAfter=io.read(Display13FBIRQ::Master);adlnVBLConfigure.lastGfxAfter=io.read(Display13FBIRQ::GfxMaster);
 		}
 		if(!c.state.faulted)c.status=Display13FBIRQ::vblank(io,c.state,pipe,enabled);
 	}
@@ -9156,6 +9217,7 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		RPLPPort::snapshotCredits(portIO,c.creditBoot);c.creditBootValid=true;
 		for(unsigned i=0;i<RPLPColdPHY::Count;++i)RPLPColdPHY::snapshot(portIO,i,c.phyBoot+RPLPColdPHY::BootWords*i);
 		c.phyBootValid=true;
+		RPLPGT::snapshot(portIO,c.gtBoot,0,0,rplpWakeLog[32],rplpUptimeNs());c.gtBootValid=true;
 	}
 	// After a real power loss the PLL may be off without this owner having stopped it: restart it at the last clock.
 	if(clock.status==Display13Clock::Status::Disabled && (c.clockStopped || cold) && c.resumeClockHz &&
@@ -9272,6 +9334,7 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	if(portBootTaken) {
 		root->setProperty("N97FBPortBoot",c.portBoot,sizeof(c.portBoot));root->setProperty("N97FBCreditBoot",c.creditBoot,sizeof(c.creditBoot));
 		root->setProperty("N97FBPHYFirmware",c.phyBoot,sizeof(c.phyBoot));
+		root->setProperty("N97GTBoot",c.gtBoot,sizeof(c.gtBoot));
 	}
 	if(portColdTaken) {
 		root->setProperty("N97FBPortCold",portCold,sizeof(portCold));
@@ -9495,6 +9558,12 @@ void XE::wrapAlderLakeNPowerRestore(void *power,bool waking) {
 	display13FBPowerRecord(record,9,waking,result);IOLockUnlock(c.lock);
 	adlnPublishPowerRecord("N97FBPowerRestore",record);
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerRestoreWait",rw,sizeof(rw));
+	// N97GTRestore: the GT's registers right after a cold restore (kern_rplp_gt.hpp, reads only).
+	if(cold && c.map && c.map->getVirtualAddress() && c.map->getLength()==0x1000000) {
+		RPLPPortIO gtIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};uint64_t g[RPLPGT::Words];
+		RPLPGT::snapshot(gtIO,g,1,1,rplpWakeLog[32],rplpUptimeNs());
+		IORegistryEntry::getRegistryRoot()->setProperty("N97GTRestore",g,sizeof(g));
+	}
 	// The port trace runs from here through the native path's bring-up (N97FBPortTrace), cold or not.
 	if(c.map && c.map->getVirtualAddress() && c.map->getLength()==0x1000000)
 		rplpPortTraceKick(reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress()),cold);
@@ -9801,6 +9870,7 @@ void XE::wrapAlderLakeNPowerInit(void *power,void *controller) {
 				auto irqLock=*reinterpret_cast<IOSimpleLock **>(static_cast<uint8_t *>(controller)+0x90);
 				if(irqLock) {
 					display13FBIRQ.base=map->getVirtualAddress();display13FBIRQ.lock=irqLock;
+					if(auto live=OSSerializer::forTarget(nullptr,display13FBIRQLiveSerialize)) {IORegistryEntry::getRegistryRoot()->setProperty("N97FBIRQLive",live);live->release();}
 					// The bootstrap proof above measured only live pipe A. Later
 					// secondary admissions come from actual allocator/path publication.
 					__atomic_store_n(&display13FBIRQ.admittedPipes,1U,__ATOMIC_RELEASE);
@@ -12993,7 +13063,7 @@ void XE::wrapTGLHostIRQService(void *bridge,const uint64_t *bits) {
  tglHostIRQEnd(r);
 }
 void XE::wrapTGLHostSWInterrupt(void *streamer,void *source,int count) {
- rplpWakeLogCount(RPLPWakeSWIRQ);
+ rplpWakeLogCount(RPLPWakeSWIRQ);rplpWakeLogSWIRQ(streamer,count);
  auto r=tglHostIRQBegin(2,streamer,reinterpret_cast<uintptr_t>(source),count,reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
  FunctionCast(wrapTGLHostSWInterrupt,callbackXE->orgTGLHostSWInterrupt)(streamer,source,count);
  tglHostIRQEnd(r);
@@ -13021,9 +13091,28 @@ static uint64_t xelpForceWakeIRQ[9] {};
 // r330). This is panic avoidance with evidence, not a wake fix: the correction belongs at a serialized boundary that
 // retains pending work until the device is ready. The CSB reader treats a skipped acquisition as an unreachable device.
 static bool rplpForceWakeGuarded(void *owner,uint64_t *event) {
- if(!owner || !rplpForceWakeGuardEnabled)return false;
+ if(!owner || (!rplpForceWakeGuardEnabled && !rplpForceWakeWaitEnabled))return false;
  auto bar=*reinterpret_cast<volatile uint8_t **>(static_cast<uint8_t *>(owner)+0x1240);
- if(!bar || *reinterpret_cast<volatile uint32_t *>(bar+0xD84)!=UINT32_MAX)return false;
+ if(!bar)return false;
+ auto ack=reinterpret_cast<volatile uint32_t *>(bar+0xD84);
+ if(*ack!=UINT32_MAX)return false;
+ // -wex-rplp-fwwait: the device is not decoding its registers yet. Round 51: the accelerator's first work of the wake
+ // (a forcewake, a submit and a software interrupt, 4 ms after will-power-on) found the device like this, 20 ms before
+ // the plugin's own restore found it decoding; the guard skipped the forcewake, the work that followed went to a device
+ // that answered nothing, the GPU executed nothing after that wake, and the accelerator's engine start never ran again.
+ // Wait for the device, bounded, so that first work reaches a device that answers; past the bound the guard decides.
+ if(rplpForceWakeWaitEnabled) {
+  const auto start=rplpWakeNow();unsigned steps=0;
+  while(*ack==UINT32_MAX && steps<rplpForceWakeWaitSteps) {IODelay(100);++steps;}
+  const auto ns=rplpWakeNow()-start;auto &w=rplpForceWakeWait;
+  __atomic_fetch_add(&w[1],1ULL,__ATOMIC_RELAXED);__atomic_fetch_add(&w[2],ns,__ATOMIC_RELAXED);
+  if(ns>w[3])w[3]=ns;
+  if(!w[5])w[5]=start;
+  w[6]=start;w[7]=ns;w[8]=steps;if(event)w[9]=event[1];
+  if(*ack!=UINT32_MAX) {if(event)event[1]|=4;rplpWakeLogKick(true);return false;}
+  __atomic_fetch_add(&w[4],1ULL,__ATOMIC_RELAXED);
+  if(!rplpForceWakeGuardEnabled)return false;
+ }
  __atomic_fetch_add(&rplpForceWakeGuardSkips,1ULL,__ATOMIC_RELAXED);
  if(event)event[1]|=2;
  rplpWakeLogGuardSkip();
