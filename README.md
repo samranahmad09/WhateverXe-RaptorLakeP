@@ -6,7 +6,7 @@ A fork of [WhateverXe](https://github.com/b00t0x/WhateverXe) working toward macO
 **Raptor Lake-P** integrated graphics: the UHD and Iris Xe GPUs in 13th-generation Core H, P and U laptop
 processors, including the laptop's internal (eDP) panel.
 
-> **Status (2026-11-03): the internal panel lights natively, the GPU accelerator runs on it (Metal and OpenGL), brightness works; system sleep and wake is the open item.**
+> **Status (2026-11-04): the internal panel lights natively, the GPU accelerator runs on it (Metal and OpenGL), brightness works; system sleep and wake is the open item.**
 > - Since 2026-10-20 the native Display 13 framebuffer path drives the reference machine's eDP panel (link
 >   training, 60 Hz mode, cursor, WindowServer desktop) with the `-wex-rplp-gt` boot argument, and the native
 >   accelerator starts on it: the Metal, OpenGL and video plugins attach, WindowServer renders through the GPU,
@@ -30,16 +30,19 @@ processors, including the laptop's internal (eDP) panel.
 >   fixed in turn, each one step further into the wake: a one-microsecond wait for a cold power well's fuse in the
 >   plugin's own restore (now 2 ms), the engine enable refusing the plane-buffer and MBUS registers the power loss
 >   resets (now re-established), the two combo PHYs losing their state (now re-initialised as i915 does), and the
->   AUX A power well's request after the power loss (no longer at fault with the raw clock left alone and i915's
->   Alder Lake-P workarounds applied). Still open: the panel's link training fails about two seconds into every wake
->   with all of that restored, and the plugin's own release gate then refused the native driver's tear-down of the
->   DDI A well (fixed: a port-only release of stopped pipes proceeds). The current build records the port's registers
->   at boot, after the cold resume, at each power request and every 25 ms through a wake's bring-up, restores the
->   MBUS credit words on a cold resume, and keeps two opt-in restores (the panel power sequencer's delays, the port
->   PLL with its clock select) that the native driver's own wake sequence makes redundant. A dispatch at the first instant of a wake into a device not yet decoding its registers panicked twice in
+>   AUX A power well's request faulting the bridge (it no longer does). Still open, and now located: after the power
+>   loss the AUX A IO power well never acknowledges its request with the Linux combo PHY initialisation applied (the
+>   DDI A IO well does, and the firmware's own initialisation at boot brings both up), so no AUX transaction reaches
+>   the panel and the link training fails two seconds into every wake; the plugin's own release gate had hidden this
+>   behind two refusals of the native driver's tear-down (both fixed). The current build records the PHY words as the
+>   firmware left them at boot and, opt-in, recreates them on a cold resume instead of Linux's table
+>   (`-wex-rplp-coldphyboot`), records the port's registers at boot, after the cold resume, at each power request and
+>   every 25 ms through a wake's bring-up, restores the MBUS credit words on a cold resume, and keeps two opt-in
+>   restores (the panel power sequencer's delays, the port PLL) that the native driver's own wake sequence makes
+>   redundant. A dispatch at the first instant of a wake into a device not yet decoding its registers panicked twice in
 >   a forcewake release; an opt-in guard skips those calls. The two-minute sleep entry is the graphics family's own
 >   sleep acknowledgement timing out. Opt-in flags: `-wex-rplp-wakelog`, `-wex-rplp-fwguard`, `-wex-rplp-coldinit`,
->   `-wex-rplp-auxlane`, `-wex-rplp-coldpps`, `-wex-rplp-coldpll`.
+>   `-wex-rplp-auxlane`, `-wex-rplp-coldpps`, `-wex-rplp-coldpll`, `-wex-rplp-coldphyboot`.
 >   Not validated yet: Metal workloads beyond the desktop, 144 Hz, external outputs.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.
@@ -84,7 +87,7 @@ every hardware rule.
 | R1 | Read-only Raptor Lake-P profile: fuses, EU layout and the firmware's display state, with no writes beyond a balanced forcewake | The macOS readout matches a Linux i915 capture from the same machine | Done: on the reference machine the macOS readout matches the Linux capture (all five fuses, 64 EU, 4 DSS) |
 | R2 | GT backend: the existing BCS self-test, then the accelerator fixes with this GPU's URB and L3 values | The self-test passes and the accelerator starts on the firmware framebuffer | Done on the reference machine: the BCS self-test passes and, since 2026-10-20, the native accelerator starts on the internal panel (branch `rplp-accel`) |
 | R3 | Internal panel, first light: keep the donor's internal-panel connector and adopt the link the firmware trained | Desktop on the internal panel at the firmware mode | Done on the reference machine (2026-10-20): native desktop on the panel at 1920x1080, 60 Hz. Power sequencing, backlight and retraining are R4 |
-| R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | In progress: brightness since 2026-10-21 (embedded-controller bridge), display sleep/wake done; system sleep/wake since 2026-10-29: four causes fixed in turn, the panel's link training after a real power loss open (the port's state recorded, two restores on trial); 144 Hz and retraining not started |
+| R4 | Internal panel, complete: power sequencing, backlight, blank/unblank, link retraining with ADL-P tables, 144 Hz | Brightness, sleep/wake and the native refresh rate work | In progress: brightness since 2026-10-21 (embedded-controller bridge), display sleep/wake done; system sleep/wake since 2026-10-29: four causes fixed in turn, the AUX IO power well after a real power loss open (the firmware's PHY words on trial); 144 Hz and retraining not started |
 | R5 | Metal on the internal panel and stability; later USB-C outputs | WindowServer is accelerated on the panel | In progress: WindowServer accelerated on the panel since 2026-10-20, OpenGL correct since 2026-10-28; system sleep/wake in progress (R4); workloads beyond the desktop and USB-C outputs unverified |
 
 The hardware inputs for R2-R4 are measured on the reference machine and listed in
