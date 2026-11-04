@@ -9889,8 +9889,13 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 		// was a refused port release after the failed link training, and these words did not exist).
 		check[21]=(released?1:0)|(gateReady?2:0)|(c.dbuf.updating?0:4)|((Display13WM::busyPipes(c.pipe,true)&affected)?0:8)|
 			(adlnIRQOwner(static_cast<IOService *>(c.controller))?16:0)|(Display13FBTopology::multiOutputWiring(callbackXE->adlnHDMIWiring)?128:0);
-		if(released && gateReady && !c.dbuf.updating &&
-			!(Display13WM::busyPipes(c.pipe,true)&affected) && adlnIRQOwner(static_cast<IOService *>(c.controller))) {
+		// A port-only release (no PW1, no pipe well) does not wait for a DBUF update or a watermark program in flight:
+		// neither needs the port's well, and round 49's failed modeset left pipe A's watermark program in flight when the
+		// native path released DDI A, so the proof never ran and the release faulted ([21] bit 8 marks the bypass).
+		const bool portOnly=released && !(released&~Display13FBIRQ::portPowerDomains());
+		if(portOnly)check[21]|=256;
+		if(released && gateReady && (portOnly || (!c.dbuf.updating && !(Display13WM::busyPipes(c.pipe,true)&affected))) &&
+			adlnIRQOwner(static_cast<IOService *>(c.controller))) {
 			auto &irq=display13FBIRQ;Display13FBIRQIO irqIO {irq.base};
 			const auto saved=IOSimpleLockLockDisableInterrupt(irq.lock);
 			check[21]|=32|(irq.quiescing?0:64);check[22]=irq.handlers|(irq.state.enabled?1ULL<<16:0)|(uint64_t(irq.state.active&7)<<17);
