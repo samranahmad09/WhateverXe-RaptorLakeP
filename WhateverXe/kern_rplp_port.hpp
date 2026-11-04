@@ -156,20 +156,21 @@ template<class IO, class Wait> Status restorePLL(IO &io, const uint64_t (&boot)[
 // The MBUS credit words of the pixel data fabric: ABOX 0 and 1, and each pipe's DBOX. The firmware programs them for its
 // mode and a real power loss resets them; Linux's i915 writes each pipe's DBOX word in every modeset
 // (intel_mbus_dbox_update) and leaves the ABOX words alone on Alder Lake-P. restoreCredits() writes the boot values
-// back where a word differs from them and both reads are valid. r[0..4] the reads before, r[5..9] after, r[10] the
-// mask written, r[11] the mask skipped as unreadable (now or at boot).
+// back where a word differs from them and both reads are valid; a pipe's DBOX word only while that pipe's well is
+// powered (`pipes`, bit per pipe; an unpowered pipe's register does not take a write). r[0..4] the reads before,
+// r[5..9] after, r[10] the mask written, r[11] the mask skipped (unreadable now or at boot, or the pipe unpowered).
 constexpr uint32_t CreditRegs[5] {0x45038, 0x45048, 0x7003C, 0x7103C, 0x7203C};
 constexpr unsigned Credits = sizeof(CreditRegs) / sizeof(CreditRegs[0]);
 template<class IO> void snapshotCredits(IO &io, uint64_t (&w)[Credits]) {
     for (unsigned i = 0; i < Credits; ++i) w[i] = io.read(CreditRegs[i]);
 }
-template<class IO> Status restoreCredits(IO &io, const uint64_t (&boot)[Credits], uint64_t (&r)[12]) {
+template<class IO> Status restoreCredits(IO &io, const uint64_t (&boot)[Credits], uint64_t (&r)[12], uint32_t pipes = 7) {
     for (auto &v : r) v = 0;
     bool reference = false;
     for (unsigned i = 0; i < Credits; ++i) {
         const uint32_t now = io.read(CreditRegs[i]), want = static_cast<uint32_t>(boot[i]);
         r[i] = now;
-        if (now == UINT32_MAX || boot[i] > UINT32_MAX || want == UINT32_MAX) { r[11] |= 1U << i; continue; }
+        if (now == UINT32_MAX || boot[i] > UINT32_MAX || want == UINT32_MAX || (i >= 2 && !(pipes & (1U << (i - 2))))) { r[11] |= 1U << i; continue; }
         reference = true;
         if (now != want) { io.write(CreditRegs[i], want); r[10] |= 1U << i; }
     }

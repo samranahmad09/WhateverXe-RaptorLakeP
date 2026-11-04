@@ -136,6 +136,10 @@ int main() {
         assert(r[0]==0 && r[1]==0x111010 && r[5]==0x111010 && r[7]==0x4802 && r[9]==0x4802);
         io.writes.clear();
         assert(restoreCredits(io,boot,r)==Status::Skipped && io.writes.empty() && r[10]==0);
+        // Only a powered pipe's DBOX word is written; the others are reported as skipped.
+        io.r[0x45038]=0;io.r[0x7003C]=0;io.r[0x7103C]=0;io.writes.clear();
+        assert(restoreCredits(io,boot,r,1)==Status::Applied && r[10]==0x5 && r[11]==0x18 && io.writes.size()==2);
+        io.writes.clear();
         // An unreadable word is skipped and reported; an empty boot reference writes nothing; a write that does not take.
         io.allones=0x45048;io.r[0x7103C]=0;
         assert(restoreCredits(io,boot,r)==Status::Applied && r[10]==(1U<<3) && r[11]==(1U<<1) && io.writes.size()==1);

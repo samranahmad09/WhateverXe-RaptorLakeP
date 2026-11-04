@@ -141,6 +141,7 @@
   "-wex-rplp-auxlane": [],
   "-wex-rplp-coldpps": [],
   "-wex-rplp-coldpll": [],
+  "-wex-rplp-coldphyboot": [],
   "-wex-rplp-wakelog": [],
   "wex-rplp-urb-banks": [],
   "-wex-rplp-gl-urb": [],

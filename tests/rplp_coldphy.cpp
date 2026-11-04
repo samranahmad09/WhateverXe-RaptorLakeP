@@ -12,7 +12,7 @@ struct IO {
     IO() {
         for(unsigned phy=0;phy<Count;++phy) {
             r[Misc[phy]]=0;r[compDW(phy,0)]=0;r[compDW(phy,1)]=0;r[compDW(phy,3)]=0;r[compDW(phy,8)]=0;r[compDW(phy,9)]=0;r[compDW(phy,10)]=0;
-            r[clDW(phy,5)]=0;r[txDW8Lane0(phy)]=0;r[txDW8Group(phy)]=0;r[pcsDW1Lane0(phy)]=0;r[pcsDW1Group(phy)]=0;
+            r[clDW(phy,5)]=0;r[clDW(phy,10)]=0;r[clDW(phy,12)]=0;r[txDW8Lane0(phy)]=0;r[txDW8Group(phy)]=0;r[pcsDW1Lane0(phy)]=0;r[pcsDW1Group(phy)]=0;
         }
     }
     // A PHY as the firmware leaves it after boot: 0.95 V dot0 silicon, everything programmed.
@@ -87,6 +87,30 @@ int main() {
     {struct Stuck : IO {void write(uint32_t reg,uint32_t value) {IO::write(reg,reg==compDW(0,0) ? (value&~CompInit) : value);}} io;
      io.lost(0);uint64_t r[Words];
      assert(init(io,0,r)==Status::Mismatch && r[7]==1 && r[8]==9 && (r[9]&1) && !(r[9]&~1U));}
+    // With a boot reference the firmware's procmon words replace the table and the common-lane bits it had set come
+    // back; a reference without COMP_INIT or with an all-ones word is ignored; bits already right are not written.
+    {IO io;io.programmed(0);io.r[compDW(0,9)]=0x11112222;io.r[compDW(0,10)]=0x33334444;io.r[compDW(0,1)]=0x00AA00BB;
+     io.r[clDW(0,5)]=CLPowerDownEnable|3|0x40;io.r[clDW(0,10)]=0x30000;io.r[clDW(0,12)]=0x90;
+     uint64_t boot[BootWords];snapshot(io,0,boot);
+     assert(bootUsable(boot) && boot[5]==0x11112222 && boot[7]==(CLPowerDownEnable|3|0x40) && boot[8]==0x30000 && boot[9]==0x90);
+     IO cold;cold.lost(0);cold.r[clDW(0,5)]=0x40;cold.r[clDW(0,10)]=0x3000a;cold.r[clDW(0,12)]=0xc0;
+     uint64_t r[Words];
+     assert(init(cold,0,r,boot)==Status::Initialised && r[12]==1 && r[13]==(1|2|4|8|16|32) && r[9]==0 && r[8]==11);
+     assert(cold.r[compDW(0,9)]==0x11112222 && cold.r[compDW(0,10)]==0x33334444 && (cold.r[compDW(0,1)]&ProcmonDW1Mask)==0x00AA00BB);
+     assert((cold.r[clDW(0,5)]&3)==3 && (cold.r[clDW(0,5)]&CLPowerDownEnable) && cold.r[clDW(0,10)]==0x30000 && cold.r[clDW(0,12)]==0x80);
+     assert(r[14]==0x80 && r[15]==0x30000 && verify(cold,0)==(8|16|32));
+     uint64_t bad[BootWords];for(unsigned i=0;i<BootWords;++i)bad[i]=boot[i];bad[1]&=~CompInit;
+     IO again;again.lost(0);uint64_t r2[Words];
+     assert(init(again,0,r2,bad)==Status::Initialised && r2[12]==0 && r2[13]==0 && r2[8]==9 && verify(again,0)==0);
+     for(unsigned i=0;i<BootWords;++i)bad[i]=boot[i];bad[5]=UINT32_MAX;
+     IO third;third.lost(0);
+     assert(init(third,0,r2,bad)==Status::Initialised && r2[12]==0 && verify(third,0)==0);
+     IO same;same.lost(0);same.r[clDW(0,5)]=3;same.r[clDW(0,10)]=0x30000;same.r[clDW(0,12)]=0x90;
+     assert(init(same,0,r2,boot)==Status::Initialised && r2[13]==(1|2|4) && r2[8]==9 && same.r[clDW(0,12)]==0x90);
+     IO fine;fine.programmed(0);fine.r[compDW(0,9)]=0x11112222;fine.r[compDW(0,10)]=0x33334444;fine.r[compDW(0,1)]=0x00AA00BB;
+     fine.r[clDW(0,5)]=CLPowerDownEnable|3|0x40;fine.r[clDW(0,10)]=0x30000;fine.r[clDW(0,12)]=0x90;
+     assert(verify(fine,0)==(8|16|32) && init(fine,0,r2,boot)==Status::Initialised && r2[13]==(1|2|4) && verify(fine,0)==(8|16|32));
+    }
     // Register addresses are the i915 ones.
     assert(compDW(0,3)==0x16210C && compDW(1,9)==0x6C124 && clDW(0,5)==0x162014 && txDW8Lane0(0)==0x1628A0 &&
            txDW8Group(1)==0x6C6A0 && pcsDW1Lane0(0)==0x162804 && pcsDW1Group(0)==0x162604 && Misc[1]==0x64C04);

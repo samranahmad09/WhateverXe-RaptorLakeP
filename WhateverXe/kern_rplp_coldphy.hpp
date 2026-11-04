@@ -36,10 +36,25 @@ inline bool procmon(uint32_t dw3,Procmon &p) {
 // process/voltage information.
 constexpr uint32_t Unreadable=256,UnknownProcmon=512;
 enum class Status : uint32_t {Verified,Initialised,Unreadable,UnknownProcmon,Mismatch};
-// Per-PHY record, twelve words: 0 checks before, 1 COMP_DW3, 2 PHY_MISC before, 3 TX_DW8 lane 0 before, 4 PCS_DW1
+// Per-PHY record, sixteen words: 0 checks before, 1 COMP_DW3, 2 PHY_MISC before, 3 TX_DW8 lane 0 before, 4 PCS_DW1
 // lane 0 before, 5 COMP_DW0 before, 6 CL_DW5 before, 7 applied, 8 writes, 9 checks after, 10 COMP_DW0 after,
-// 11 CL_DW5 after.
-constexpr unsigned Words=12;
+// 11 CL_DW5 after, 12 boot reference used, 13 the boot words recreated (bit 0 COMP_DW1, 1 COMP_DW9, 2 COMP_DW10,
+// 3 CL_DW5 bits 1:0, 4 CL_DW10 bits 3:0, 5 CL_DW12 outside bits 0 and 4), 14 CL_DW12 after, 15 CL_DW10 after.
+constexpr unsigned Words=16;
+// The PHY's words as the firmware left them, twelve per PHY (N97FBPHYBoot): PHY_MISC, COMP_DW0, COMP_DW1, COMP_DW3,
+// COMP_DW8, COMP_DW9, COMP_DW10, CL_DW5, CL_DW10, CL_DW12, TX_DW8 lane 0, PCS_DW1 lane 0.
+constexpr unsigned BootWords=12;
+template<class IO> void snapshot(IO &io,unsigned phy,uint64_t *w) {
+    w[0]=io.read(Misc[phy]);w[1]=io.read(compDW(phy,0));w[2]=io.read(compDW(phy,1));w[3]=io.read(compDW(phy,3));
+    w[4]=io.read(compDW(phy,8));w[5]=io.read(compDW(phy,9));w[6]=io.read(compDW(phy,10));w[7]=io.read(clDW(phy,5));
+    w[8]=io.read(clDW(phy,10));w[9]=io.read(clDW(phy,12));w[10]=io.read(txDW8Lane0(phy));w[11]=io.read(pcsDW1Lane0(phy));
+}
+// A boot reference is usable when every word reads as a register (no all-ones) and the firmware had initialised the
+// PHY (COMP_INIT set, the compensation not powered down).
+inline bool bootUsable(const uint64_t *boot) {
+    for(unsigned i=0;i<BootWords;++i)if(boot[i]>=UINT32_MAX)return false;
+    return (boot[1]&CompInit) && !(boot[0]&MiscDEIOCompPowerDown);
+}
 template<class IO> uint32_t verify(IO &io,unsigned phy,uint64_t *r=nullptr) {
     const uint32_t misc=io.read(Misc[phy]),dw0=io.read(compDW(phy,0)),tx8=io.read(txDW8Lane0(phy)),pcs1=io.read(pcsDW1Lane0(phy)),
         dw1=io.read(compDW(phy,1)),dw3=io.read(compDW(phy,3)),dw8=io.read(compDW(phy,8)),dw9=io.read(compDW(phy,9)),dw10=io.read(compDW(phy,10)),
@@ -62,14 +77,23 @@ template<class IO> uint32_t verify(IO &io,unsigned phy,uint64_t *r=nullptr) {
 }
 // i915's sequence for one PHY: PHY_MISC compensation power-down cleared, ODCC clock select and divider on every lane,
 // DCC run once on every lane, the procmon reference values, IREFGEN on the master, COMP_INIT, CL power-down enable.
-template<class IO> Status init(IO &io,unsigned phy,uint64_t *r) {
+// With a usable boot reference (`boot`, BootWords, opt-in), the procmon words come from the firmware's own values
+// instead of i915's table, and after the sequence the common-lane bits the firmware had set and a power loss clears
+// are written back where they differ: CL_DW5 bits 1:0 (i915 sets them in its DP enable: "SUS Clock Config 11b"),
+// CL_DW10 bits 3:0 and CL_DW12 outside bits 0 and 4 (bit 0 is the AUX lane enable the native path toggles, bit 4
+// follows the AUX well request). Round 49: with the i915 sequence alone the AUX A IO well never reported its state bit
+// after the power loss while the DDI A IO well did; the firmware's PHY state is the one the panel ran with at boot.
+constexpr uint32_t SusClockConfigMask=3U,CLDW10LowMask=0xFU,CLDW12ExcludedMask=0x11U;
+template<class IO> Status init(IO &io,unsigned phy,uint64_t *r,const uint64_t *boot=nullptr) {
     for(unsigned i=0;i<Words;++i)r[i]=0;
     const auto checks=verify(io,phy,r);r[0]=checks;
     if(checks&Unreadable)return Status::Unreadable;
     if(checks&UnknownProcmon)return Status::UnknownProcmon;
-    if(!checks) {r[9]=0;r[10]=io.read(compDW(phy,0));r[11]=io.read(clDW(phy,5));return Status::Verified;}
+    const bool useBoot=boot && bootUsable(boot);r[12]=useBoot;
+    if(!checks) {r[9]=0;r[10]=io.read(compDW(phy,0));r[11]=io.read(clDW(phy,5));r[14]=io.read(clDW(phy,12));r[15]=io.read(clDW(phy,10));return Status::Verified;}
     Procmon p {};procmon(uint32_t(r[1]),p);
-    uint32_t writes=0;
+    if(useBoot) {p.dw1=uint32_t(boot[2])&ProcmonDW1Mask;p.dw9=uint32_t(boot[5]);p.dw10=uint32_t(boot[6]);}
+    uint32_t writes=0,recreated=0;
     auto write=[&](uint32_t reg,uint32_t v) {io.write(reg,v);++writes;};
     const uint32_t misc=io.read(Misc[phy]);
     if(misc&MiscDEIOCompPowerDown)write(Misc[phy],misc&~MiscDEIOCompPowerDown);
@@ -77,11 +101,28 @@ template<class IO> Status init(IO &io,unsigned phy,uint64_t *r) {
     v=io.read(pcsDW1Lane0(phy));v&=~DCCModeSelectMask;write(pcsDW1Group(phy),v);
     v=io.read(compDW(phy,1));write(compDW(phy,1),(v&~ProcmonDW1Mask)|p.dw1);
     write(compDW(phy,9),p.dw9);write(compDW(phy,10),p.dw10);
+    if(useBoot)recreated|=1|2|4;
     if(phy==0) {v=io.read(compDW(phy,8));write(compDW(phy,8),v|IRefGen);}
     v=io.read(compDW(phy,0));write(compDW(phy,0),v|CompInit);
-    v=io.read(clDW(phy,5));write(clDW(phy,5),v|CLPowerDownEnable);
-    r[7]=1;r[8]=writes;
-    const auto after=verify(io,phy);r[9]=after;r[10]=io.read(compDW(phy,0));r[11]=io.read(clDW(phy,5));
+    v=io.read(clDW(phy,5));v|=CLPowerDownEnable;
+    if(useBoot && (v&SusClockConfigMask)!=(uint32_t(boot[7])&SusClockConfigMask)) {v=(v&~SusClockConfigMask)|(uint32_t(boot[7])&SusClockConfigMask);recreated|=8;}
+    write(clDW(phy,5),v);
+    if(useBoot) {
+        v=io.read(clDW(phy,10));
+        if((v&CLDW10LowMask)!=(uint32_t(boot[8])&CLDW10LowMask)) {write(clDW(phy,10),(v&~CLDW10LowMask)|(uint32_t(boot[8])&CLDW10LowMask));recreated|=16;}
+        v=io.read(clDW(phy,12));
+        if((v&~CLDW12ExcludedMask)!=(uint32_t(boot[9])&~CLDW12ExcludedMask)) {write(clDW(phy,12),(v&CLDW12ExcludedMask)|(uint32_t(boot[9])&~CLDW12ExcludedMask));recreated|=32;}
+    }
+    r[7]=1;r[8]=writes;r[13]=recreated;
+    auto after=verify(io,phy);
+    if(useBoot) {
+        // The table's procmon checks do not apply to the firmware's values; the firmware's own words must read back.
+        after&=~(8U|16U|32U);
+        if((io.read(compDW(phy,1))&ProcmonDW1Mask)!=p.dw1)after|=8;
+        if(io.read(compDW(phy,9))!=p.dw9)after|=16;
+        if(io.read(compDW(phy,10))!=p.dw10)after|=32;
+    }
+    r[9]=after;r[10]=io.read(compDW(phy,0));r[11]=io.read(clDW(phy,5));r[14]=io.read(clDW(phy,12));r[15]=io.read(clDW(phy,10));
     return after ? Status::Mismatch : Status::Initialised;
 }
 }

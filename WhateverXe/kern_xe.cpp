@@ -216,10 +216,11 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
 // of its own (the native path's bring-up, the link training and its tear-down run inside that window, and no power
 // request sees the training itself). Header: schema, cold, start uptime ns, samples taken, interval us, the wake
 // count; then per sample: uptime ns, PP_STATUS, PP_CONTROL, DPLL0_ENABLE, DPCLKA_CFGCR0, DDI_BUF_CTL A, DP_TP_CTL A,
-// DP_TP_STATUS A, PORT_CL_DW10 A, PORT_CL_DW12 A, DDI_AUX_CTL A, PWR_WELL_CTL_DDI. Reads only; published twice on the
-// way and once at the end.
-constexpr unsigned rplpPortTraceSamples=160,rplpPortTraceWordsPerSample=12,rplpPortTraceHeader=8;
-constexpr uint32_t rplpPortTraceRegs[rplpPortTraceWordsPerSample-1] {0xC7200,0xC7204,0x46010,0x164280,0x64000,0x60540,0x60544,0x162028,0x162030,0x64010,0x45454};
+// DP_TP_STATUS A, PORT_CL_DW10 A, PORT_CL_DW12 A, DDI_AUX_CTL A, PWR_WELL_CTL_DDI, PWR_WELL_CTL_AUX, PWR_WELL_CTL
+// (r335: the AUX well's request and state bits through the training window). Header word 6 carries the words per
+// sample. Reads only; published twice on the way and once at the end.
+constexpr unsigned rplpPortTraceSamples=160,rplpPortTraceWordsPerSample=14,rplpPortTraceHeader=8;
+constexpr uint32_t rplpPortTraceRegs[rplpPortTraceWordsPerSample-1] {0xC7200,0xC7204,0x46010,0x164280,0x64000,0x60540,0x60544,0x162028,0x162030,0x64010,0x45454,0x45444,0x45404};
 uint64_t rplpPortTrace[rplpPortTraceHeader+rplpPortTraceSamples*rplpPortTraceWordsPerSample];
 IOLock *rplpPortTraceLock;thread_t rplpPortTraceThread;
 uint32_t rplpPortTraceWanted;bool rplpPortTraceCold;volatile uint8_t *rplpPortTraceBar;
@@ -238,7 +239,7 @@ void rplpPortTraceWorker(void *,wait_result_t) {
   IOLockUnlock(rplpPortTraceLock);
   if(!bar)continue;
   auto &t=rplpPortTrace;memset(t,0,sizeof(t));
-  t[0]=1;t[1]=cold;t[2]=rplpWakeNow();t[4]=25000;t[5]=rplpWakeLog[32];
+  t[0]=1;t[1]=cold;t[2]=rplpWakeNow();t[4]=25000;t[5]=rplpWakeLog[32];t[6]=rplpPortTraceWordsPerSample;
   for(unsigned s=0;s<rplpPortTraceSamples;++s) {
    auto e=t+rplpPortTraceHeader+s*rplpPortTraceWordsPerSample;
    e[0]=rplpWakeNow();
@@ -4699,10 +4700,13 @@ struct Display13FBPowerContext {
     // the last power requests with the port's state at each (N97FBPowerRing, N97FBPortRing), for a wake after a real
     // power loss (kern_rplp_port.hpp).
     uint64_t portBoot[RPLPPort::Words] {};bool portBootValid {};
-    uint64_t powerRing[16*8] {},portRing[8*RPLPPort::Words] {};uint32_t ringNext {};
+    uint64_t powerRing[32*8] {},portRing[12*RPLPPort::Words] {};uint32_t ringNext {};
     // Both rings as they stood at the first DDI release of a wake (the native path's tear-down after a failed link
     // training, Codex Q45), so the requests before it survive whatever follows; cleared by the restore.
-    uint64_t powerRingFrozen[16*8] {},portRingFrozen[8*RPLPPort::Words] {};bool ringFrozen {};
+    uint64_t powerRingFrozen[32*8] {},portRingFrozen[12*RPLPPort::Words] {};bool ringFrozen {};
+    // The combo PHYs' words as the firmware left them (N97FBPHYBoot, kern_rplp_coldphy.hpp), recreated on a cold resume
+    // with -wex-rplp-coldphyboot.
+    uint64_t phyBoot[RPLPColdPHY::Count*RPLPColdPHY::BootWords] {};bool phyBootValid {};
     // The MBUS credit words as the firmware left them (N97FBCreditBoot), restored on a cold resume.
     uint64_t creditBoot[RPLPPort::Credits] {};bool creditBootValid {};
     volatile uintptr_t arbitrationWriterBase {}; // Qualified in sleepable engine context.
@@ -9149,6 +9153,8 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
 		RPLPPort::snapshot(portIO,c.portBoot);c.portBoot[31]=rplpUptimeNs();c.portBootValid=true;portBootTaken=true;
 		RPLPPort::snapshotCredits(portIO,c.creditBoot);c.creditBootValid=true;
+		for(unsigned i=0;i<RPLPColdPHY::Count;++i)RPLPColdPHY::snapshot(portIO,i,c.phyBoot+RPLPColdPHY::BootWords*i);
+		c.phyBootValid=true;
 	}
 	// After a real power loss the PLL may be off without this owner having stopped it: restart it at the last clock.
 	if(clock.status==Display13Clock::Status::Disabled && (c.clockStopped || cold) && c.resumeClockHz &&
@@ -9221,7 +9227,9 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
 		creditRecord[1]=checkKernelArgument("-wex-rplp-coldinit");creditRecord[2]=c.creditBootValid;
 		if(creditRecord[1] && c.creditBootValid && acquired.status==Display13Power::Status::Complete) {
-			uint64_t r[12] {};creditRecord[3]=static_cast<uint32_t>(RPLPPort::restoreCredits(portIO,c.creditBoot,r));
+			uint32_t pipes=0;const uint32_t wells=portIO.read(0x45404);
+			for(unsigned p=0;p<3;++p)if(wells!=UINT32_MAX && Display13FBIRQ::powered(wells,p))pipes|=1U<<p;
+			uint64_t r[12] {};creditRecord[3]=static_cast<uint32_t>(RPLPPort::restoreCredits(portIO,c.creditBoot,r,pipes));
 			for(unsigned i=0;i<12;++i)creditRecord[4+i]=r[i];
 		}
 		ppsRecord[1]=checkKernelArgument("-wex-rplp-coldpps");pllRecord[1]=checkKernelArgument("-wex-rplp-coldpll");
@@ -9262,6 +9270,7 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	}
 	if(portBootTaken) {
 		root->setProperty("N97FBPortBoot",c.portBoot,sizeof(c.portBoot));root->setProperty("N97FBCreditBoot",c.creditBoot,sizeof(c.creditBoot));
+		root->setProperty("N97FBPHYBoot",c.phyBoot,sizeof(c.phyBoot));
 	}
 	if(portColdTaken) {
 		root->setProperty("N97FBPortCold",portCold,sizeof(portCold));
@@ -9445,10 +9454,13 @@ static void rplpColdPrerequisites(uint64_t *rw) {
 		uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}
 		void write(uint32_t r,uint32_t v) {*reinterpret_cast<volatile uint32_t *>(bar+r)=v;}
 	} phyIO {bar};
-	uint64_t phy[2+RPLPColdPHY::Count*(RPLPColdPHY::Words+1)] {1,RPLPColdPHY::Count};
+	// -wex-rplp-coldphyboot: the firmware's own PHY words (N97FBPHYBoot, the first engine enable) in place of i915's table
+	// and the common-lane bits a power loss clears written back (kern_rplp_coldphy.hpp init with a boot reference).
+	const bool phyBoot=checkKernelArgument("-wex-rplp-coldphyboot") && c.phyBootValid;
+	uint64_t phy[2+RPLPColdPHY::Count*(RPLPColdPHY::Words+1)] {phyBoot ? 2U : 1U,RPLPColdPHY::Count};
 	for(unsigned i=0;i<RPLPColdPHY::Count;++i) {
 		auto r=phy+2+i*(RPLPColdPHY::Words+1);
-		r[0]=static_cast<uint32_t>(RPLPColdPHY::init(phyIO,i,r+1));
+		r[0]=static_cast<uint32_t>(RPLPColdPHY::init(phyIO,i,r+1,phyBoot ? c.phyBoot+RPLPColdPHY::BootWords*i : nullptr));
 	}
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBColdPHY",phy,sizeof(phy));
 }
@@ -9933,11 +9945,11 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 		// N97FBPortRing (8 entries in kern_rplp_port.hpp's order, [30] sequence, [31] uptime ns): the last requests with the
 		// port's state at each, for a wake's sequence (round 48: only the last request survived in N97FBAcquireWait).
 		{
-			const auto t=rplpUptimeNs();auto e=c.powerRing+8*(c.ringNext%16);
+			const auto t=rplpUptimeNs();auto e=c.powerRing+8*(c.ringNext%32);
 			e[0]=acquireWait[1];e[1]=operation;e[2]=domain;e[3]=acquireWait[4];e[4]=t;e[5]=acquireWait[8];e[6]=acquireWait[9];e[7]=acquireWait[10];
 			if(c.map && c.map->getVirtualAddress()) {
 				RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
-				auto p=c.portRing+RPLPPort::Words*(c.ringNext%8);
+				auto p=c.portRing+RPLPPort::Words*(c.ringNext%12);
 				RPLPPort::snapshot(portIO,*reinterpret_cast<uint64_t (*)[RPLPPort::Words]>(p));p[30]=acquireWait[1];p[31]=t;
 			}
 			++c.ringNext;
