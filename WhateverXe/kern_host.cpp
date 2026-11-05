@@ -60,7 +60,7 @@ void XeHost::processKernel(KernelPatcher &patcher) {
   // Catalogued without a backend: read-only evidence, no hooks or admission.
   xe.observeRaptorLakeP(gpu);
  }
- if(!active || resetFramebuffer==FB_DETECT){resetFramebuffer=FB_NONE;if(!active || !wakeLog)graphics.switchOff();}
+ if(!active || resetFramebuffer==FB_DETECT){resetFramebuffer=FB_NONE;if(!active || !checkKernelArgument("-wex-rplp-wakelog"))graphics.switchOff();}
  DeviceInfo::deleter(info);
 }
 void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
