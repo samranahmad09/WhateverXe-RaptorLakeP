@@ -80,9 +80,9 @@ template<class Mem> void sample(Mem &m,const Globals &g,uint64_t owner,uint64_t 
         e[1]=uint64_t(m.read8(c+ControllerWsWait))|uint64_t(m.read8(c+ControllerNeedsWork))<<8|uint64_t(m.read8(c+ControllerDidWork))<<16|
             uint64_t(m.read8(c+ControllerAsyncWork))<<24|uint64_t(m.read32(c+ControllerComputed))<<32;
         ++controllers;
-        const auto array=m.read64(c+ControllerFBs);
-        for(unsigned j=0;j<MaxFBsPerController && fbs<MaxFBs && pointer(array);++j) {
-            const auto fb=m.read64(array+8*j);
+        // The controller's framebuffer array lies inline at ControllerFBs, null-terminated (public 585.1: fFbs[]).
+        for(unsigned j=0;j<MaxFBsPerController && fbs<MaxFBs;++j) {
+            const auto fb=m.read64(c+ControllerFBs+8*j);
             if(!pointer(fb))break;
             auto f=w+14+3*fbs;
             f[0]=fb;
@@ -108,6 +108,36 @@ template<class Mem> void sample(Mem &m,const Globals &g,uint64_t owner,uint64_t 
     }
     w[41]=last;w[43]=machine;
     w[1]=uint64_t(phase&0xFFU)|uint64_t(controllers)<<8|uint64_t(fbs)<<16|uint64_t(n)<<24|uint64_t(when&0xFFU)<<32|uint64_t(generation&0xFFFFU)<<40;
+}
+// -wex-rplp-wsstart (round 55): a controller whose framebuffers the window server never opens keeps its window-server
+// wait byte set for good, and the family's systemWork (public 585.1) sends the power-down notification to the server,
+// and afterwards the early WillSleep to the accelerators, only while no controller has that byte set. wsStart() walks
+// the family's controller list and, for a controller whose every framebuffer `isPlaceholder` admits (the caller
+// decides by class) and whose wait byte is set, writes the byte to zero when `clear` is set: the state the server would
+// have left had it opened those framebuffers. r[0..3] the controllers, r[4..7] per controller: wait before | wait after
+// << 8 | framebuffers << 16 | all placeholders << 24 | cleared << 25; r[8] the controllers seen; r[9] the mask cleared.
+template<class Mem,class IsPlaceholder> unsigned wsStart(Mem &m,const Globals &g,IsPlaceholder isPlaceholder,bool clear,uint64_t (&r)[12]) {
+    for(auto &v:r)v=0;
+    uint64_t c=g.controllers ? m.read64(g.controllers) : 0;
+    unsigned n=0;
+    for(;n<MaxControllers && pointer(c);++n) {
+        r[n]=c;
+        const uint8_t wait=m.read8(c+ControllerWsWait);
+        unsigned fbs=0;bool placeholder=true;
+        for(unsigned j=0;j<MaxFBsPerController;++j) {
+            const auto fb=m.read64(c+ControllerFBs+8*j);
+            if(!pointer(fb))break;
+            ++fbs;
+            if(!isPlaceholder(fb))placeholder=false;
+        }
+        uint64_t v=uint64_t(wait)|uint64_t(fbs)<<16|uint64_t(fbs && placeholder)<<24;
+        if(wait && fbs && placeholder && clear) {m.write8(c+ControllerWsWait,0);v|=1ULL<<25;r[9]|=1U<<n;}
+        v|=uint64_t(m.read8(c+ControllerWsWait))<<8;
+        r[4+n]=v;
+        c=m.read64(c+ControllerNext);
+    }
+    r[8]=n;
+    return n;
 }
 // RPLPWakePipes: eight slots of PipeSlotWords. A slot: 0 schema; 1 when | valid << 8 | pipes << 16; 2 uptime ns; 3
 // mach_absolute_time; 4 the accelerator; 5 the display machine; 6 count | nesting << 32; 7 the accelerator's flags |

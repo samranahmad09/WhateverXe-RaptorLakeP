@@ -7,6 +7,8 @@ struct Mem {
     std::map<uint64_t,uint8_t> b;
     unsigned reads {};
     void put8(uint64_t a,uint8_t v) {b[a]=v;}
+    unsigned writes {};
+    void write8(uint64_t a,uint8_t v) {++writes;b[a]=v;}
     void put32(uint64_t a,uint32_t v) {for(unsigned i=0;i<4;++i)b[a+i]=uint8_t(v>>(8*i));}
     void put64(uint64_t a,uint64_t v) {for(unsigned i=0;i<8;++i)b[a+i]=uint8_t(v>>(8*i));}
     uint8_t read8(uint64_t a) {++reads;auto it=b.find(a);return it==b.end() ? 0 : it->second;}
@@ -21,7 +23,7 @@ int main() {
     Mem m;
     const uint64_t owner=K+0x10000,machine=K+0x20000,pipe0=K+0x30000,pipe1=K+0x31000,notifier0=K+0x40000,notifier1=K+0x41000,
         timing0=K+0x50000,timing1=K+0x51000,fb0=K+0x60000,fb1=K+0x61000,fb2=K+0x62000,fb3=K+0x63000,priv0=K+0x70000,priv1=K+0x71000,
-        priv2=K+0x72000,priv3=K+0x73000,c0=K+0x80000,c1=K+0x81000,array0=K+0x90000,array1=K+0x91000,vtable=K+0xA0000,
+        priv2=K+0x72000,priv3=K+0x73000,c0=K+0x80000,c1=K+0x81000,vtable=K+0xA0000,
         fnSleep=K+0xB0000,fnWake=K+0xB1000;
     // The accelerator: its display machine with two pipes, flags, cached state, the vtable's two slots.
     m.put64(owner,vtable);m.put64(owner+AccelMachine,machine);m.put32(owner+AccelFlags,0x1C2C6DC4);m.put32(owner+AccelCached,2);
@@ -41,7 +43,8 @@ int main() {
     const uint64_t gAckTo=K+0xD0000,gAckRef=K+0xD0008,gMux=K+0xD0010,gPower=K+0xD0011,gWS=K+0xD0012,gList=K+0xD0020;
     m.put64(gAckTo,K+0xE0000);m.put64(gAckRef,0x1234);m.put8(gMux,0);m.put8(gPower,1);m.put8(gWS,1);m.put64(gList,c0);
     m.put64(c0+ControllerNext,c1);m.put64(c1+ControllerNext,0);
-    m.put64(c0+ControllerFBs,array0);m.put64(c1+ControllerFBs,array1);
+    // The framebuffer arrays lie inline in the controllers (fFbs[]).
+    const uint64_t array0=c0+ControllerFBs,array1=c1+ControllerFBs;
     m.put64(c0+ControllerPowerThread,K+0xF0000);m.put8(c0+ControllerWsWait,0x6);m.put8(c0+ControllerNeedsWork,1);m.put8(c0+ControllerDidWork,2);m.put8(c0+ControllerAsyncWork,0);m.put32(c0+ControllerComputed,0x1048);
     m.put8(c1+ControllerWsWait,0x1);m.put32(c1+ControllerComputed,0x8);
     m.put64(array0,fb0);m.put64(array0+8,fb1);m.put64(array0+16,fb2);m.put64(array0+24,0);
@@ -93,6 +96,22 @@ int main() {
     assert(s[PipeSlotHeader+2*PipeWords]==0);
     pipeSlot(m,0,s,1,1,2,3,4,5);
     assert(s[1]==1 && s[4]==0 && s[5]==0 && s[8]==0 && s[PipeSlotHeader]==0);
+    // wsStart: the second controller (one placeholder framebuffer, wait byte set) is cleared; the first (three real
+    // framebuffers, wait 0x6) is left alone; without `clear` nothing is written but the same is reported.
+    {
+        auto placeholder=[&](uint64_t fb) {return fb==fb3;};
+        uint64_t r[12];m.writes=0;
+        assert(wsStart(m,g,placeholder,false,r)==2 && r[0]==c0 && r[1]==c1 && r[8]==2 && r[9]==0 && m.writes==0);
+        assert(r[4]==(0x6ULL|0x6ULL<<8|3ULL<<16) && r[5]==(0x1ULL|0x1ULL<<8|1ULL<<16|1ULL<<24));
+        assert(wsStart(m,g,placeholder,true,r)==2 && r[9]==0x2 && m.writes==1 && m.read8(c1+ControllerWsWait)==0 && m.read8(c0+ControllerWsWait)==0x6);
+        assert(r[4]==(0x6ULL|0x6ULL<<8|3ULL<<16) && r[5]==(0x1ULL|0ULL<<8|1ULL<<16|1ULL<<24|1ULL<<25));
+        assert(wsStart(m,g,placeholder,true,r)==2 && r[9]==0 && m.writes==1);   // already clear: nothing written
+        m.put8(c1+ControllerWsWait,1);
+        auto none=[](uint64_t) {return false;};
+        assert(wsStart(m,g,none,true,r)==2 && r[9]==0 && m.writes==1 && r[5]==(0x1ULL|0x1ULL<<8|1ULL<<16));
+        Globals empty;
+        assert(wsStart(m,empty,placeholder,true,r)==0 && r[8]==0);
+    }
     // The event helpers.
     assert(powerThread(m,fb0)==K+0xF0000 && powerThread(m,fb3)==0 && powerThread(m,0)==0);
     assert(fbIndex(m,fb2)==2 && fbIndex(m,fb3)==0xFF && fbIndex(m,0)==0xFF);

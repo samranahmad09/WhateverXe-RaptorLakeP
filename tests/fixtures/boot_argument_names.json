@@ -146,6 +146,7 @@
   "-wex-rplp-fwwait": [],
   "-wex-rplp-pciwake": [],
   "-wex-rplp-coldcore": [],
+  "-wex-rplp-wsstart": [],
   "-wex-no-va-renderer": [],
   "-wex-rplp-wakelog": [],
   "wex-rplp-urb-banks": [],

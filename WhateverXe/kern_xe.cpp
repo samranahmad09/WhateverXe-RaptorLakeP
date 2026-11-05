@@ -228,8 +228,9 @@ struct RPLPKernelMem {
  uint64_t read64(uint64_t a) const {uint64_t v;memcpy(&v,reinterpret_cast<const void *>(a),sizeof(v));return v;}
  uint32_t read32(uint64_t a) const {uint32_t v;memcpy(&v,reinterpret_cast<const void *>(a),sizeof(v));return v;}
  uint8_t read8(uint64_t a) const {return *reinterpret_cast<const uint8_t *>(a);}
+ void write8(uint64_t a,uint8_t v) const {*reinterpret_cast<volatile uint8_t *>(a)=v;}
 };
-void rplpIOGSample(uint32_t when);void rplpPipesRecord(unsigned slot,uint32_t when);void rplpIOGKick();void rplpWakeFBEventsReset();
+void rplpIOGSample(uint32_t when);void rplpPipesRecord(unsigned slot,uint32_t when);void rplpIOGKick();void rplpWakeFBEventsReset();void rplpWSStartRun();
 void rplpForceWakeUnderflowCheck(void *owner,bool enable,unsigned domains,uint64_t kind,const uint32_t *before,const uint32_t *after,const uint64_t *event,const void *caller);
 void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
@@ -347,7 +348,7 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
    memset(rplpWakeSubmits,0,sizeof(rplpWakeSubmits));rplpWakeSubmits[0]=1;
    memset(rplpWakePCI,0,sizeof(rplpWakePCI));rplpWakePCI[0]=1;rplpWakePCISleep();
    rplpWakeFBEventsReset();memset(rplpForceWakeUnderflow,0,sizeof(rplpForceWakeUnderflow));rplpForceWakeUnderflow[0]=1;
-   rplpWakeIOG[7]=0;rplpPipesRecord(1,1);rplpIOGSample(1);
+   rplpWakeIOG[7]=0;rplpPipesRecord(1,1);rplpIOGSample(1);rplpWSStartRun();rplpIOGSample(8);
    rplpGTSnapshotAwake(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE),rplpGTSleep,4,0,rplpWakeLog[32]);rplpGTSleepValid=true;
    __atomic_store_n(&rplpWakeEngineReturned,0U,__ATOMIC_RELEASE);__atomic_store_n(&rplpWakeForceWakeSeq,0U,__ATOMIC_RELEASE);
    rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);rplpIOGKick();nvram=true;break;
@@ -369,8 +370,10 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
 // DP_TP_STATUS A, PORT_CL_DW10 A, PORT_CL_DW12 A, DDI_AUX_CTL A, PWR_WELL_CTL_DDI, PWR_WELL_CTL_AUX, PWR_WELL_CTL
 // (r335: the AUX well's request and state bits through the training window). Header word 6 carries the words per
 // sample. Reads only; published twice on the way and once at the end.
-constexpr unsigned rplpPortTraceSamples=160,rplpPortTraceWordsPerSample=14,rplpPortTraceHeader=8;
-constexpr uint32_t rplpPortTraceRegs[rplpPortTraceWordsPerSample-1] {0xC7200,0xC7204,0x46010,0x164280,0x64000,0x60540,0x60544,0x162028,0x162030,0x64010,0x45454,0x45444,0x45404};
+// r343: CHICKEN_MISC_2 and pipe A's primary plane control, surface, live surface and stride follow (words 14..18).
+constexpr unsigned rplpPortTraceSamples=160,rplpPortTraceWordsPerSample=19,rplpPortTraceHeader=8;
+constexpr uint32_t rplpPortTraceRegs[rplpPortTraceWordsPerSample-1] {0xC7200,0xC7204,0x46010,0x164280,0x64000,0x60540,0x60544,0x162028,0x162030,0x64010,0x45454,0x45444,0x45404,
+    0x42084,0x70180,0x7019C,0x701AC,0x70188};
 uint64_t rplpPortTrace[rplpPortTraceHeader+rplpPortTraceSamples*rplpPortTraceWordsPerSample];
 IOLock *rplpPortTraceLock;thread_t rplpPortTraceThread;
 uint32_t rplpPortTraceWanted;bool rplpPortTraceCold;volatile uint8_t *rplpPortTraceBar;
@@ -439,6 +442,25 @@ void rplpIOGSample(uint32_t when) {
  RPLPIOG::sample(m,rplpIOGGlobals,owner,w,rplpWakeNow(),mach_absolute_time(),__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE),when,static_cast<uint32_t>(rplpWakeLog[32]));
  if(!n)h[10]=(w[4]&0xFFFFFFULL)|uint64_t(rplpIOGGlobals.verboseBoot ? m.read8(rplpIOGGlobals.verboseBoot) : 0xFFU)<<24|uint64_t(w[6]!=0)<<32;
  h[7]=n+1;
+}
+// -wex-rplp-wsstart (round 55, kern_rplp_iog.hpp wsStart): at will-sleep, clear the window-server wait byte of a
+// framebuffer controller whose every framebuffer is an IONDRVFramebuffer (the placeholder the family attaches to the
+// undriven dGPU, which the window server never opens). RPLPWSStart: schema, flag, uptime ns, then the twelve record
+// words of wsStart. Without the flag the walk runs and reports, and nothing is written.
+uint64_t rplpWSStart[16] {1};
+void rplpWSStartRun() {
+ auto &r=rplpWSStart;r[1]=checkKernelArgument("-wex-rplp-wsstart");r[2]=rplpWakeNow();
+ for(unsigned i=3;i<16;++i)r[i]=0;
+ if(rplpIOGGlobals.controllers) {
+  RPLPKernelMem m;uint64_t w[12];
+  RPLPIOG::wsStart(m,rplpIOGGlobals,[](uint64_t fb) {
+   const OSMetaClass *mc=reinterpret_cast<const OSObject *>(fb)->getMetaClass();
+   const char *name=mc ? mc->getClassName() : nullptr;
+   return name && strcmp(name,"IONDRVFramebuffer")==0;
+  },r[1]!=0,w);
+  for(unsigned i=0;i<12;++i)r[3+i]=w[i];
+ }
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWSStart",r,sizeof(r));
 }
 void rplpPipesRecord(unsigned slot,uint32_t when) {
  if(slot>=RPLPIOG::PipeSlots)return;
