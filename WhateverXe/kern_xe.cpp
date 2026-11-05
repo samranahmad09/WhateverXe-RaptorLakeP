@@ -13061,7 +13061,7 @@ bool XE::wrapAlderLakeNNativeIRQ(IOService *that) {
 
 bool XE::wrapTGLAcceleratorEngine(IOService *that) {
  RPLPWakeEngineScope rplpWakeScope;
- if(auto controller=callbackXE->tglObservationController)
+ if(auto controller=static_cast<IOService *>(callbackXE->tglObservationController))
   if(auto n=OSDynamicCast(OSNumber,controller->getProperty("NumFrameBuffer")))rplpNumFrameBuffer=n->unsigned32BitValue();
  if (callbackXE->adlnDetected) {
   auto a=reinterpret_cast<uint8_t *>(that);
