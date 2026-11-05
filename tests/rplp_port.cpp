@@ -150,6 +150,48 @@ int main() {
         stuck.r=io.r;stuck.r[0x7003C]=0;
         assert(restoreCredits(stuck,boot,r)==Status::Mismatch && r[10]==(1U<<2));
     }
+    {   // Display core registers: a snapshot reads a pipe's bank only while its well is powered; the restore writes
+        // back the bandwidth buddy registers, CHICKEN_MISC_2 with its DPT-disable bit and the powered pipes' chicken
+        // registers, and reports the rest as skipped.
+        struct CIO {
+            std::map<uint32_t,uint32_t> r;std::vector<std::pair<uint32_t,uint32_t>> writes;uint32_t allones {~0U};
+            uint32_t read(uint32_t reg) {assert(r.count(reg));return reg==allones ? UINT32_MAX : r[reg];}
+            void write(uint32_t reg,uint32_t v) {assert(r.count(reg));writes.emplace_back(reg,v);r[reg]=v;}
+        } io;
+        for(auto reg:CoreRegs)io.r[reg]=0;
+        io.r[0x45038]=0x111010;io.r[0x45130]=0x8080000;io.r[0x45134]=0x1E;io.r[0x45140]=0x8080000;io.r[0x45144]=0x1E;
+        io.r[0x42084]=0x40000008;io.r[0x70038]=0x80000040;io.r[0x71038]=0x40;io.r[0x7003C]=0x4802;io.r[0x51004]=0x12345;
+        uint64_t boot[CoreWords] {};snapshotCore(io,boot,1);
+        assert(boot[0]==1 && boot[2]==1 && boot[3]==0x3FFFF && boot[4]==0x111010 && boot[15]==0x40000008 && boot[19]==0x12345 &&
+            boot[21]==0x80000040 && boot[22]==UINT32_MAX && boot[23]==UINT32_MAX);
+        // The power loss: every register zero. Pipe A powered only: pipe B's chicken register is skipped.
+        for(auto reg:CoreRegs)io.r[reg]=0;
+        uint64_t r[16] {};
+        assert(restoreCore(io,boot,r,1)==Status::Applied && r[14]==0x20878 && r[15]==0x80000 && io.writes.size()==6);
+        assert(io.r[0x42084]==0x40000008 && io.r[0x45130]==0x8080000 && io.r[0x45134]==0x1E && io.r[0x45140]==0x8080000 &&
+            io.r[0x45144]==0x1E && io.r[0x70038]==0x80000040 && io.r[0x71038]==0 && io.r[0x45038]==0 && io.r[0x7003C]==0);
+        assert(r[0]==0 && r[4]==0 && r[6]==UINT32_MAX && r[7]==0x8080000 && r[11]==0x40000008 && r[12]==0x80000040 && r[13]==UINT32_MAX);
+        io.writes.clear();
+        assert(restoreCore(io,boot,r,1)==Status::Skipped && io.writes.empty() && r[14]==0 && r[15]==0x80000);
+        // A boot value without the DPT-disable bit still gets it.
+        uint64_t noDPT[CoreWords];for(unsigned i=0;i<CoreWords;++i)noDPT[i]=boot[i];noDPT[15]=0x8;
+        io.r[0x42084]=0x8;io.writes.clear();
+        assert(restoreCore(io,noDPT,r,1)==Status::Applied && io.writes.size()==1 && io.writes[0]==std::make_pair(0x42084U,0x40000008U));
+        // With both pipes powered the second chicken register is written too, but only from a reference that read it.
+        io.r[0x71038]=0;io.writes.clear();
+        assert(restoreCore(io,boot,r,3)==Status::Skipped && r[14]==0 && r[15]==(1U<<19) && io.writes.empty() && io.r[0x71038]==0);
+        uint64_t both[CoreWords] {};io.r[0x71038]=0x40;snapshotCore(io,both,3);io.r[0x71038]=0;io.writes.clear();
+        assert(both[23]==0x40 && restoreCore(io,both,r,3)==Status::Applied && r[14]==(1U<<19) && r[15]==0 && io.r[0x71038]==0x40);
+        // An unreadable register is skipped and reported; an empty reference writes nothing; a write that does not take.
+        io.allones=0x45140;io.r[0x45130]=0;io.writes.clear();
+        assert(restoreCore(io,boot,r,1)==Status::Applied && r[14]==(1U<<3) && (r[15]&(1U<<5)) && io.writes.size()==1);
+        io.allones=~0U;io.writes.clear();
+        uint64_t none[CoreWords] {};
+        assert(restoreCore(io,none,r,7)==Status::NoReference && io.writes.empty());
+        struct Stuck : CIO {void write(uint32_t reg,uint32_t v) {writes.emplace_back(reg,v);if(reg!=0x42084)r[reg]=v;}} stuck;
+        stuck.r=io.r;stuck.r[0x42084]=0;
+        assert(restoreCore(stuck,boot,r,1)==Status::Mismatch && (r[14]&(1U<<11)));
+    }
     puts("rplp_port ok");
     return 0;
 }

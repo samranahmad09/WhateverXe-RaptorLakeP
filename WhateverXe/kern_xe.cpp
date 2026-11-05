@@ -410,6 +410,15 @@ void rplpPortTraceWorker(void *,wait_result_t) {
    }
    IORegistryEntry::getRegistryRoot()->setProperty("N97GTWake",g,sizeof(g));
   }
+  // N97FBCoreWake: the display core registers four seconds into the wake, after the native path's bring-up (reads only;
+  // a pipe's bank only while its well is powered).
+  {
+   struct CoreIO {volatile uint8_t *bar;uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}} coreIO {bar};
+   uint64_t w[RPLPPort::CoreWords];uint32_t pipes=0;const uint32_t wells=coreIO.read(0x45404);
+   for(unsigned p=0;p<3;++p)if(wells!=UINT32_MAX && Display13FBIRQ::powered(wells,p))pipes|=1U<<p;
+   RPLPPort::snapshotCore(coreIO,w,pipes);w[1]=rplpWakeNow();
+   IORegistryEntry::getRegistryRoot()->setProperty("N97FBCoreWake",w,sizeof(w));
+  }
   rplpPipesRecord(5,5);rplpIOGSample(5);rplpWakeLogKick(false);
  }
 }
@@ -5020,6 +5029,9 @@ struct Display13FBPowerContext {
     uint64_t gtBoot[RPLPGT::Words] {};bool gtBootValid {};
     // The MBUS credit words as the firmware left them (N97FBCreditBoot), restored on a cold resume.
     uint64_t creditBoot[RPLPPort::Credits] {};bool creditBootValid {};
+    // The display core registers as the firmware left them (N97FBCoreBoot, kern_rplp_port.hpp CoreRegs), restored in
+    // part on a cold resume with -wex-rplp-coldcore.
+    uint64_t coreBoot[RPLPPort::CoreWords] {};bool coreBootValid {};
     volatile uintptr_t arbitrationWriterBase {}; // Qualified in sleepable engine context.
     IOLock *lock {};
     void *power {}, *controller {}, *access {};
@@ -9451,6 +9463,13 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	adlnPublishVBLConfigure();
 }
 
+// The pipes whose power wells are up (bit per pipe), for the register snapshots that read a pipe's bank only while powered.
+static uint32_t rplpPoweredPipes(RPLPPortIO &io) {
+	uint32_t pipes=0;const uint32_t wells=io.read(0x45404);
+	for(unsigned p=0;p<3;++p)if(wells!=UINT32_MAX && Display13FBIRQ::powered(wells,p))pipes|=1U<<p;
+	return pipes;
+}
+
 void XE::wrapAlderLakeNEngineEnable(void *power) {
 	auto &c=display13FBPower;
 	if(!c.lock || power!=c.power || !c.controller)return;
@@ -9476,9 +9495,17 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
 		RPLPPort::snapshot(portIO,c.portBoot);c.portBoot[31]=rplpUptimeNs();c.portBootValid=true;portBootTaken=true;
 		RPLPPort::snapshotCredits(portIO,c.creditBoot);c.creditBootValid=true;
+		RPLPPort::snapshotCore(portIO,c.coreBoot,rplpPoweredPipes(portIO));c.coreBoot[1]=rplpUptimeNs();c.coreBootValid=true;
 		for(unsigned i=0;i<RPLPColdPHY::Count;++i)RPLPColdPHY::snapshot(portIO,i,c.phyBoot+RPLPColdPHY::BootWords*i);
 		c.phyBootValid=true;
 		RPLPGT::snapshot(portIO,c.gtBoot,0,0,rplpWakeLog[32],rplpUptimeNs());c.gtBootValid=true;
+	}
+	// N97FBCoreCold: the display core registers as the power loss and the power-well restore left them, before this
+	// function's own writes (kern_rplp_port.hpp CoreRegs; reads only, a pipe's bank only while its well is powered).
+	uint64_t coreCold[RPLPPort::CoreWords] {};bool coreColdTaken=false;
+	if(cold && acquired.status==Display13Power::Status::Complete && c.map && c.map->getVirtualAddress()) {
+		RPLPPortIO coreIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
+		RPLPPort::snapshotCore(coreIO,coreCold,rplpPoweredPipes(coreIO));coreCold[1]=rplpUptimeNs();coreColdTaken=true;
 	}
 	// After a real power loss the PLL may be off without this owner having stopped it: restart it at the last clock.
 	if(clock.status==Display13Clock::Status::Disabled && (c.clockStopped || cold) && c.resumeClockHz &&
@@ -9546,15 +9573,24 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 	// N97FBColdMBUSCredits: schema, flag (-wex-rplp-coldinit), reference valid, status, then the twelve record words of
 	// RPLPPort::restoreCredits (the ABOX 0/1 and the three DBOX words back to the firmware's boot values where a power
 	// loss reset them; i915 writes the DBOX words in every modeset, the native path's own cold branch writes both).
-	uint64_t portCold[RPLPPort::Words] {},ppsRecord[12] {1},pllRecord[12] {1},creditRecord[16] {1};bool portColdTaken=false;
+	// N97FBColdCore: schema, flag (-wex-rplp-coldcore), reference valid, status, then the sixteen record words of
+	// RPLPPort::restoreCore (the bandwidth buddy registers, CHICKEN_MISC_2 with its DPT-disable bit and the powered
+	// pipes' chicken registers back to the firmware's boot values where a power loss reset them, as i915's display core
+	// init and pipe enable write them). N97FBCoreResume: the core registers after every restore of this function.
+	uint64_t portCold[RPLPPort::Words] {},ppsRecord[12] {1},pllRecord[12] {1},creditRecord[16] {1},coreRecord[20] {1},coreResume[RPLPPort::CoreWords] {};
+	bool portColdTaken=false;
 	if(cold && c.map && c.map->getVirtualAddress()) {
 		RPLPPortIO portIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};
+		const uint32_t pipes=rplpPoweredPipes(portIO);
 		creditRecord[1]=checkKernelArgument("-wex-rplp-coldinit");creditRecord[2]=c.creditBootValid;
 		if(creditRecord[1] && c.creditBootValid && acquired.status==Display13Power::Status::Complete) {
-			uint32_t pipes=0;const uint32_t wells=portIO.read(0x45404);
-			for(unsigned p=0;p<3;++p)if(wells!=UINT32_MAX && Display13FBIRQ::powered(wells,p))pipes|=1U<<p;
 			uint64_t r[12] {};creditRecord[3]=static_cast<uint32_t>(RPLPPort::restoreCredits(portIO,c.creditBoot,r,pipes));
 			for(unsigned i=0;i<12;++i)creditRecord[4+i]=r[i];
+		}
+		coreRecord[1]=checkKernelArgument("-wex-rplp-coldcore");coreRecord[2]=c.coreBootValid;
+		if(coreRecord[1] && c.coreBootValid && acquired.status==Display13Power::Status::Complete) {
+			uint64_t r[16] {};coreRecord[3]=static_cast<uint32_t>(RPLPPort::restoreCore(portIO,c.coreBoot,r,pipes));
+			for(unsigned i=0;i<16;++i)coreRecord[4+i]=r[i];
 		}
 		ppsRecord[1]=checkKernelArgument("-wex-rplp-coldpps");pllRecord[1]=checkKernelArgument("-wex-rplp-coldpll");
 		ppsRecord[2]=pllRecord[2]=c.portBootValid;
@@ -9568,6 +9604,7 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 			for(unsigned i=0;i<8;++i)pllRecord[4+i]=r[i];
 		}
 		RPLPPort::snapshot(portIO,portCold);portCold[31]=rplpUptimeNs();portColdTaken=true;
+		RPLPPort::snapshotCore(portIO,coreResume,pipes);coreResume[1]=rplpUptimeNs();
 	}
 	c.engineEnabled=status==Display13DBUF::Status::Complete;
 	if(cold)adlnInvalidateWM(); // The watermark registers were reset too: the next arm verifies the plan again.
@@ -9596,11 +9633,14 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		root->setProperty("N97FBPortBoot",c.portBoot,sizeof(c.portBoot));root->setProperty("N97FBCreditBoot",c.creditBoot,sizeof(c.creditBoot));
 		root->setProperty("N97FBPHYFirmware",c.phyBoot,sizeof(c.phyBoot));
 		root->setProperty("N97GTBoot",c.gtBoot,sizeof(c.gtBoot));
+		root->setProperty("N97FBCoreBoot",c.coreBoot,sizeof(c.coreBoot));
 	}
+	if(coreColdTaken)root->setProperty("N97FBCoreCold",coreCold,sizeof(coreCold));
 	if(portColdTaken) {
 		root->setProperty("N97FBPortCold",portCold,sizeof(portCold));
 		root->setProperty("N97FBColdPPS",ppsRecord,sizeof(ppsRecord));root->setProperty("N97FBColdPLL",pllRecord,sizeof(pllRecord));
 		root->setProperty("N97FBColdMBUSCredits",creditRecord,sizeof(creditRecord));
+		root->setProperty("N97FBColdCore",coreRecord,sizeof(coreRecord));root->setProperty("N97FBCoreResume",coreResume,sizeof(coreResume));
 	}
 	if(!record[26] && !root->getProperty("N97FBEngineFirstEmptyResume"))
 		root->setProperty("N97FBEngineFirstEmptyResume",record,sizeof(record));
@@ -9722,6 +9762,13 @@ void XE::wrapAlderLakeNEngineDisable(void *power) {
 
 void XE::wrapAlderLakeNPowerOverride(void *power,bool enable) {
 	auto &c=display13FBPower;if(!c.lock || power!=c.power || !c.controller)return;
+	// N97FBCoreSleep: the display core registers at the sleep override, before the engine stop (reads only), to compare
+	// with the boot and with the cold restore's reads.
+	if(!enable && c.map && c.map->getVirtualAddress() && c.map->getLength()==0x1000000) {
+		RPLPPortIO coreIO {reinterpret_cast<volatile uint8_t *>(c.map->getVirtualAddress())};uint64_t w[RPLPPort::CoreWords];
+		RPLPPort::snapshotCore(coreIO,w,rplpPoweredPipes(coreIO));w[1]=rplpUptimeNs();
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBCoreSleep",w,sizeof(w));
+	}
 	// override(true) is only reached by the donor's simulator backend; our
 	// physical object has simulator=0. Do not force unrelated DDI/AUX domains.
 	if(!enable)wrapAlderLakeNEngineDisable(power);
@@ -12720,6 +12767,14 @@ bool XE::wrapTGLAcceleratorStart(IOService *that, IOService *provider) {
 	if (!that->getProperty("IOGVAHEVCDecode") &&
 	    OSDynamicCast(OSDictionary, that->getProperty("IOGVAHEVCDecodeCapabilities")))
 		that->setProperty("IOGVAHEVCDecode", "2");
+	// -wex-no-va-renderer (from Thatisjigen/WhateverXe, branch pr/video-optin-0.7.0): AppleGVA opens the VA driver for
+	// pixel transfers, where it crashes on a null pointer (VTPixelTransferSession: screen recording, the camera,
+	// mediaanalysisd). Hiding this key alone stops that; Apple's decoder service may then find no renderer and decode in
+	// software. Opt-in only.
+	if (checkKernelArgument("-wex-no-va-renderer")) {
+		that->removeProperty("IOVARendererID");
+		SYSLOG("igfx", "IOVARendererID not advertised (-wex-no-va-renderer)");
+	}
 
 	if (!tglBlitScratchSize || (*tglBlitScratchSize!=0xD240 && *tglBlitScratchSize!=0xE000)) {
 		SYSLOG("igfx", "TGL blit scratch parameter mismatch");

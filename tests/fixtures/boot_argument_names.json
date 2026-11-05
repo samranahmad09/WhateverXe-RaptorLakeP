@@ -145,6 +145,8 @@
   "-wex-rplp-auxstanding": [],
   "-wex-rplp-fwwait": [],
   "-wex-rplp-pciwake": [],
+  "-wex-rplp-coldcore": [],
+  "-wex-no-va-renderer": [],
   "-wex-rplp-wakelog": [],
   "wex-rplp-urb-banks": [],
   "-wex-rplp-gl-urb": [],

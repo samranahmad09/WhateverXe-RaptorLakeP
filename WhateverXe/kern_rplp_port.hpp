@@ -180,4 +180,88 @@ template<class IO> Status restoreCredits(IO &io, const uint64_t (&boot)[Credits]
     for (unsigned i = 0; i < Credits; ++i) if ((r[10] & (1U << i)) && r[5 + i] != boot[i]) return Status::Mismatch;
     return Status::Applied;
 }
+
+// The display core registers a real power loss resets. Another Display 13 laptop's fork (Thatisjigen/WhateverXe,
+// branch pr/system-sleep-0.7.0) read them zero after a system sleep and found that neither the native path nor the
+// plugin writes them after boot; Linux's i915 reprograms them on resume (icl_display_core_init: the MBUS ABOX words,
+// the bandwidth buddy registers, the DCPR chicken registers, the fatal error mask) and at every pipe enable
+// (intel_dpt_configure: CHICKEN_MISC_2 bit 30, which keeps the display engine from fetching tiled planes through a
+// display page table that no macOS driver builds; icl_set_pipe_chicken: the pipe's chicken register). With bit 30
+// clear a tiled primary plane shows black while a linear cursor still shows. snapshotCore() reads the registers in one
+// order, a pipe's bank only while its well is powered (`pipes`). restoreCore() writes back, where the live word
+// differs, the boot value of the bandwidth buddy registers, of CHICKEN_MISC_2 with bit 30 set, and of the powered
+// pipes' chicken registers; the credit words have restoreCredits(), the workarounds their own writes, the rest is
+// recorded only.
+constexpr uint32_t CoreRegs[20] {
+    0x45038, // 0 MBUS_ABOX_CTL
+    0x45048, // 1 MBUS_ABOX1_CTL
+    0x4504C, // 2 MBUS_ABOX2_CTL
+    0x45130, // 3 BW_BUDDY1_CTL
+    0x45134, // 4 BW_BUDDY1_PAGE_MASK
+    0x45140, // 5 BW_BUDDY2_CTL
+    0x45144, // 6 BW_BUDDY2_PAGE_MASK
+    0x46430, // 7 CHICKEN_DCPR_1
+    0x46434, // 8 CHICKEN_DCPR_2
+    0x4421C, // 9 DISPLAY_ERR_FATAL_MASK
+    0x42080, // 10 CHICKEN_PAR1_1
+    0x42084, // 11 CHICKEN_MISC_2
+    0x45000, // 12 DISP_ARB_CTL
+    0x45004, // 13 DISP_ARB_CTL2
+    0x46530, // 14 CLKGATE_DIS_0
+    0x51004, // 15 DSSM
+    0x7003C, // 16 pipe A MBUS_DBOX_CTL
+    0x70038, // 17 pipe A PIPE_CHICKEN
+    0x7103C, // 18 pipe B MBUS_DBOX_CTL
+    0x71038, // 19 pipe B PIPE_CHICKEN
+};
+constexpr unsigned Core = sizeof(CoreRegs) / sizeof(CoreRegs[0]);
+// A snapshot: [0] schema 1, [1] the caller's timestamp, [2] the pipes read, [3] the registers read (bit per index,
+// clear where the pipe was unpowered or the read returned all-ones), [4..23] the registers in CoreRegs order.
+constexpr unsigned CoreWords = 24;
+constexpr uint32_t CoreRestorable = 0xA0878; // indices 3..6, 11, 17 and 19
+constexpr unsigned CoreRestored = 7;
+constexpr uint32_t CoreDPTDisable = 1U << 30; // CHICKEN_MISC_2: i915's CHICKEN_MISC_DISABLE_DPT
+inline unsigned corePipe(unsigned i) { return CoreRegs[i] >= 0x70000 ? (CoreRegs[i] - 0x70000) >> 12 : 3; }
+inline bool corePowered(unsigned i, uint32_t pipes) { const unsigned pipe = corePipe(i); return pipe >= 3 || (pipes & (1U << pipe)); }
+template<class IO> void snapshotCore(IO &io, uint64_t (&w)[CoreWords], uint32_t pipes) {
+    for (auto &v : w) v = 0;
+    w[0] = 1; w[2] = pipes;
+    for (unsigned i = 0; i < Core; ++i) {
+        if (!corePowered(i, pipes)) { w[4 + i] = UINT32_MAX; continue; }
+        w[4 + i] = io.read(CoreRegs[i]);
+        if (w[4 + i] != UINT32_MAX) w[3] |= 1U << i;
+    }
+}
+// r[0..6] the seven restorable registers before, in index order (3, 4, 5, 6, 11, 17, 19), r[7..13] the same after,
+// r[14] the mask written (by register index), r[15] the mask skipped (unreadable now or at boot, or the pipe unpowered).
+template<class IO> Status restoreCore(IO &io, const uint64_t (&boot)[CoreWords], uint64_t (&r)[16], uint32_t pipes) {
+    for (auto &v : r) v = 0;
+    bool reference = false;
+    uint32_t want[Core] {};
+    unsigned slot = 0;
+    for (unsigned i = 0; i < Core; ++i) {
+        if (!(CoreRestorable & (1U << i))) continue;
+        const uint32_t now = corePowered(i, pipes) ? io.read(CoreRegs[i]) : UINT32_MAX;
+        r[slot++] = now;
+        const uint64_t ref = boot[4 + i];
+        if (now == UINT32_MAX || !(boot[3] & (1U << i)) || ref >= UINT32_MAX) { r[15] |= 1U << i; continue; }
+        want[i] = static_cast<uint32_t>(ref) | (i == 11 ? CoreDPTDisable : 0);
+        reference = true;
+        if (now != want[i]) { io.write(CoreRegs[i], want[i]); r[14] |= 1U << i; }
+    }
+    slot = 0;
+    for (unsigned i = 0; i < Core; ++i) {
+        if (!(CoreRestorable & (1U << i))) continue;
+        r[CoreRestored + slot++] = corePowered(i, pipes) ? io.read(CoreRegs[i]) : UINT32_MAX;
+    }
+    if (!reference) return Status::NoReference;
+    if (!r[14]) return Status::Skipped;
+    slot = 0;
+    for (unsigned i = 0; i < Core; ++i) {
+        if (!(CoreRestorable & (1U << i))) continue;
+        const unsigned s = slot++;
+        if ((r[14] & (1U << i)) && r[CoreRestored + s] != want[i]) return Status::Mismatch;
+    }
+    return Status::Applied;
+}
 } // namespace RPLPPort
