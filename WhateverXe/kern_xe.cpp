@@ -204,20 +204,22 @@ bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO:
 uint64_t rplpAuxLane[8] {1};       // N97FBAuxLane: schema, writes, last domain, last enable, before, after, calls with the flag off, unreadable
 void *rplpWakeStreamer;            // the render streamer, for its scheduling-paused word in the forcewake events
 uint64_t rplpWakeNow() {uint64_t t;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&t);return t;}
-// A GT snapshot through the accelerator's register window with the three forcewake domains requested through its own
-// counted entry for the reads (a read of a power-gated domain returns zero otherwise: round 52's trace-end snapshot
-// read every ring register as zero with no forcewake held, which decided nothing). Without the owner or its window
-// the record is zeros with the time and the reason.
+// A GT snapshot through the accelerator's register window, reads only and no native call. r338 requested the three
+// forcewake domains through the accelerator's counted entry around these reads (a read of a power-gated domain returns
+// zero otherwise); the first boot with those pairs at the engine start's six returns (round 53) was the first boot in
+// which a cursor watermark program faulted 14 s later, and that latched fault darkened the wake. Not proven causal, but
+// the plugin's own threads make no native forcewake call at boot or at will-sleep until it is. The registers outside
+// the forcewake domains (the interrupt controller, DISPLAY_INT_CTL, the RC/RP words, GT_CORE_STATUS) read either way;
+// the ring and execlist words read as zero without a domain awake, and the reader says so. Round 53's engine-start
+// snapshot, taken with the domains held, stays in the log as the reference. Without the owner or its window the record
+// is zeros with the time and the reason.
 void rplpGTSnapshotAwake(void *owner,uint64_t *w,uint32_t when,uint32_t cold,uint64_t generation) {
  auto bar=owner ? *reinterpret_cast<volatile uint8_t **>(static_cast<uint8_t *>(owner)+0x1240) : nullptr;
  for(unsigned i=0;i<RPLPGT::Words;++i)w[i]=0;
  w[RPLPGT::Count]=rplpWakeNow();w[RPLPGT::Count+1]=when;w[RPLPGT::Count+2]=cold;w[RPLPGT::Count+3]=generation;
- if(!bar)return;
+ if(!bar || *reinterpret_cast<volatile uint32_t *>(bar+0xD84)==UINT32_MAX)return;
  struct IO {volatile uint8_t *bar;uint32_t read(uint32_t r) const {return *reinterpret_cast<volatile uint32_t *>(bar+r);}} io {bar};
- const bool held=rplpGTForceWake && *reinterpret_cast<volatile uint32_t *>(bar+0xD84)!=UINT32_MAX;
- if(held)rplpGTForceWake(owner,true,7);
- RPLPGT::snapshot(io,w,when,cold|(held ? 2U : 0U),generation,rplpWakeNow());
- if(held)rplpGTForceWake(owner,false,7);
+ RPLPGT::snapshot(io,w,when,cold,generation,rplpWakeNow());
 }
 // The device's configuration space (RPLPWakePCI above): eight words.
 unsigned rplpWakePCIPM() {
@@ -13131,9 +13133,10 @@ bool XE::wrapTGLAcceleratorEngine(IOService *that) {
 	tglObserveAccelerator(that, 6, false, 0, 0);
 	const bool result = FunctionCast(wrapTGLAcceleratorEngine, callbackXE->orgTGLAcceleratorEngine)(that);
 	tglObserveAccelerator(that, 6, true, result, 0);
-	// N97GTEngineStart: the GT's registers as the accelerator's engine start leaves them (the reference a wake is read
-	// against; the first engine enable's snapshot predates the accelerator), with the forcewake domains held.
+	// N97GTEngineStart: the GT's registers as the accelerator's engine start leaves them (the first engine enable's
+	// snapshot predates the accelerator); reads only. The accelerator is also the owner the will-sleep snapshot reads.
 	{
+		__atomic_store_n(&rplpWakeOwner,static_cast<void *>(that),__ATOMIC_RELEASE);
 		uint64_t g[RPLPGT::Words];rplpGTSnapshotAwake(that,g,3,0,rplpWakeLog[32]);
 		IORegistryEntry::getRegistryRoot()->setProperty("N97GTEngineStart",g,sizeof(g));
 	}
