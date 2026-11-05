@@ -27,6 +27,7 @@
 
 class IOPCIDevice;
 class IOInterruptEventSource;
+class IOTimerEventSource;
 namespace Display13Clock { struct Readout; }
 namespace Display13WM { struct Latch; }
 
@@ -55,6 +56,14 @@ public:
 	 *  @return true if patched anything
 	 */
 	bool processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
+
+	/**
+	 *  Bind the graphics family for the sleep record (-wex-rplp-wakelog): resolve its sleep bookkeeping for the sampler
+	 *  and observe its framebuffer notification entries. The host calls this when IOGraphicsFamily loads.
+	 *
+	 *  @return true if the observers were routed
+	 */
+	bool processGraphicsKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size);
 
 	/**
 	 *  Publish opt-in read-only evidence for a catalogued RPL-P/RPL-U
@@ -512,6 +521,16 @@ private:
 	static void wrapTGLAcceleratorWillSleep(IOService *that);
 	static void wrapTGLAcceleratorDidWake(IOService *that);
 	static IOReturn wrapTGLAcceleratorSetPowerState(IOService *that, unsigned long state, IOService *device);
+	// The graphics family's framebuffer notification entries, observed for the record (RPLPWakeFBEvents).
+	mach_vm_address_t orgIOFBDeliverNotification {}, orgIOFBHandleEvent {}, orgIOFBNotifyServer {}, orgIOFBServerAcknowledge {},
+		orgIOFBServerPowerTimeout {}, orgIOFBSystemPowerChange {}, orgIOFBMuxPowerMessage {};
+	static IOReturn wrapIOFBDeliverNotification(IOService *that, int event, void *info);
+	static IOReturn wrapIOFBHandleEvent(IOService *that, int event, void *info);
+	static IOReturn wrapIOFBNotifyServer(IOService *that, uint8_t state);
+	static IOReturn wrapIOFBServerAcknowledge(IOService *that, int message);
+	static void wrapIOFBServerPowerTimeout(OSObject *owner, IOTimerEventSource *sender);
+	static IOReturn wrapIOFBSystemPowerChange(void *target, void *refCon, uint32_t type, IOService *service, void *argument, vm_size_t size);
+	static IOReturn wrapIOFBMuxPowerMessage(IOService *that, uint32_t type);
 	mach_vm_address_t orgAlderLakeNNativeMemory {}, orgAlderLakeNNativeGPUInfo {}, orgAlderLakeNNativeIRQ {};
 	static bool wrapAlderLakeNNativeConfigure(IOService *that, IOPCIDevice *provider);
 	static bool wrapAlderLakeNNativeMemory(IOService *that);

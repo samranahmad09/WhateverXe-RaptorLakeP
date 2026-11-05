@@ -35,6 +35,8 @@
 #include "kern_display13_dbuf.hpp"
 #include "kern_rplp_coldphy.hpp"
 #include "kern_rplp_port.hpp"
+#include "kern_rplp_iog.hpp"
+#include <mach/mach_time.h>
 #include "kern_rplp_gt.hpp"
 #include "kern_display13_wm.hpp"
 #include "kern_display13_backlight.hpp"
@@ -199,6 +201,36 @@ uint64_t rplpGTSleep[RPLPGT::Words];bool rplpGTSleepValid;
 // (<< 8), the controller's NumFrameBuffer << 16, bit 24 the bridge known, bit 25 inside a wake window.
 constexpr unsigned rplpAccelEvents=16;
 uint64_t rplpAccelLifecycle[8+6*rplpAccelEvents] {1};uint32_t rplpAccelNext;uint64_t rplpNumFrameBuffer=UINT32_MAX;
+// RPLPWakeIOG, RPLPWakePipes and RPLPWakeFBEvents (kern_rplp_iog.hpp): the graphics family's sleep bookkeeping,
+// sampled every three seconds through the sleep entry and the first minute of the wake by a thread of its own; the
+// accelerator's display pipes with their notifiers and timing stamps at fixed points of the cycle (slots: 0 the boot's
+// engine start, 1 will-sleep, 2 the latest entry tick, 3 will-power-on, 4 has-powered-on, 5 the trace's end four
+// seconds after the restore, 6 thirty seconds into the wake, 7 sixty seconds in); the family's framebuffer
+// notification entries observed through the cycle. The family's globals resolve when IOGraphicsFamily loads
+// (XE::processGraphicsKext); every pointer is checked before it is followed, and nothing is written.
+RPLPIOG::Globals rplpIOGGlobals;
+uint64_t rplpWakeIOG[RPLPIOG::HeaderWords+RPLPIOG::SampleWords*RPLPIOG::Samples] {RPLPIOG::Schema};
+uint64_t rplpWakePipes[RPLPIOG::PipeSlotWords*RPLPIOG::PipeSlots];
+uint64_t rplpWakeFBEvents[RPLPIOG::EventHeader+RPLPIOG::EventWords*RPLPIOG::Events] {RPLPIOG::Schema};
+uint32_t rplpWakeFBEventNext;
+IOLock *rplpIOGLock;thread_t rplpIOGThread;uint32_t rplpIOGWanted;
+uint64_t rplpIOGTimebase;        // mach timebase: numerator | denominator << 32
+uint64_t rplpTGLGraphicsBase;    // the accelerator kext's load address, so a recorded return address can be attributed
+uint64_t rplpWrapWillSleep,rplpWrapDidWake;   // the plugin's lifecycle observers, for the record's route check
+// RPLPForceWakeUnderflow: the first forcewake call of a cycle after which one of the accelerator's three reference
+// counts reads negative (Codex Q50.5: the negative counts of rounds 51 to 54 have no proven caller). Words: schema,
+// uptime ns, the caller's return address, the accelerator kext's base, enable | domains << 8 | the event's flags << 16
+// | phase << 24 | the low-level entry << 32 | its client << 33, the render | media counts before << 32, the GT count
+// before | after << 32, the render | media counts after << 32, the calling thread, calls made while a count was
+// negative, the wake generation, the accelerator.
+uint64_t rplpForceWakeUnderflow[12] {1};
+struct RPLPKernelMem {
+ uint64_t read64(uint64_t a) const {uint64_t v;memcpy(&v,reinterpret_cast<const void *>(a),sizeof(v));return v;}
+ uint32_t read32(uint64_t a) const {uint32_t v;memcpy(&v,reinterpret_cast<const void *>(a),sizeof(v));return v;}
+ uint8_t read8(uint64_t a) const {return *reinterpret_cast<const uint8_t *>(a);}
+};
+void rplpIOGSample(uint32_t when);void rplpPipesRecord(unsigned slot,uint32_t when);void rplpIOGKick();void rplpWakeFBEventsReset();
+void rplpForceWakeUnderflowCheck(void *owner,bool enable,unsigned domains,uint64_t kind,const uint32_t *before,const uint32_t *after,const uint64_t *event,const void *caller);
 void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
 uint64_t rplpAuxLane[8] {1};       // N97FBAuxLane: schema, writes, last domain, last enable, before, after, calls with the flag off, unreadable
@@ -273,6 +305,10 @@ void rplpWakeLogPublish(bool nvram) {   // thread context only
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakePCI",rplpWakePCI,sizeof(rplpWakePCI));
  if(rplpGTSleepValid)IORegistryEntry::getRegistryRoot()->setProperty("N97GTSleep",rplpGTSleep,sizeof(rplpGTSleep));
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPAccelLifecycle",rplpAccelLifecycle,sizeof(rplpAccelLifecycle));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeIOG",rplpWakeIOG,sizeof(rplpWakeIOG));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakePipes",rplpWakePipes,sizeof(rplpWakePipes));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeFBEvents",rplpWakeFBEvents,sizeof(rplpWakeFBEvents));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPForceWakeUnderflow",rplpForceWakeUnderflow,sizeof(rplpForceWakeUnderflow));
  if(nvram && __atomic_load_n(&rplpWakeLog[39],__ATOMIC_RELAXED)<rplpWakeNVRAMPerWake)
   if(auto options=IORegistryEntry::fromPath("/options",gIODTPlane)) {
    __atomic_fetch_add(&rplpWakeLog[39],1ULL,__ATOMIC_RELAXED);
@@ -310,13 +346,15 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
    memset(rplpWakeFirstFW,0,sizeof(rplpWakeFirstFW));__atomic_store_n(&rplpWakeFirstFWNext,0U,__ATOMIC_RELEASE);
    memset(rplpWakeSubmits,0,sizeof(rplpWakeSubmits));rplpWakeSubmits[0]=1;
    memset(rplpWakePCI,0,sizeof(rplpWakePCI));rplpWakePCI[0]=1;rplpWakePCISleep();
+   rplpWakeFBEventsReset();memset(rplpForceWakeUnderflow,0,sizeof(rplpForceWakeUnderflow));rplpForceWakeUnderflow[0]=1;
+   rplpWakeIOG[7]=0;rplpPipesRecord(1,1);rplpIOGSample(1);
    rplpGTSnapshotAwake(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE),rplpGTSleep,4,0,rplpWakeLog[32]);rplpGTSleepValid=true;
    __atomic_store_n(&rplpWakeEngineReturned,0U,__ATOMIC_RELEASE);__atomic_store_n(&rplpWakeForceWakeSeq,0U,__ATOMIC_RELEASE);
-   rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);nvram=true;break;
+   rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);rplpIOGKick();nvram=true;break;
   case kIOMessageSystemWillPowerOn:
-   rplpWakeLog[4]=now;++rplpWakeLog[32];rplpWakePCIWake();
+   rplpWakeLog[4]=now;++rplpWakeLog[32];rplpWakePCIWake();rplpPipesRecord(3,3);rplpIOGSample(3);
    __atomic_store_n(&rplpWakePhase,2U,__ATOMIC_RELEASE);nvram=true;break;
-  case kIOMessageSystemHasPoweredOn: rplpWakeLog[5]=now;rplpWakeWindowEnd=now+60000000000ULL;nvram=true;break;
+  case kIOMessageSystemHasPoweredOn: rplpWakeLog[5]=now;rplpWakeWindowEnd=now+60000000000ULL;rplpPipesRecord(4,4);rplpIOGSample(4);nvram=true;break;
   default: break;
  }
  rplpWakeLogPublish(nvram);
@@ -372,6 +410,7 @@ void rplpPortTraceWorker(void *,wait_result_t) {
    }
    IORegistryEntry::getRegistryRoot()->setProperty("N97GTWake",g,sizeof(g));
   }
+  rplpPipesRecord(5,5);rplpIOGSample(5);rplpWakeLogKick(false);
  }
 }
 bool rplpWakeInWindow() {
@@ -382,6 +421,91 @@ bool rplpWakeInWindow() {
  return true;
 }
 bool rplpWakeWaking() {return __atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==2;}
+void rplpIOGSample(uint32_t when) {
+ auto &h=rplpWakeIOG;const auto n=h[7];
+ if(n>=RPLPIOG::Samples)return;
+ RPLPKernelMem m;
+ const auto owner=reinterpret_cast<uint64_t>(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE));
+ auto w=&h[RPLPIOG::HeaderWords+RPLPIOG::SampleWords*n];
+ RPLPIOG::sample(m,rplpIOGGlobals,owner,w,rplpWakeNow(),mach_absolute_time(),__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE),when,static_cast<uint32_t>(rplpWakeLog[32]));
+ if(!n)h[10]=(w[4]&0xFFFFFFULL)|uint64_t(rplpIOGGlobals.verboseBoot ? m.read8(rplpIOGGlobals.verboseBoot) : 0xFFU)<<24|uint64_t(w[6]!=0)<<32;
+ h[7]=n+1;
+}
+void rplpPipesRecord(unsigned slot,uint32_t when) {
+ if(slot>=RPLPIOG::PipeSlots)return;
+ RPLPKernelMem m;
+ const auto owner=reinterpret_cast<uint64_t>(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE));
+ RPLPIOG::pipeSlot(m,owner,&rplpWakePipes[RPLPIOG::PipeSlotWords*slot],when,rplpWakeNow(),mach_absolute_time(),rplpIOGTimebase,rplpWrapWillSleep,rplpWrapDidWake);
+}
+// One framebuffer notification entry or exit (RPLPWakeFBEvents): counted always, kept through a sleep cycle.
+void rplpFBEvent(unsigned kind,const void *fb,uint32_t event,const void *info,uint32_t result) {
+ auto &h=rplpWakeFBEvents;
+ if(kind==1) {
+  __atomic_fetch_add(&h[1],1ULL,__ATOMIC_RELAXED);
+  __atomic_fetch_add(&h[event>=1 && event<=10 ? 3+event : 14],1ULL,__ATOMIC_RELAXED);
+ }
+ const auto phase=__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE);
+ if(!phase)return;
+ const auto n=__atomic_fetch_add(&rplpWakeFBEventNext,1U,__ATOMIC_RELAXED);
+ auto e=&h[RPLPIOG::EventHeader+RPLPIOG::EventWords*(n%RPLPIOG::Events)];
+ RPLPKernelMem m;const auto f=reinterpret_cast<uint64_t>(fb);
+ e[0]=rplpWakeNow();
+ e[1]=uint64_t(kind)|uint64_t(event&0xFFFFU)<<8|RPLPIOG::fbIndex(m,f)<<24|uint64_t(phase&0xFFU)<<32|uint64_t(info!=nullptr)<<40|uint64_t(rplpWakeLog[32]&0xFFFFU)<<48;
+ e[2]=f;e[3]=reinterpret_cast<uint64_t>(info);e[4]=reinterpret_cast<uint64_t>(current_thread());e[5]=RPLPIOG::powerThread(m,f);
+ uint32_t flags=0;
+ if(auto a=static_cast<uint8_t *>(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE)))memcpy(&flags,a+RPLPIOG::AccelFlags,sizeof(flags));
+ e[6]=uint64_t(flags)|RPLPIOG::controllerComputed(m,f)<<32;
+ e[7]=RPLPIOG::fbWord(m,f,result);
+ h[2]=n+1<RPLPIOG::Events ? n+1 : RPLPIOG::Events;h[3]=n+1;
+ rplpWakeLogKick(false);
+}
+void rplpWakeFBEventsReset() {
+ auto &h=rplpWakeFBEvents;
+ memset(&h[RPLPIOG::EventHeader],0,sizeof(h)-sizeof(uint64_t)*RPLPIOG::EventHeader);
+ h[2]=h[3]=0;__atomic_store_n(&rplpWakeFBEventNext,0U,__ATOMIC_RELEASE);
+}
+void rplpIOGKick() {
+ if(!rplpIOGLock)return;
+ __atomic_store_n(&rplpIOGWanted,1U,__ATOMIC_RELEASE);
+ IOLockWakeup(rplpIOGLock,&rplpIOGThread,true);
+}
+// The sampler: through the entry a sample every three seconds while the phase is the entry (48 at most), then, once
+// the system is waking, a sample every three seconds for the first minute, with the display pipes at thirty and sixty
+// seconds. The thread sleeps through the platform's sleep like any other.
+void rplpIOGWorker(void *,wait_result_t) {
+ for(;;) {
+  IOLockLock(rplpIOGLock);
+  while(!__atomic_load_n(&rplpIOGWanted,__ATOMIC_ACQUIRE))IOLockSleep(rplpIOGLock,&rplpIOGThread,THREAD_UNINT);
+  __atomic_store_n(&rplpIOGWanted,0U,__ATOMIC_RELEASE);
+  IOLockUnlock(rplpIOGLock);
+  unsigned entry=0,wake=0;
+  while(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==1 && entry<48) {
+   IOSleep(3000);
+   if(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)!=1)break;
+   rplpIOGSample(2);rplpPipesRecord(2,2);rplpWakeLogKick(false);++entry;
+  }
+  while(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==2 && wake<20) {
+   IOSleep(3000);
+   rplpIOGSample(6);++wake;
+   if(wake==10)rplpPipesRecord(6,6);
+   if(wake==20)rplpPipesRecord(7,6);
+   rplpWakeLogKick(false);
+  }
+ }
+}
+void rplpForceWakeUnderflowCheck(void *owner,bool enable,unsigned domains,uint64_t kind,const uint32_t *before,const uint32_t *after,const uint64_t *event,const void *caller) {
+ if(int32_t(after[0])>=0 && int32_t(after[1])>=0 && int32_t(after[2])>=0)return;
+ auto &u=rplpForceWakeUnderflow;
+ __atomic_fetch_add(&u[9],1ULL,__ATOMIC_RELAXED);
+ if(int32_t(before[0])<0 || int32_t(before[1])<0 || int32_t(before[2])<0)return;   // not the first transition
+ uint64_t expected=0;
+ if(!__atomic_compare_exchange_n(&u[1],&expected,rplpWakeNow(),false,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED))return;
+ u[2]=reinterpret_cast<uint64_t>(caller);u[3]=rplpTGLGraphicsBase;
+ u[4]=uint64_t(enable)|uint64_t(domains&0xFFU)<<8|uint64_t(event ? event[1]&0xFFU : 0)<<16|uint64_t(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)&0xFFU)<<24|kind<<32;
+ u[5]=uint64_t(before[0])|uint64_t(before[1])<<32;u[6]=uint64_t(before[2])|uint64_t(after[2])<<32;u[7]=uint64_t(after[0])|uint64_t(after[1])<<32;
+ u[8]=reinterpret_cast<uint64_t>(current_thread());u[10]=rplpWakeLog[32];u[11]=reinterpret_cast<uint64_t>(owner);
+ rplpWakeLogKick(true);
+}
 void rplpAccelRecord(void *that,unsigned kind,uint64_t arg,uint64_t result) {
  if(!that)return;auto a=static_cast<uint8_t *>(that);
  const auto n=__atomic_fetch_add(&rplpAccelNext,1U,__ATOMIC_RELAXED);
@@ -416,6 +540,12 @@ static void rplpWakeLogArm() {
  rplpPortTraceLock=IOLockAlloc();
  if(rplpPortTraceLock && kernel_thread_start(rplpPortTraceWorker,nullptr,&rplpPortTraceThread)!=KERN_SUCCESS) {IOLockFree(rplpPortTraceLock);rplpPortTraceLock=nullptr;}
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPPortTraceArmed",rplpPortTraceLock!=nullptr);
+ rplpIOGLock=IOLockAlloc();
+ if(rplpIOGLock && kernel_thread_start(rplpIOGWorker,nullptr,&rplpIOGThread)!=KERN_SUCCESS) {IOLockFree(rplpIOGLock);rplpIOGLock=nullptr;}
+ // The timebase as a ratio (numerator 1,000,000; the denominator measured), so the records' raw stamps convert to ns.
+ {uint64_t raw=mach_absolute_time(),ns=0;absolutetime_to_nanoseconds(raw,&ns);rplpIOGTimebase=1000000ULL|(ns ? raw*1000000ULL/ns : 0)<<32;rplpWakeIOG[11]=rplpIOGTimebase;}
+ rplpWakeIOG[8]=RPLPIOG::SampleWords;rplpWakeIOG[9]=RPLPIOG::Samples;
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPIOGArmed",rplpIOGLock!=nullptr);
  const bool ok=thread && registerPrioritySleepWakeInterest(rplpWakeLogHandler,nullptr,nullptr)!=nullptr;
  rplpWakeLogEnabled=ok;rplpWakeLog[1]=ok;
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeLogArmed",ok);
@@ -10862,6 +10992,9 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 				patcher.routeMultiple(index, lifecycle, arrsize(lifecycle), address, size);
 			patcher.clearError();
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGAcceleratorLifecycleRouted", lifecycleRouted);
+			rplpTGLGraphicsBase=address;
+			rplpWrapWillSleep=reinterpret_cast<mach_vm_address_t>(wrapTGLAcceleratorWillSleep);
+			rplpWrapDidWake=reinterpret_cast<mach_vm_address_t>(wrapTGLAcceleratorDidWake);
 			bool adlnObserved=true;
 			if (adlnDetected) {
 				const uint8_t callbackEntry[] {0x55,0x48,0x89,0xE5,0x48,0x8B,0xBF,0x48,0x12,0,0};
@@ -13064,7 +13197,12 @@ bool XE::wrapAlderLakeNNativeIRQ(IOService *that) {
 bool XE::wrapTGLAcceleratorEngine(IOService *that) {
  RPLPWakeEngineScope rplpWakeScope;
  if(auto controller=static_cast<IOService *>(callbackXE->tglObservationController))
-  if(auto n=OSDynamicCast(OSNumber,controller->getProperty("NumFrameBuffer")))rplpNumFrameBuffer=n->unsigned32BitValue();
+  if(auto property=controller->getProperty("NumFrameBuffer")) {   // published as OSData (Codex); an OSNumber accepted too
+   if(auto d=OSDynamicCast(OSData,property)) {
+    if(d->getLength()>=4) {uint32_t v;memcpy(&v,d->getBytesNoCopy(),sizeof(v));rplpNumFrameBuffer=v;}
+    else if(d->getLength()>=1)rplpNumFrameBuffer=*static_cast<const uint8_t *>(d->getBytesNoCopy());
+   } else if(auto n=OSDynamicCast(OSNumber,property))rplpNumFrameBuffer=n->unsigned32BitValue();
+  }
  if (callbackXE->adlnDetected) {
   auto a=reinterpret_cast<uint8_t *>(that);
   uint32_t caps[] {*reinterpret_cast<uint32_t *>(a+0x1120),*reinterpret_cast<uint32_t *>(a+0x1124),
@@ -13140,6 +13278,7 @@ bool XE::wrapTGLAcceleratorEngine(IOService *that) {
 		uint64_t g[RPLPGT::Words];rplpGTSnapshotAwake(that,g,3,0,rplpWakeLog[32]);
 		IORegistryEntry::getRegistryRoot()->setProperty("N97GTEngineStart",g,sizeof(g));
 	}
+	rplpPipesRecord(0,7);
 	tglFBIRQEnd(irq,result);
 	if (tglHost.owner==that) tglHostPublish();
 	rplpWakeScope.result=result;
@@ -13162,6 +13301,105 @@ IOReturn XE::wrapTGLAcceleratorSetPowerState(IOService *that,unsigned long state
 	rplpAccelRecord(that,5,state,0);
 	const auto result=FunctionCast(wrapTGLAcceleratorSetPowerState,callbackXE->orgTGLAcceleratorSetPowerState)(that,state,device);
 	rplpAccelRecord(that,6,state,static_cast<uint32_t>(result));
+	return result;
+}
+
+// The graphics family (-wex-rplp-wakelog): its sleep bookkeeping resolved for the sampler (RPLPWakeIOG) and its
+// framebuffer notification entries observed (RPLPWakeFBEvents). The object offsets apply to the installed
+// IOGraphicsFamily 585.2 only, so nothing is read unless the image's function anchors match; the globals come from
+// the family's own symbols, cross-checked against (or, failing that, derived from) its worker's own references.
+bool XE::processGraphicsKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+	auto &h=rplpWakeIOG;
+	h[1]|=1;h[2]=address;h[3]=size;
+	const auto worker=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN13IOFramebuffer10systemWorkEP8OSObjectP22IOInterruptEventSourcei",address,size);
+	const bool exact=worker==address+0x12328 &&
+		patcher.solveSymbol<mach_vm_address_t>(index,"__ZN13IOFramebuffer11handleEventEiPv",address,size)==address+0x167E2 &&
+		patcher.solveSymbol<mach_vm_address_t>(index,"__ZN13IOFramebuffer30deliverFramebufferNotificationEiPv",address,size)==address+0xA400 &&
+		patcher.solveSymbol<mach_vm_address_t>(index,"__ZN14IOFBController12computeStateEv",address,size)==address+0xA1BE;
+	patcher.clearError();
+	IORegistryEntry::getRegistryRoot()->setProperty("RPLPIOGExactImage",exact);
+	if(!exact)return false;
+	h[1]|=2;
+	RPLPIOG::Globals g;
+	g.ackTo=patcher.solveSymbol(index,"__ZL21gIOFBSystemPowerAckTo");
+	g.ackRef=patcher.solveSymbol(index,"__ZL22gIOFBSystemPowerAckRef");
+	g.mux=patcher.solveSymbol(index,"__ZL19gIOFBIsMuxSwitching");
+	g.systemPower=patcher.solveSymbol(index,"_gIOFBSystemPower");
+	g.wsPowerOn=patcher.solveSymbol(index,"__ZL21gIOFBCurrentWSPowerOn");
+	g.controllers=patcher.solveSymbol(index,"__ZL19gIOFBAllControllers");
+	g.verboseBoot=patcher.solveSymbol(index,"__ZL16gIOFBVerboseBoot");
+	patcher.clearError();
+	// The family's data lives apart from its text in a kernel collection, so these are looked up without the range check.
+	{
+		const uint64_t addresses[] {g.ackTo,g.ackRef,g.mux,g.systemPower,g.wsPowerOn,g.controllers,g.verboseBoot};
+		uint64_t inside=0;
+		for(unsigned i=0;i<7;++i)if(addresses[i] && addresses[i]>=address && addresses[i]<address+size)inside|=1ULL<<i;
+		h[12]=inside;
+	}
+	RPLPKernelMem mem;
+	uint64_t refs[4];
+	for(unsigned i=0;i<4;++i)refs[i]=RPLPIOG::resolveReference(mem,worker,RPLPIOG::WorkerReferences[i]);
+	const bool symbols=g.ackTo && g.ackRef && g.mux && g.controllers,fromWorker=refs[0] && refs[1] && refs[2] && refs[3];
+	if(symbols) {
+		h[1]|=4;
+		if(fromWorker && (refs[0]!=g.controllers || refs[1]!=g.ackTo || refs[2]!=g.mux || refs[3]!=g.ackRef))h[1]|=32;
+	} else if(fromWorker) {h[1]|=8;g.controllers=refs[0];g.ackTo=refs[1];g.mux=refs[2];g.ackRef=refs[3];}
+	h[4]=g.ackTo;h[5]=g.controllers;h[6]=g.mux;
+	if(g.ackTo || g.controllers)rplpIOGGlobals=g;
+	KernelPatcher::RouteRequest observers[] {
+		{"__ZN13IOFramebuffer30deliverFramebufferNotificationEiPv",wrapIOFBDeliverNotification,orgIOFBDeliverNotification},
+		{"__ZN13IOFramebuffer11handleEventEiPv",wrapIOFBHandleEvent,orgIOFBHandleEvent},
+		{"__ZN13IOFramebuffer12notifyServerEh",wrapIOFBNotifyServer,orgIOFBNotifyServer},
+		{"__ZN13IOFramebuffer29serverAcknowledgeNotificationEi",wrapIOFBServerAcknowledge,orgIOFBServerAcknowledge},
+		{"__ZN13IOFramebuffer18serverPowerTimeoutEP8OSObjectP18IOTimerEventSource",wrapIOFBServerPowerTimeout,orgIOFBServerPowerTimeout},
+		{"__ZN13IOFramebuffer17systemPowerChangeEPvS0_jP9IOServiceS0_m",wrapIOFBSystemPowerChange,orgIOFBSystemPowerChange},
+		{"__ZN13IOFramebuffer15muxPowerMessageEj",wrapIOFBMuxPowerMessage,orgIOFBMuxPowerMessage}
+	};
+	const bool routed=patcher.routeMultiple(index,observers,arrsize(observers),address,size);
+	patcher.clearError();
+	if(routed)h[1]|=16;
+	rplpWakeFBEvents[15]=routed;
+	IORegistryEntry::getRegistryRoot()->setProperty("RPLPIOGBound",h,sizeof(uint64_t)*RPLPIOG::HeaderWords);
+	return routed;
+}
+// The family's framebuffer notification entries (RPLPWakeFBEvents): observers only, the native call unchanged.
+IOReturn XE::wrapIOFBDeliverNotification(IOService *that,int event,void *info) {
+	rplpFBEvent(1,that,static_cast<uint32_t>(event),info,0);
+	const auto result=FunctionCast(wrapIOFBDeliverNotification,callbackXE->orgIOFBDeliverNotification)(that,event,info);
+	rplpFBEvent(2,that,static_cast<uint32_t>(event),info,static_cast<uint32_t>(result));
+	return result;
+}
+IOReturn XE::wrapIOFBHandleEvent(IOService *that,int event,void *info) {
+	rplpFBEvent(3,that,static_cast<uint32_t>(event),info,0);
+	const auto result=FunctionCast(wrapIOFBHandleEvent,callbackXE->orgIOFBHandleEvent)(that,event,info);
+	rplpFBEvent(4,that,static_cast<uint32_t>(event),info,static_cast<uint32_t>(result));
+	return result;
+}
+IOReturn XE::wrapIOFBNotifyServer(IOService *that,uint8_t state) {
+	rplpFBEvent(5,that,state,nullptr,0);
+	const auto result=FunctionCast(wrapIOFBNotifyServer,callbackXE->orgIOFBNotifyServer)(that,state);
+	rplpFBEvent(6,that,state,nullptr,static_cast<uint32_t>(result));
+	return result;
+}
+IOReturn XE::wrapIOFBServerAcknowledge(IOService *that,int message) {
+	const auto result=FunctionCast(wrapIOFBServerAcknowledge,callbackXE->orgIOFBServerAcknowledge)(that,message);
+	rplpFBEvent(7,that,static_cast<uint32_t>(message),nullptr,static_cast<uint32_t>(result));
+	return result;
+}
+void XE::wrapIOFBServerPowerTimeout(OSObject *owner,IOTimerEventSource *sender) {
+	rplpFBEvent(8,owner,0,sender,0);
+	FunctionCast(wrapIOFBServerPowerTimeout,callbackXE->orgIOFBServerPowerTimeout)(owner,sender);
+}
+IOReturn XE::wrapIOFBSystemPowerChange(void *target,void *refCon,uint32_t type,IOService *service,void *argument,vm_size_t size) {
+	rplpFBEvent(9,nullptr,type,argument,0);
+	const auto result=FunctionCast(wrapIOFBSystemPowerChange,callbackXE->orgIOFBSystemPowerChange)(target,refCon,type,service,argument,size);
+	rplpFBEvent(10,nullptr,type,argument,static_cast<uint32_t>(result));
+	return result;
+}
+IOReturn XE::wrapIOFBMuxPowerMessage(IOService *that,uint32_t type) {
+	rplpFBEvent(11,that,type,nullptr,0);
+	const auto result=FunctionCast(wrapIOFBMuxPowerMessage,callbackXE->orgIOFBMuxPowerMessage)(that,type);
+	rplpFBEvent(12,that,type,nullptr,static_cast<uint32_t>(result));
 	return result;
 }
 
@@ -13289,14 +13527,25 @@ static bool rplpForceWakeGuarded(void *owner,uint64_t *event) {
  rplpWakeLogGuardSkip();
  return true;
 }
+// The native call with the accelerator's three reference counts read before and after it, for the first underflow
+// of a cycle (RPLPForceWakeUnderflow); the caller is the routed entry's own return address.
+static void rplpForceWakeNative(void *owner,bool enable,unsigned domains,const uint64_t *event,const void *caller) {
+ uint32_t before[3] {},after[3] {};
+ if(owner)memcpy(before,static_cast<uint8_t *>(owner)+0x1290,sizeof(before));
+ reinterpret_cast<TGLCSBForceWake>(xelpRegularForceWakeOriginal)(owner,enable,domains);
+ if(!owner)return;
+ memcpy(after,static_cast<uint8_t *>(owner)+0x1290,sizeof(after));
+ rplpForceWakeUnderflowCheck(owner,enable,domains,0,before,after,event,caller);
+}
 void xelpRegularForceWakeProtected(void *owner,bool enable,unsigned domains) {
+ const void *caller=__builtin_return_address(0);
  auto event=rplpWakeLogForceWake(owner,enable,domains);
  if(rplpForceWakeGuarded(owner,event))return;
  uint64_t flags=0;
  if(owner)memcpy(&flags,static_cast<uint8_t *>(owner)+0x1190,sizeof(flags));
  if(!owner || !XELPForceWakeIRQ::required(flags,domains)) {
   __atomic_fetch_add(&xelpForceWakeIRQ[6],1ULL,__ATOMIC_RELAXED);
-  reinterpret_cast<TGLCSBForceWake>(xelpRegularForceWakeOriginal)(owner,enable,domains);
+  rplpForceWakeNative(owner,enable,domains,event,caller);
   return;
  }
  // Protect every regular caller, including telemetry interrupted by IRQ submit.
@@ -13304,7 +13553,7 @@ void xelpRegularForceWakeProtected(void *owner,bool enable,unsigned domains) {
  const auto prior=XELPForceWakeIRQ::protect([](boolean_t enabled) {return ml_set_interrupts_enabled(enabled);},[&] {
   uint64_t start,end,ns;clock_get_uptime(&start);
   __atomic_fetch_add(&xelpForceWakeIRQ[0],1ULL,__ATOMIC_RELAXED);
-  reinterpret_cast<TGLCSBForceWake>(xelpRegularForceWakeOriginal)(owner,enable,domains);
+  rplpForceWakeNative(owner,enable,domains,event,caller);
   clock_get_uptime(&end);absolutetime_to_nanoseconds(end-start,&ns);
   __atomic_fetch_add(&xelpForceWakeIRQ[2],1ULL,__ATOMIC_RELAXED);
   auto maximum=__atomic_load_n(&xelpForceWakeIRQ[3],__ATOMIC_RELAXED);
@@ -14405,8 +14654,12 @@ void XE::wrapTGLHostSubmit(void *streamer,uint32_t flags) {
 }
 
 void XE::wrapAlderLakeNExecutionWake(void *owner,bool enable,unsigned domains,unsigned client) {
+ const void *caller=__builtin_return_address(0);
  if(rplpForceWakeGuarded(owner,nullptr))return;
+ uint32_t before[3] {},after[3] {};
+ if(owner)memcpy(before,static_cast<uint8_t *>(owner)+0x1290,sizeof(before));
  FunctionCast(wrapAlderLakeNExecutionWake,callbackXE->orgAlderLakeNExecutionWake)(owner,enable,domains,client);
+ if(owner) {memcpy(after,static_cast<uint8_t *>(owner)+0x1290,sizeof(after));rplpForceWakeUnderflowCheck(owner,enable,domains,1ULL|uint64_t(client&0xFFU)<<1,before,after,nullptr,caller);}
  if(!callbackXE->adlnDetected || !enable || owner!=tglHost.owner)return;
  if(domains&4) {
   if(!__atomic_load_n(&tglExecutionStart,__ATOMIC_ACQUIRE))tglFaultSample(0,static_cast<uint8_t *>(owner),client);

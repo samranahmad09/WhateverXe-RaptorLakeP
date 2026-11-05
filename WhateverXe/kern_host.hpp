@@ -9,6 +9,7 @@ private:
  static XeHost *callbackHost;
  XE xe;
  bool active {};
+ bool wakeLog {};   // -wex-rplp-wakelog: the graphics family is bound for the sleep record
  void processKernel(KernelPatcher &);
  void processKext(KernelPatcher &,size_t,mach_vm_address_t,size_t);
  enum { FB_DETECT, FB_RESET, FB_COPY, FB_ZEROFILL, FB_NONE, FB_TOTAL };

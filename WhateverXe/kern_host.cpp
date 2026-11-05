@@ -17,7 +17,8 @@ void XeHost::init() {
  if(resetFramebuffer>=FB_TOTAL)resetFramebuffer=FB_DETECT;
  lilu.onPatcherLoadForce([](void *u,KernelPatcher &p){static_cast<XeHost *>(u)->processKernel(p);},this);
  lilu.onKextLoadForce(nullptr,0,[](void *u,KernelPatcher &p,size_t i,mach_vm_address_t a,size_t s){static_cast<XeHost *>(u)->processKext(p,i,a,s);},this);
- if(resetFramebuffer!=FB_NONE)lilu.onKextLoadForce(&graphics);
+ wakeLog=checkKernelArgument("-wex-rplp-wakelog");
+ if(resetFramebuffer!=FB_NONE || wakeLog)lilu.onKextLoadForce(&graphics);
  xe.init();
  XeDataAccess::init();
 }
@@ -59,16 +60,20 @@ void XeHost::processKernel(KernelPatcher &patcher) {
   // Catalogued without a backend: read-only evidence, no hooks or admission.
   xe.observeRaptorLakeP(gpu);
  }
- if(!active || resetFramebuffer==FB_DETECT){resetFramebuffer=FB_NONE;graphics.switchOff();}
+ if(!active || resetFramebuffer==FB_DETECT){resetFramebuffer=FB_NONE;if(!active || !wakeLog)graphics.switchOff();}
  DeviceInfo::deleter(info);
 }
 void XeHost::processKext(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
  if(!active)return;
  if(XeDataAccess::processKext(patcher,index,address,size))return;
  if(graphics.loadIndex==index) {
-  gIOFBVerboseBootPtr=patcher.solveSymbol<uint8_t *>(index,"__ZL16gIOFBVerboseBoot",address,size);
-  if(gIOFBVerboseBootPtr){KernelPatcher::RouteRequest route("__ZN13IOFramebuffer6initFBEv",wrapFramebufferInit,orgFramebufferInit);patcher.routeMultiple(index,&route,1,address,size);}
-  patcher.clearError();return;
+  if(resetFramebuffer!=FB_NONE) {
+   gIOFBVerboseBootPtr=patcher.solveSymbol<uint8_t *>(index,"__ZL16gIOFBVerboseBoot",address,size);
+   if(gIOFBVerboseBootPtr){KernelPatcher::RouteRequest route("__ZN13IOFramebuffer6initFBEv",wrapFramebufferInit,orgFramebufferInit);patcher.routeMultiple(index,&route,1,address,size);}
+   patcher.clearError();
+  }
+  if(wakeLog)xe.processGraphicsKext(patcher,index,address,size);
+  return;
  }
  xe.processKext(patcher,index,address,size);
 }
