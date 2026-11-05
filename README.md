@@ -49,7 +49,9 @@ processors, including the laptop's internal (eDP) panel.
 >   leaves them, at will-sleep, after a cold restore and four seconds into a wake (`N97GTEngineStart`, `N97GTSleep`,
 >   `N97GTRestore`, `N97GTWake`), the wake's first submissions and forcewake calls (`RPLPWakeSubmits`,
 >   `RPLPWakeForceWakeFirst`), its software interrupts (`RPLPWakeSWIRQ`), the device's configuration space around the
->   wake (`RPLPWakePCI`) and the display IRQ bridge's live counters (`N97FBIRQLive`). It also records each
+>   wake (`RPLPWakePCI`), the accelerator's own sleep, wake and power-state entries with its cached state, forcewake
+>   counters and interrupt-bridge flags (`RPLPAccelLifecycle`), and the display IRQ bridge's live counters
+>   (`N97FBIRQLive`). It also records each
 >   power request's state before and after (`N97FBPowerRing`), the PHY words as the firmware left them
 >   (`N97FBPHYFirmware`; recreated opt-in on a cold resume with `-wex-rplp-coldphyboot`), the port's registers every
 >   25 ms through a wake's bring-up, and restores the MBUS credit words on a cold resume. The two-minute sleep entry is

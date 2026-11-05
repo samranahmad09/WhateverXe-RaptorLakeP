@@ -507,6 +507,11 @@ private:
 	static bool wrapTGLAcceleratorRegister(IOService *that);
 	static bool wrapTGLAcceleratorStatusMemory(IOService *that);
 	static bool wrapTGLAcceleratorEngine(IOService *that);
+	// The accelerator's own sleep/wake and power-state entries, observed for the record (RPLPAccelLifecycle).
+	mach_vm_address_t orgTGLAcceleratorWillSleep {}, orgTGLAcceleratorDidWake {}, orgTGLAcceleratorSetPowerState {};
+	static void wrapTGLAcceleratorWillSleep(IOService *that);
+	static void wrapTGLAcceleratorDidWake(IOService *that);
+	static IOReturn wrapTGLAcceleratorSetPowerState(IOService *that, unsigned long state, IOService *device);
 	mach_vm_address_t orgAlderLakeNNativeMemory {}, orgAlderLakeNNativeGPUInfo {}, orgAlderLakeNNativeIRQ {};
 	static bool wrapAlderLakeNNativeConfigure(IOService *that, IOPCIDevice *provider);
 	static bool wrapAlderLakeNNativeMemory(IOService *that);

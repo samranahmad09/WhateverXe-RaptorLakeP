@@ -190,6 +190,15 @@ bool rplpPCIWakeEnabled;           // -wex-rplp-pciwake
 IOPCIDevice *rplpWakePCIDevice;    // the selected GPU, set at device selection
 // N97GTSleep: the GT's registers at will-sleep, with the forcewake domains held (kern_rplp_gt.hpp).
 uint64_t rplpGTSleep[RPLPGT::Words];bool rplpGTSleepValid;
+// RPLPAccelLifecycle: the accelerator's own sleep/wake and power-state entries and exits (Codex Q50: its ordinary wake
+// path resets the command streamers' status buffers and does not start the engines; the full start is reached from a
+// power-state transition out of a cached zero, or from a display-mode pairing). A ring of the last sixteen events,
+// six words each: uptime ns; the kind (1/2 systemWillSleep entry/exit, 3/4 systemDidWake entry/exit, 5/6 setPowerState
+// entry/exit) | the return value << 32; the requested state | the cached state at +0x1280 << 32; the render and media
+// forcewake counters; the GT counter | the flags word at +0xC78 << 32; the interrupt bridge's bytes +0x8A8 and +0x8AA
+// (<< 8), the controller's NumFrameBuffer << 16, bit 24 the bridge known, bit 25 inside a wake window.
+constexpr unsigned rplpAccelEvents=16;
+uint64_t rplpAccelLifecycle[8+6*rplpAccelEvents] {1};uint32_t rplpAccelNext;uint64_t rplpNumFrameBuffer=UINT32_MAX;
 void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
 uint64_t rplpAuxLane[8] {1};       // N97FBAuxLane: schema, writes, last domain, last enable, before, after, calls with the flag off, unreadable
@@ -261,6 +270,7 @@ void rplpWakeLogPublish(bool nvram) {   // thread context only
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakeSubmits",rplpWakeSubmits,sizeof(rplpWakeSubmits));
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWakePCI",rplpWakePCI,sizeof(rplpWakePCI));
  if(rplpGTSleepValid)IORegistryEntry::getRegistryRoot()->setProperty("N97GTSleep",rplpGTSleep,sizeof(rplpGTSleep));
+ IORegistryEntry::getRegistryRoot()->setProperty("RPLPAccelLifecycle",rplpAccelLifecycle,sizeof(rplpAccelLifecycle));
  if(nvram && __atomic_load_n(&rplpWakeLog[39],__ATOMIC_RELAXED)<rplpWakeNVRAMPerWake)
   if(auto options=IORegistryEntry::fromPath("/options",gIODTPlane)) {
    __atomic_fetch_add(&rplpWakeLog[39],1ULL,__ATOMIC_RELAXED);
@@ -370,6 +380,19 @@ bool rplpWakeInWindow() {
  return true;
 }
 bool rplpWakeWaking() {return __atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==2;}
+void rplpAccelRecord(void *that,unsigned kind,uint64_t arg,uint64_t result) {
+ if(!that)return;auto a=static_cast<uint8_t *>(that);
+ const auto n=__atomic_fetch_add(&rplpAccelNext,1U,__ATOMIC_RELAXED);
+ auto e=&rplpAccelLifecycle[8+6*(n%rplpAccelEvents)];
+ uint32_t cached,counters[3],flags;memcpy(&cached,a+0x1280,sizeof(cached));memcpy(counters,a+0x1290,sizeof(counters));memcpy(&flags,a+0xC78,sizeof(flags));
+ auto bridge=*reinterpret_cast<uint8_t **>(a+0x1248);
+ const bool known=bridge && *reinterpret_cast<void **>(bridge+0x10)==that;
+ e[0]=rplpWakeNow();e[1]=uint64_t(kind)|result<<32;e[2]=arg|uint64_t(cached)<<32;
+ e[3]=uint64_t(counters[0])|uint64_t(counters[1])<<32;e[4]=uint64_t(counters[2])|uint64_t(flags)<<32;
+ e[5]=(known ? uint64_t(bridge[0x8A8])|uint64_t(bridge[0x8AA])<<8|1ULL<<24 : 0)|((rplpNumFrameBuffer&0xFFULL)<<16)|(rplpWakeWaking() ? 1ULL<<25 : 0);
+ rplpAccelLifecycle[1]=n+1;rplpAccelLifecycle[2]=n+1<rplpAccelEvents ? n+1 : rplpAccelEvents;
+ rplpWakeLogKick(true);
+}
 void rplpWakeLogFirst(unsigned slot,uint64_t now) {uint64_t expected=0;__atomic_compare_exchange_n(&rplpWakeLog[slot],&expected,now,false,__ATOMIC_RELAXED,__ATOMIC_RELAXED);}
 }
 static void rplpWakeLogArm() {
@@ -10825,6 +10848,18 @@ bool XE::processTGLAccelerator(KernelPatcher &patcher, size_t index, mach_vm_add
 			const bool observed = patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator4stopEP9IOService",address,size)==address+0x263C8 &&
 				patcher.routeMultiple(index, observations, arrsize(observations), address, size);
 			IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGAcceleratorObservationsRouted", observed);
+			// Codex Q50: the accelerator's sleep/wake and power-state entries, recorded with its cached state, its forcewake
+			// counters and the interrupt bridge's flags (RPLPAccelLifecycle). Observers only; the exact image is required.
+			KernelPatcher::RouteRequest lifecycle[] {
+				{"__ZN16IntelAccelerator15systemWillSleepEv", wrapTGLAcceleratorWillSleep, orgTGLAcceleratorWillSleep},
+				{"__ZN16IntelAccelerator13systemDidWakeEv", wrapTGLAcceleratorDidWake, orgTGLAcceleratorDidWake},
+				{"__ZN16IntelAccelerator13setPowerStateEmP9IOService", wrapTGLAcceleratorSetPowerState, orgTGLAcceleratorSetPowerState}
+			};
+			const bool lifecycleRouted=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator13systemDidWakeEv",address,size)==address+0x2897A &&
+				patcher.solveSymbol<mach_vm_address_t>(index,"__ZN16IntelAccelerator13setPowerStateEmP9IOService",address,size)==address+0x2A9B6 &&
+				patcher.routeMultiple(index, lifecycle, arrsize(lifecycle), address, size);
+			patcher.clearError();
+			IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGAcceleratorLifecycleRouted", lifecycleRouted);
 			bool adlnObserved=true;
 			if (adlnDetected) {
 				const uint8_t callbackEntry[] {0x55,0x48,0x89,0xE5,0x48,0x8B,0xBF,0x48,0x12,0,0};
@@ -13026,6 +13061,8 @@ bool XE::wrapAlderLakeNNativeIRQ(IOService *that) {
 
 bool XE::wrapTGLAcceleratorEngine(IOService *that) {
  RPLPWakeEngineScope rplpWakeScope;
+ if(auto controller=callbackXE->tglObservationController)
+  if(auto n=OSDynamicCast(OSNumber,controller->getProperty("NumFrameBuffer")))rplpNumFrameBuffer=n->unsigned32BitValue();
  if (callbackXE->adlnDetected) {
   auto a=reinterpret_cast<uint8_t *>(that);
   uint32_t caps[] {*reinterpret_cast<uint32_t *>(a+0x1120),*reinterpret_cast<uint32_t *>(a+0x1124),
@@ -13103,6 +13140,25 @@ bool XE::wrapTGLAcceleratorEngine(IOService *that) {
 	tglFBIRQEnd(irq,result);
 	if (tglHost.owner==that) tglHostPublish();
 	rplpWakeScope.result=result;
+	return result;
+}
+
+// The accelerator's own sleep/wake and power-state entries (RPLPAccelLifecycle): observers only, the native call
+// unchanged in between.
+void XE::wrapTGLAcceleratorWillSleep(IOService *that) {
+	rplpAccelRecord(that,1,0,0);
+	FunctionCast(wrapTGLAcceleratorWillSleep,callbackXE->orgTGLAcceleratorWillSleep)(that);
+	rplpAccelRecord(that,2,0,0);
+}
+void XE::wrapTGLAcceleratorDidWake(IOService *that) {
+	rplpAccelRecord(that,3,0,0);
+	FunctionCast(wrapTGLAcceleratorDidWake,callbackXE->orgTGLAcceleratorDidWake)(that);
+	rplpAccelRecord(that,4,0,0);
+}
+IOReturn XE::wrapTGLAcceleratorSetPowerState(IOService *that,unsigned long state,IOService *device) {
+	rplpAccelRecord(that,5,state,0);
+	const auto result=FunctionCast(wrapTGLAcceleratorSetPowerState,callbackXE->orgTGLAcceleratorSetPowerState)(that,state,device);
+	rplpAccelRecord(that,6,state,static_cast<uint32_t>(result));
 	return result;
 }
 
