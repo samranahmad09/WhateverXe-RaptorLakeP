@@ -229,8 +229,9 @@ struct RPLPKernelMem {
  uint32_t read32(uint64_t a) const {uint32_t v;memcpy(&v,reinterpret_cast<const void *>(a),sizeof(v));return v;}
  uint8_t read8(uint64_t a) const {return *reinterpret_cast<const uint8_t *>(a);}
  void write8(uint64_t a,uint8_t v) const {*reinterpret_cast<volatile uint8_t *>(a)=v;}
+ void write32(uint64_t a,uint32_t v) const {*reinterpret_cast<volatile uint32_t *>(a)=v;}
 };
-void rplpIOGSample(uint32_t when);void rplpPipesRecord(unsigned slot,uint32_t when);void rplpIOGKick();void rplpWakeFBEventsReset();void rplpWSStartRun();
+void rplpIOGSample(uint32_t when);void rplpPipesRecord(unsigned slot,uint32_t when);void rplpIOGKick();void rplpWakeFBEventsReset();void rplpWSStartRun(bool tick);
 void rplpForceWakeUnderflowCheck(void *owner,bool enable,unsigned domains,uint64_t kind,const uint32_t *before,const uint32_t *after,const uint64_t *event,const void *caller);
 void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
@@ -348,14 +349,14 @@ IOReturn rplpWakeLogHandler(void *,void *,UInt32 type,IOService *,void *argument
    memset(rplpWakeSubmits,0,sizeof(rplpWakeSubmits));rplpWakeSubmits[0]=1;
    memset(rplpWakePCI,0,sizeof(rplpWakePCI));rplpWakePCI[0]=1;rplpWakePCISleep();
    rplpWakeFBEventsReset();memset(rplpForceWakeUnderflow,0,sizeof(rplpForceWakeUnderflow));rplpForceWakeUnderflow[0]=1;
-   rplpWakeIOG[7]=0;rplpPipesRecord(1,1);rplpIOGSample(1);rplpWSStartRun();rplpIOGSample(8);
+   rplpWakeIOG[7]=0;rplpPipesRecord(1,1);rplpIOGSample(1);rplpWSStartRun(false);rplpIOGSample(8);
    rplpGTSnapshotAwake(__atomic_load_n(&rplpWakeOwner,__ATOMIC_ACQUIRE),rplpGTSleep,4,0,rplpWakeLog[32]);rplpGTSleepValid=true;
    __atomic_store_n(&rplpWakeEngineReturned,0U,__ATOMIC_RELEASE);__atomic_store_n(&rplpWakeForceWakeSeq,0U,__ATOMIC_RELEASE);
    rplpWakeWindowEnd=0;__atomic_store_n(&rplpWakePhase,1U,__ATOMIC_RELEASE);rplpIOGKick();nvram=true;break;
   case kIOMessageSystemWillPowerOn:
-   rplpWakeLog[4]=now;++rplpWakeLog[32];rplpWakePCIWake();rplpPipesRecord(3,3);rplpIOGSample(3);
+   rplpWakeLog[4]=now;++rplpWakeLog[32];rplpWakePCIWake();rplpWSStartRun(true);rplpPipesRecord(3,3);rplpIOGSample(3);
    __atomic_store_n(&rplpWakePhase,2U,__ATOMIC_RELEASE);nvram=true;break;
-  case kIOMessageSystemHasPoweredOn: rplpWakeLog[5]=now;rplpWakeWindowEnd=now+60000000000ULL;rplpPipesRecord(4,4);rplpIOGSample(4);nvram=true;break;
+  case kIOMessageSystemHasPoweredOn: rplpWakeLog[5]=now;rplpWakeWindowEnd=now+60000000000ULL;rplpWSStartRun(true);rplpPipesRecord(4,4);rplpIOGSample(4);nvram=true;break;
   default: break;
  }
  rplpWakeLogPublish(nvram);
@@ -443,21 +444,27 @@ void rplpIOGSample(uint32_t when) {
  if(!n)h[10]=(w[4]&0xFFFFFFULL)|uint64_t(rplpIOGGlobals.verboseBoot ? m.read8(rplpIOGGlobals.verboseBoot) : 0xFFU)<<24|uint64_t(w[6]!=0)<<32;
  h[7]=n+1;
 }
-// -wex-rplp-wsstart (round 55, kern_rplp_iog.hpp wsStart): at will-sleep, clear the window-server wait byte of a
-// framebuffer controller whose every framebuffer is an IONDRVFramebuffer (the placeholder the family attaches to the
-// undriven dGPU, which the window server never opens). RPLPWSStart: schema, flag, uptime ns, then the twelve record
-// words of wsStart. Without the flag the walk runs and reports, and nothing is written.
+// -wex-rplp-wsstart (rounds 55 and 56, kern_rplp_iog.hpp wsStart): at will-sleep, and again at every sampler tick of the
+// entry and the wake and at the two wake notices, clear the window-server wait byte and the cached computed-state word
+// of a framebuffer controller whose every framebuffer is an IONDRVFramebuffer (the placeholder the family attaches to
+// the undriven dGPU, which the window server never opens). RPLPWSStart: schema, flag, uptime ns of the will-sleep call,
+// then the twelve record words of that call; [15] the ticks since | the ticks that had to clear again << 32. Without
+// the flag the walk runs and reports, and nothing is written.
 uint64_t rplpWSStart[16] {1};
-void rplpWSStartRun() {
- auto &r=rplpWSStart;r[1]=checkKernelArgument("-wex-rplp-wsstart");r[2]=rplpWakeNow();
- for(unsigned i=3;i<16;++i)r[i]=0;
- if(rplpIOGGlobals.controllers) {
-  RPLPKernelMem m;uint64_t w[12];
-  RPLPIOG::wsStart(m,rplpIOGGlobals,[](uint64_t fb) {
-   const OSMetaClass *mc=reinterpret_cast<const OSObject *>(fb)->getMetaClass();
-   const char *name=mc ? mc->getClassName() : nullptr;
-   return name && strcmp(name,"IONDRVFramebuffer")==0;
-  },r[1]!=0,w);
+static bool rplpWSPlaceholder(uint64_t fb) {
+ const OSMetaClass *mc=reinterpret_cast<const OSObject *>(fb)->getMetaClass();
+ const char *name=mc ? mc->getClassName() : nullptr;
+ return name && strcmp(name,"IONDRVFramebuffer")==0;
+}
+void rplpWSStartRun(bool tick) {
+ auto &r=rplpWSStart;
+ const bool flag=checkKernelArgument("-wex-rplp-wsstart");
+ if(!rplpIOGGlobals.controllers)return;
+ RPLPKernelMem m;uint64_t w[12];
+ RPLPIOG::wsStart(m,rplpIOGGlobals,rplpWSPlaceholder,flag,w);
+ if(tick) {r[15]=(r[15]+1)&0xFFFFFFFFULL|((r[15]>>32)+(w[9] ? 1 : 0))<<32;}
+ else {
+  r[1]=flag;r[2]=rplpWakeNow();r[15]=0;
   for(unsigned i=0;i<12;++i)r[3+i]=w[i];
  }
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPWSStart",r,sizeof(r));
@@ -513,11 +520,11 @@ void rplpIOGWorker(void *,wait_result_t) {
   while(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==1 && entry<48) {
    IOSleep(3000);
    if(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)!=1)break;
-   rplpIOGSample(2);rplpPipesRecord(2,2);rplpWakeLogKick(false);++entry;
+   rplpWSStartRun(true);rplpIOGSample(2);rplpPipesRecord(2,2);rplpWakeLogKick(false);++entry;
   }
   while(__atomic_load_n(&rplpWakePhase,__ATOMIC_ACQUIRE)==2 && wake<20) {
    IOSleep(3000);
-   rplpIOGSample(6);++wake;
+   rplpWSStartRun(true);rplpIOGSample(6);++wake;
    if(wake==10)rplpPipesRecord(6,6);
    if(wake==20)rplpPipesRecord(7,6);
    rplpWakeLogKick(false);

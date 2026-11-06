@@ -9,6 +9,7 @@ struct Mem {
     void put8(uint64_t a,uint8_t v) {b[a]=v;}
     unsigned writes {};
     void write8(uint64_t a,uint8_t v) {++writes;b[a]=v;}
+    void write32(uint64_t a,uint32_t v) {++writes;put32(a,v);}
     void put32(uint64_t a,uint32_t v) {for(unsigned i=0;i<4;++i)b[a+i]=uint8_t(v>>(8*i));}
     void put64(uint64_t a,uint64_t v) {for(unsigned i=0;i<8;++i)b[a+i]=uint8_t(v>>(8*i));}
     uint8_t read8(uint64_t a) {++reads;auto it=b.find(a);return it==b.end() ? 0 : it->second;}
@@ -96,19 +97,24 @@ int main() {
     assert(s[PipeSlotHeader+2*PipeWords]==0);
     pipeSlot(m,0,s,1,1,2,3,4,5);
     assert(s[1]==1 && s[4]==0 && s[5]==0 && s[8]==0 && s[PipeSlotHeader]==0);
-    // wsStart: the second controller (one placeholder framebuffer, wait byte set) is cleared; the first (three real
-    // framebuffers, wait 0x6) is left alone; without `clear` nothing is written but the same is reported.
+    // wsStart: the second controller (one placeholder framebuffer, wait byte set, cached state 0x8) gets its byte and its
+    // cached state word zeroed; the first (three real framebuffers, wait 0x6, state 0x1048) is left alone; without
+    // `clear` nothing is written but the same is reported.
     {
         auto placeholder=[&](uint64_t fb) {return fb==fb3;};
         uint64_t r[12];m.writes=0;
         assert(wsStart(m,g,placeholder,false,r)==2 && r[0]==c0 && r[1]==c1 && r[8]==2 && r[9]==0 && m.writes==0);
-        assert(r[4]==(0x6ULL|0x6ULL<<8|3ULL<<16) && r[5]==(0x1ULL|0x1ULL<<8|1ULL<<16|1ULL<<24));
-        assert(wsStart(m,g,placeholder,true,r)==2 && r[9]==0x2 && m.writes==1 && m.read8(c1+ControllerWsWait)==0 && m.read8(c0+ControllerWsWait)==0x6);
-        assert(r[4]==(0x6ULL|0x6ULL<<8|3ULL<<16) && r[5]==(0x1ULL|0ULL<<8|1ULL<<16|1ULL<<24|1ULL<<25));
-        assert(wsStart(m,g,placeholder,true,r)==2 && r[9]==0 && m.writes==1);   // already clear: nothing written
+        assert(r[4]==(0x6ULL|0x6ULL<<8|3ULL<<16|0x1048ULL<<32|0x1048ULL<<48) && r[5]==(0x1ULL|0x1ULL<<8|1ULL<<16|1ULL<<24|0x8ULL<<32|0x8ULL<<48));
+        assert(wsStart(m,g,placeholder,true,r)==2 && r[9]==0x2 && m.writes==2 && m.read8(c1+ControllerWsWait)==0 && m.read32(c1+ControllerComputed)==0 &&
+            m.read8(c0+ControllerWsWait)==0x6 && m.read32(c0+ControllerComputed)==0x1048);
+        assert(r[4]==(0x6ULL|0x6ULL<<8|3ULL<<16|0x1048ULL<<32|0x1048ULL<<48) && r[5]==(0x1ULL|0ULL<<8|1ULL<<16|1ULL<<24|1ULL<<25|0x8ULL<<32|0ULL<<48));
+        assert(wsStart(m,g,placeholder,true,r)==2 && r[9]==0 && m.writes==2);   // already clear: nothing written
+        // The cached word alone come back (a recompute): only the word is written.
+        m.put32(c1+ControllerComputed,0x48);
+        assert(wsStart(m,g,placeholder,true,r)==2 && r[9]==0x2 && m.writes==3 && m.read32(c1+ControllerComputed)==0 && r[5]==(0x1ULL<<16|1ULL<<24|1ULL<<25|0x48ULL<<32));
         m.put8(c1+ControllerWsWait,1);
         auto none=[](uint64_t) {return false;};
-        assert(wsStart(m,g,none,true,r)==2 && r[9]==0 && m.writes==1 && r[5]==(0x1ULL|0x1ULL<<8|1ULL<<16));
+        assert(wsStart(m,g,none,true,r)==2 && r[9]==0 && m.writes==3 && r[5]==(0x1ULL|0x1ULL<<8|1ULL<<16));
         Globals empty;
         assert(wsStart(m,empty,placeholder,true,r)==0 && r[8]==0);
     }

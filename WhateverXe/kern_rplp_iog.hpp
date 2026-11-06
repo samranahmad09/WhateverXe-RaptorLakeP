@@ -113,9 +113,13 @@ template<class Mem> void sample(Mem &m,const Globals &g,uint64_t owner,uint64_t 
 // wait byte set for good, and the family's systemWork (public 585.1) sends the power-down notification to the server,
 // and afterwards the early WillSleep to the accelerators, only while no controller has that byte set. wsStart() walks
 // the family's controller list and, for a controller whose every framebuffer `isPlaceholder` admits (the caller
-// decides by class) and whose wait byte is set, writes the byte to zero when `clear` is set: the state the server would
-// have left had it opened those framebuffers. r[0..3] the controllers, r[4..7] per controller: wait before | wait after
-// << 8 | framebuffers << 16 | all placeholders << 24 | cleared << 25; r[8] the controllers seen; r[9] the mask cleared.
+// decides by class), writes the wait byte and the controller's cached computed-state word to zero when `clear` is set.
+// Round 56 showed the byte alone changes nothing: the family's computeState() returns the cached word (+0x1BC) unless
+// the controller has pending work, and the placeholder's controller never has any, so its stale word (the wait bit and
+// "server acknowledged power on") stays in the aggregate for good. A zero word is the transparent one: the placeholder
+// then gates nothing. r[0..3] the controllers, r[4..7] per controller: wait before | wait after << 8 | framebuffers
+// << 16 | all placeholders << 24 | cleared << 25 | computed before << 32 (16 bits) | computed after << 48 (16 bits);
+// r[8] the controllers seen; r[9] the mask cleared this call.
 template<class Mem,class IsPlaceholder> unsigned wsStart(Mem &m,const Globals &g,IsPlaceholder isPlaceholder,bool clear,uint64_t (&r)[12]) {
     for(auto &v:r)v=0;
     uint64_t c=g.controllers ? m.read64(g.controllers) : 0;
@@ -123,6 +127,7 @@ template<class Mem,class IsPlaceholder> unsigned wsStart(Mem &m,const Globals &g
     for(;n<MaxControllers && pointer(c);++n) {
         r[n]=c;
         const uint8_t wait=m.read8(c+ControllerWsWait);
+        const uint32_t computed=m.read32(c+ControllerComputed);
         unsigned fbs=0;bool placeholder=true;
         for(unsigned j=0;j<MaxFBsPerController;++j) {
             const auto fb=m.read64(c+ControllerFBs+8*j);
@@ -130,9 +135,13 @@ template<class Mem,class IsPlaceholder> unsigned wsStart(Mem &m,const Globals &g
             ++fbs;
             if(!isPlaceholder(fb))placeholder=false;
         }
-        uint64_t v=uint64_t(wait)|uint64_t(fbs)<<16|uint64_t(fbs && placeholder)<<24;
-        if(wait && fbs && placeholder && clear) {m.write8(c+ControllerWsWait,0);v|=1ULL<<25;r[9]|=1U<<n;}
-        v|=uint64_t(m.read8(c+ControllerWsWait))<<8;
+        uint64_t v=uint64_t(wait)|uint64_t(fbs)<<16|uint64_t(fbs && placeholder)<<24|uint64_t(computed&0xFFFFU)<<32;
+        if(fbs && placeholder && clear && (wait || computed)) {
+            if(wait)m.write8(c+ControllerWsWait,0);
+            if(computed)m.write32(c+ControllerComputed,0);
+            v|=1ULL<<25;r[9]|=1U<<n;
+        }
+        v|=uint64_t(m.read8(c+ControllerWsWait))<<8|uint64_t(m.read32(c+ControllerComputed)&0xFFFFU)<<48;
         r[4+n]=v;
         c=m.read64(c+ControllerNext);
     }
