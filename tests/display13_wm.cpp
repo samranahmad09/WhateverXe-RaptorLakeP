@@ -312,6 +312,21 @@ int main() {
     DelayedCursor stuckCursor(p,cursor);stuckCursor.stuck=true;
     const auto stuckProof=latch(stuckCursor,stuckCursor.snapshot(p,&cursor));
     assert(stuckProof.status==Status::Readback && stuckProof.waitUs==52000 && stuckProof.lastReg==0x700AC);
+    // -wex-rplp-cursorlag (cursorRequired false: this update did not move the cursor's allocation): the same stuck cursor
+    // completes at the deadline with the lag recorded and the mismatch named; a cursor that catches up completes without
+    // it; a stuck primary live surface still refuses whatever the cursor requirement.
+    DelayedCursor laggingCursor(p,cursor);laggingCursor.stuck=true;
+    auto lagged=laggingCursor.snapshot(p,&cursor);lagged.cursorRequired=false;
+    const auto lagProof=latch(laggingCursor,lagged);
+    assert(lagProof.status==Status::Complete && lagProof.cursorLag==1 && lagProof.waitUs==52000 && lagProof.lastReg==0x700AC &&
+           lagProof.expected==laggingCursor.cursorSurface && lagProof.observed==laggingCursor.previous && lagProof.frameAfter!=lagProof.frameBefore);
+    DelayedCursor caughtUp(p,cursor);auto optional=caughtUp.snapshot(p,&cursor);optional.cursorRequired=false;
+    const auto caughtProof=latch(caughtUp,optional);
+    assert(caughtProof.status==Status::Complete && !caughtProof.cursorLag && caughtProof.waitUs==3000);
+    LatchIO primaryStuck(p,&cursor);primaryStuck.oldSurface=true;
+    auto primaryOptional=primaryStuck.snapshot(p,&cursor);primaryOptional.cursorRequired=false;
+    const auto primaryProof=latch(primaryStuck,primaryOptional);
+    assert(primaryProof.status==Status::Readback && primaryProof.lastReg==0x701AC && !primaryProof.cursorLag);
     LatchIO oldLive(p);oldLive.surface=finalFlip.primary;oldLive.regs[0x7019C]=oldLive.surface;
     oldLive.oldSurface=true;
     assert(latch(oldLive,oldLive.snapshot(p)).status==Status::Readback);

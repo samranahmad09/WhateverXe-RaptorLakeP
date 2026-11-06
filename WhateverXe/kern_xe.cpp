@@ -235,6 +235,10 @@ void rplpIOGSample(uint32_t when);void rplpPipesRecord(unsigned slot,uint32_t wh
 // -wex-rplp-entryirq (round 57): N97FBEntryIRQ = schema, flag, port-only releases passed by the relaxed stopped-pipe rule,
 // refused by it, display interrupt masters turned off at the sleep override, the last such result, its uptime ns.
 uint64_t rplpEntryIRQ[8] {1};
+// -wex-rplp-cursorlag (round 59): N97FBCursorLag = schema, flag, latches completed with the cursor's live surface still
+// behind its base at the deadline (the cursor's allocation unchanged), latches refused for that mismatch (flag off, or the
+// allocation moved), the last one's uptime ns, its expected | observed << 32, its frames before | after << 32, its wait us.
+uint64_t rplpCursorLag[8] {1};
 void rplpForceWakeUnderflowCheck(void *owner,bool enable,unsigned domains,uint64_t kind,const uint32_t *before,const uint32_t *after,const uint64_t *event,const void *caller);
 void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
@@ -577,6 +581,8 @@ static void rplpWakeLogArm() {
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPAuxLaneArmed",rplpAuxLaneEnabled);
  rplpEntryIRQ[1]=checkKernelArgument("-wex-rplp-entryirq");
  IORegistryEntry::getRegistryRoot()->setProperty("N97FBEntryIRQ",rplpEntryIRQ,sizeof(rplpEntryIRQ));
+ rplpCursorLag[1]=checkKernelArgument("-wex-rplp-cursorlag");
+ IORegistryEntry::getRegistryRoot()->setProperty("N97FBCursorLag",rplpCursorLag,sizeof(rplpCursorLag));
  if(!checkKernelArgument("-wex-rplp-wakelog"))return;
  rplpWakeLogLock=IOLockAlloc();
  const bool thread=rplpWakeLogLock && kernel_thread_start(rplpWakeLogWriter,nullptr,&rplpWakeLogThread)==KERN_SUCCESS;
@@ -9226,13 +9232,25 @@ Display13WM::Latch XE::adlnVerifyWMLatch(IOService *fb,uint64_t nativeHz,uint64_
     const auto primaryRaw=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].primary);
     const auto cursorRaw=Display13DBUF::hardwareRaw(c.dbuf,pipe,c.dbuf.pipe[pipe].cursor);
     if(primaryRaw==UINT32_MAX || cursorRaw==UINT32_MAX) {result.status=Display13WM::Status::Input;return result;}
+	// -wex-rplp-cursorlag: the cursor's live surface is required only when this update moved the cursor's allocation (the
+	// held range differs from the current one); otherwise a lag at the deadline completes the latch and is counted.
+	const auto &allocation=c.dbuf.pipe[pipe];
+	const bool cursorMoved=allocation.heldCursor.end && (allocation.heldCursor.start!=allocation.cursor.start || allocation.heldCursor.end!=allocation.cursor.end);
 	const Display13WM::Snapshot expected {
 		&c.pipe[pipe].wm[0],&c.pipe[pipe].wm[1],primaryRaw,cursorRaw,
 		c.pipe[pipe].wmSurface[0],c.pipe[pipe].wmSurface[1],readout.read(0x45004),nativeHz,c.pipe[pipe].wm0Only[0],cursor,
-		Display13WM::pipeLineTime(c.pipe[pipe].wm[0].htotal,pipePixel),pipePixel,pipe
+		Display13WM::pipeLineTime(c.pipe[pipe].wm[0].htotal,pipePixel),pipePixel,pipe,!rplpCursorLag[1] || cursorMoved
 	};
 	if(!Display13WM::clockFits(expected,targetHz)) {result.status=Display13WM::Status::Input;return result;}
-	return Display13WM::latch(io,expected);
+	result=Display13WM::latch(io,expected);
+	const bool lagged=result.status==Display13WM::Status::Complete && result.cursorLag;
+	if(lagged || (result.status==Display13WM::Status::Readback && result.lastReg==0x700AC+bank)) {
+		++rplpCursorLag[lagged ? 2 : 3];rplpCursorLag[4]=rplpUptimeNs();
+		rplpCursorLag[5]=uint64_t(result.expected)|uint64_t(result.observed)<<32;
+		rplpCursorLag[6]=uint64_t(result.frameBefore)|uint64_t(result.frameAfter)<<32;rplpCursorLag[7]=result.waitUs;
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBCursorLag",rplpCursorLag,sizeof(rplpCursorLag));
+	}
+	return result;
 }
 
 // Called under the existing native FB mutex and display owner lock only
@@ -9450,7 +9468,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	record[4]=result.frameBefore;record[5]=result.frameAfter;record[6]=result.waitUs;record[7]=result.budgetUs;
 	record[8]=result.lastReg;record[9]=result.expected;record[10]=result.observed;
 	record[11]=static_cast<uint32_t>(retired);record[12]=old;record[13]=c.dbuf.unretired;
-	record[14]=c.dbuf.owned;record[15]=c.pipe[pipe].watermarkClockHz;record[16]=result.wrapped|(uint64_t(result.pipe)<<8);
+	record[14]=c.dbuf.owned;record[15]=c.pipe[pipe].watermarkClockHz;record[16]=result.wrapped|(uint64_t(result.pipe)<<8)|(uint64_t(result.cursorLag)<<16);
 	adlnEDPTrace(false,0xFFFF0001,static_cast<uint32_t>(result.status)|(pipe<<8),c.sequence,8);
 	if(result.status!=Display13WM::Status::Complete) {
 		// The pipe's timing, clock source and link ratio at this arm, kept from the first
@@ -9464,6 +9482,14 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 			result.status==Display13WM::Status::Stalled ? "N97FBWMLatchStalledFirst" :
 			result.status==Display13WM::Status::Unavailable ? "N97FBWMLatchUnavailableFirst" : "N97FBWMLatchConflictFirst";
 		if(!root->getProperty(first))root->setProperty(first,timing,sizeof(timing));
+	}
+	if(result.status==Display13WM::Status::Complete && result.cursorLag) {
+		// -wex-rplp-cursorlag: the cursor's live surface still behind its base at the deadline. The pipe's timing and the
+		// cursor registers at this latch; the first such latch of the boot kept separately.
+		uint64_t timing[48] {1,static_cast<uint32_t>(result.status)|(pipe<<8)|(1U<<16),result.expected,result.observed};
+		adlnDisplaySnapshot(timing,pipe,result.lastReg,c.sequence);
+		auto root=IORegistryEntry::getRegistryRoot();root->setProperty("N97FBWMLatchCursorLag",timing,sizeof(timing));
+		if(!root->getProperty("N97FBWMLatchCursorLagFirst"))root->setProperty("N97FBWMLatchCursorLagFirst",timing,sizeof(timing));
 	}
 	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && !inFlight) {
 		uint64_t cursor[8] {1,pipe};Display13FBDBUFIO readout {c.map};

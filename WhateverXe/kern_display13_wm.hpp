@@ -254,6 +254,7 @@ struct Snapshot {
     uint32_t pipeLineTime {};
     uint64_t pipePixelHz {};
     unsigned pipeIndex {}; // Display pipe, not physical HDMI DDI or framebuffer index.
+    bool cursorRequired {true}; // The cursor's live surface must match: this update moved its allocation (or the relaxation is off).
 };
 // FlushTriggerPackets writes these native packets in append order. A flip
 // queued after WM enable may supersede the surface sampled at enable time.
@@ -307,6 +308,7 @@ struct Latch {
     Status status {Status::Unavailable};
     uint32_t frameBefore {},frameAfter {},waitUs {},budgetUs {},lastReg {},expected {},observed {};
     uint32_t pipe {3},wrapped {}; // wrapped: this latch counted a scanline wrap as its new frame.
+    uint32_t cursorLag {}; // Complete with the cursor's live surface still behind its base at the deadline (allocation unchanged).
 };
 // Retirement evidence from this pipe's qualified latch: forward frame-counter progress, or the
 // scanline wrap the latch observed while the counter stood still. Display13DBUF::retire takes
@@ -422,11 +424,18 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
             // readback catches up (observed for a native direct cursor swap).
             // Keep every programmed/control/clock check on each poll; qualify
             // retirement only after both actual live surfaces match. A stable
-            // mismatch at the existing deadline remains a Readback failure.
-            const bool live=compare(io,r,0x701AC+bank,s.primarySurface) &&
-                (!s.cursorActive || compare(io,r,0x700AC+bank,s.cursorSurface));
+            // mismatch at the existing deadline remains a Readback failure,
+            // except a cursor whose allocation this update did not move: its
+            // live surface still behind its base at the deadline completes the
+            // latch with the lag recorded (the primary and the watermarks are
+            // proven, and retiring frees nothing the cursor uses).
+            const bool primaryLive=compare(io,r,0x701AC+bank,s.primarySurface);
+            const bool live=primaryLive && (!s.cursorActive || compare(io,r,0x700AC+bank,s.cursorSurface));
             if(live) {r.wrapped=scanWrapped;r.status=Status::Complete;return r;}
-            if(r.waitUs>=r.budgetUs)return r;
+            if(r.waitUs>=r.budgetUs) {
+                if(primaryLive && !s.cursorRequired) {r.wrapped=scanWrapped;r.cursorLag=1;r.status=Status::Complete;}
+                return r;
+            }
         }
         if(r.waitUs>=r.budgetUs) {
             if(scan && !scanMoved && r.frameAfter==r.frameBefore)return refuse(Status::Stalled,0x70000+bank,scanFirst,scanPrev);

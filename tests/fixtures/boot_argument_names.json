@@ -148,6 +148,7 @@
   "-wex-rplp-coldcore": [],
   "-wex-rplp-wsstart": [],
   "-wex-rplp-entryirq": [],
+  "-wex-rplp-cursorlag": [],
   "-wex-no-va-renderer": [],
   "-wex-rplp-wakelog": [],
   "wex-rplp-urb-banks": [],
