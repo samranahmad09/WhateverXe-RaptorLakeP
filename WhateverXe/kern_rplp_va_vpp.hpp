@@ -1,15 +1,12 @@
 // BSD-3-Clause. One byte on one page of the video driver, opt-in; no driver content is embedded, the image and both
 // pages are admitted by hash only.
 //
-// -wex-rplp-va-vpp (Raptor Lake-P, Big Sur 20G1443): the screen recorder's pixel transfer asks the video driver for a
-// post-processing context whose renderer this image cannot build, and the driver faults inside that construction. The
-// context initializer already refuses other request types through an existing invalid-parameter exit; the correction
-// makes it refuse that one type the same way, so the request fails cleanly to the caller (software fallback) instead of
-// crashing. The site, the byte and the exact context were identified by the project's static analysis (Q54), which is
-// kept private; here only the identity of the image and of its page before and after, and the one byte's offset and
-// values, are needed. Delivery mirrors the OpenGL URB correction: the file is read and hashed once at kernel start, the
-// page is replaced only where the kernel validates exactly that page of exactly that file on a read-only mount, and a
-// receipt records every outcome. The on-disk file is never written.
+// -wex-rplp-va-vpp (Raptor Lake-P, Big Sur 20G1443): the screen recorder's pixel transfer crashes inside the video
+// driver on this machine. The project's private static analysis (Q54) identified the one byte at which the driver
+// refuses that transfer cleanly instead; only the identity of the image and of its page before and after, and that
+// byte's offset and values, are needed here. Delivery mirrors the OpenGL URB correction: the file is read and hashed
+// once at kernel start, the page is replaced only where the kernel validates exactly that page of exactly that file on
+// a read-only mount, and a receipt records every outcome. The on-disk file is never written.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

@@ -28,17 +28,17 @@ enum class Setup : uint32_t {
 };
 enum class Kind : unsigned { GL, VA, Count };
 struct Target {
-    const char *flag,*path,*statusKey,*readyKey,*appliedKey,*imageKey,*originalKey,*correctedKey;
+    const char *path,*statusKey,*readyKey,*appliedKey,*imageKey,*originalKey,*correctedKey;
     const char *imageHash,*originalHash,*correctedHash;
     size_t imageSize;uint64_t pageOffset;
     vnode_t vnode;uint32_t generation;bool armed;uint32_t setup;uint64_t counters[8];
 };
 Target targets[unsigned(Kind::Count)] {
-    {"-wex-rplp-gl-urb",RPLPGLURB::ImagePath,"RPLPGLURBStatus","RPLPGLURBReady","RPLPGLURBApplied",
+    {RPLPGLURB::ImagePath,"RPLPGLURBStatus","RPLPGLURBReady","RPLPGLURBApplied",
      "RPLPGLURBImageSHA256","RPLPGLURBOriginalPageSHA256","RPLPGLURBCorrectedPageSHA256",
      RPLPGLURB::ImageHash,RPLPGLURB::OriginalPageHash,RPLPGLURB::CorrectedPageHash,RPLPGLURB::ImageSize,0,
      nullptr,0,false,0,{}},
-    {"-wex-rplp-va-vpp",RPLPVAVPP::ImagePath,"RPLPVAVPPStatus","RPLPVAVPPReady","RPLPVAVPPApplied",
+    {RPLPVAVPP::ImagePath,"RPLPVAVPPStatus","RPLPVAVPPReady","RPLPVAVPPApplied",
      "RPLPVAVPPImageSHA256","RPLPVAVPPOriginalPageSHA256","RPLPVAVPPCorrectedPageSHA256",
      RPLPVAVPP::ImageHash,RPLPVAVPP::OriginalPageHash,RPLPVAVPP::CorrectedPageHash,RPLPVAVPP::ImageSize,RPLPVAVPP::PageOffset,
      nullptr,0,false,0,{}}
@@ -174,9 +174,9 @@ bool kernelAccepted(KernelPatcher &p) {
 }
 
 // Prepare one target: its own admission, its file, and the shared route once.
-void arm(KernelPatcher &p,Kind kind,bool physicalReady,bool kernelOK) {
+void arm(KernelPatcher &p,Kind kind,bool requested,bool physicalReady,bool kernelOK) {
     auto &t=targets[unsigned(kind)];
-    if(!checkKernelArgument(t.flag))return;
+    if(!requested)return;
     if(!physicalReady){state(t,Setup::WrongProfile);return;}
     uint32_t overrideValue=0;
     if(kind==Kind::GL && PE_parse_boot_argn("wex-rplp-urb-banks",&overrideValue,sizeof(overrideValue))) {
@@ -216,9 +216,9 @@ void arm(KernelPatcher &p,Kind kind,bool physicalReady,bool kernelOK) {
 }
 
 void RPLPGLURBRuntime::processKernel(KernelPatcher &p,bool physicalReady) {
-    const bool wanted=checkKernelArgument(targets[0].flag) || checkKernelArgument(targets[1].flag);
-    if(!wanted)return;
+    const bool gl=checkKernelArgument("-wex-rplp-gl-urb"),va=checkKernelArgument("-wex-rplp-va-vpp");
+    if(!gl && !va)return;
     const bool kernelOK=kernelAccepted(p);
-    arm(p,Kind::GL,physicalReady,kernelOK);
-    arm(p,Kind::VA,physicalReady,kernelOK);
+    arm(p,Kind::GL,gl,physicalReady,kernelOK);
+    arm(p,Kind::VA,va,physicalReady,kernelOK);
 }
