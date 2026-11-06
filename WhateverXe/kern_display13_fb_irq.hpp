@@ -389,7 +389,11 @@ template<class IO> Status hotplugOnly(IO &io,State &s,bool preservePipeStatus=fa
 // `why` (optional) receives the step that refused: 1 inputs, 2 master unreadable,
 // 3 live interrupts with an active domain, 4 pending pipe interrupt, 5 wells
 // unreadable, 6 DDI buffer enabled, 7 consumers running, 8 bank unmasked.
-template<class IO> bool quiescentPipes(IO &io,const State &s,uint32_t domains,unsigned handlers,uint32_t pipes,uint32_t *why=nullptr) {
+// `trustStopped` (round 57, -wex-rplp-entryirq): a port-only release whose affected pipes the hardware shows stopped
+// proceeds even while this state still counts one of them active. At the display power-off before the second sleep
+// of a boot the native path released DDI A with pipe A, its transcoder and its buffer off and the bridge's active bit
+// stale, and the strict rule's refusal latched the fault the wake inherited.
+template<class IO> bool quiescentPipes(IO &io,const State &s,uint32_t domains,unsigned handlers,uint32_t pipes,uint32_t *why=nullptr,bool trustStopped=false) {
     auto refuse=[&](uint32_t step) {if(why)*why=step;return false;};
     if(why)*why=0;
     const auto required=affectedPipes(domains,0,0,0,0,0,0,0);
@@ -406,7 +410,7 @@ template<class IO> bool quiescentPipes(IO &io,const State &s,uint32_t domains,un
     // interrupts registered, and refusing it latched the bridge before the
     // native path could try again. Nothing displays on a stopped pipe.
     const bool portOnly=!(domains&~portPowerDomains()),stopped=consumersStopped(io,pipes);
-    const bool idlePort=portOnly && stopped && !(pipes&s.active);
+    const bool idlePort=portOnly && stopped && (trustStopped || !(pipes&s.active));
     if(active && (handlers || s.enabled || (master&Enable)) && !idlePort)return refuse(3);
     if(master&(pipes<<16))return refuse(4);
     const auto wells=io.read(Driver);if(wells==UINT32_MAX)return refuse(5);

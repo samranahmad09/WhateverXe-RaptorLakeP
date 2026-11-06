@@ -232,6 +232,9 @@ struct RPLPKernelMem {
  void write32(uint64_t a,uint32_t v) const {*reinterpret_cast<volatile uint32_t *>(a)=v;}
 };
 void rplpIOGSample(uint32_t when);void rplpPipesRecord(unsigned slot,uint32_t when);void rplpIOGKick();void rplpWakeFBEventsReset();void rplpWSStartRun(bool tick);
+// -wex-rplp-entryirq (round 57): N97FBEntryIRQ = schema, flag, port-only releases passed by the relaxed stopped-pipe rule,
+// refused by it, display interrupt masters turned off at the sleep override, the last such result, its uptime ns.
+uint64_t rplpEntryIRQ[8] {1};
 void rplpForceWakeUnderflowCheck(void *owner,bool enable,unsigned domains,uint64_t kind,const uint32_t *before,const uint32_t *after,const uint64_t *event,const void *caller);
 void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
@@ -572,6 +575,8 @@ static void rplpWakeLogArm() {
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPPCIWakeArmed",rplpPCIWakeEnabled);
  rplpAuxLaneEnabled=checkKernelArgument("-wex-rplp-auxlane");
  IORegistryEntry::getRegistryRoot()->setProperty("RPLPAuxLaneArmed",rplpAuxLaneEnabled);
+ rplpEntryIRQ[1]=checkKernelArgument("-wex-rplp-entryirq");
+ IORegistryEntry::getRegistryRoot()->setProperty("N97FBEntryIRQ",rplpEntryIRQ,sizeof(rplpEntryIRQ));
  if(!checkKernelArgument("-wex-rplp-wakelog"))return;
  rplpWakeLogLock=IOLockAlloc();
  const bool thread=rplpWakeLogLock && kernel_thread_start(rplpWakeLogWriter,nullptr,&rplpWakeLogThread)==KERN_SUCCESS;
@@ -9801,6 +9806,14 @@ void XE::wrapAlderLakeNPowerOverride(void *power,bool enable) {
 	// override(true) is only reached by the donor's simulator backend; our
 	// physical object has simulator=0. Do not force unrelated DDI/AUX domains.
 	if(!enable)wrapAlderLakeNEngineDisable(power);
+	// -wex-rplp-entryirq: a display interrupt master still on at the sleep override with no handler running is turned off
+	// through the plugin's own disable path (the native disable's), so the suspend's quiescence proof meets the state of a
+	// first sleep; the wake's enable starts from the same state either way.
+	if(!enable && rplpEntryIRQ[1] && display13FBIRQ.state.begun && display13FBIRQ.state.enabled && !display13FBIRQ.handlers &&
+	   adlnIRQOwner(static_cast<IOService *>(c.controller))) {
+		++rplpEntryIRQ[4];rplpEntryIRQ[5]=wrapDisplay13FBDisableIRQ(static_cast<IOService *>(c.controller))==kIOReturnSuccess;rplpEntryIRQ[6]=rplpUptimeNs();
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBEntryIRQ",rplpEntryIRQ,sizeof(rplpEntryIRQ));
+	}
 	uint64_t record[32] {};Display13Power::Result result;IOLockLock(c.lock);
 	if(callbackXE->display13FBLifecycleHooksReady && !enable && c.bridge.begun && !c.bridge.state.faulted &&
 		!c.engineEnabled && c.clockStopped && !c.dbuf.owned && !Display13WM::busyPipes(c.pipe)) {
@@ -10339,6 +10352,15 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 				uint32_t why=0;
 				releaseAllowed=!irq.quiescing && Display13FBIRQ::quiescentPipes(irqIO,irq.state,released,irq.handlers,affected,&why);
 				check[23]=why;
+				// -wex-rplp-entryirq (round 57, the second sleep of a boot): a port-only release refused only because the
+				// bridge still counts a pipe active (step 3) proceeds when the hardware shows every affected pipe stopped.
+				// [24]: 1 tried, 2 passed, the relaxed rule's refusal step << 8.
+				if(!releaseAllowed && why==3 && !irq.quiescing && rplpEntryIRQ[1]) {
+					uint32_t relaxed=0;
+					releaseAllowed=Display13FBIRQ::quiescentPipes(irqIO,irq.state,released,irq.handlers,affected,&relaxed,true);
+					check[24]=1ULL|(releaseAllowed ? 2ULL : 0ULL)|uint64_t(relaxed)<<8;
+					if(releaseAllowed)++rplpEntryIRQ[2];else ++rplpEntryIRQ[3];
+				}
 				if(releaseAllowed) {irq.quiescing=true;irq.blockedPipes=affected;}
 			}
 			IOSimpleLockUnlockEnableInterrupt(irq.lock,saved);
@@ -10447,6 +10469,7 @@ void XE::adlnPowerReference(void *power,uint32_t operation,uint32_t domain) {
 	if(irqRelease[0])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseIRQ",irqRelease,sizeof(irqRelease));
     IORegistryEntry::getRegistryRoot()->setProperty("N97FBAUXPower",auxRecord,sizeof(auxRecord));
 	if(check[14])IORegistryEntry::getRegistryRoot()->setProperty("N97FBPowerReleaseMap",check,sizeof(check));
+	if(check[24])IORegistryEntry::getRegistryRoot()->setProperty("N97FBEntryIRQ",rplpEntryIRQ,sizeof(rplpEntryIRQ));
 	if(record[4]!=static_cast<uint32_t>(Display13Power::Status::Complete) && record[7]==1)
 		IORegistryEntry::getRegistryRoot()->setProperty("N97FBFirstPowerCheck",check,sizeof(check));
 	if(disableEngine)wrapAlderLakeNEngineDisable(power);

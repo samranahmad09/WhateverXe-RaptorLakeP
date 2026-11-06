@@ -186,6 +186,10 @@ int main() {
      assert(quiescentPipes(mapped,state,32,1,2,&why) && why==0);
      assert(!quiescentPipes(live,state,32,1,2,&why) && why==3);
      State software=state;software.active=3;assert(!quiescentPipes(mapped,software,32,1,2,&why) && why==3);
+     // The relaxed rule (-wex-rplp-entryirq): a stale active bit no longer refuses a port-only release of a stopped pipe,
+     // while a pipe that still displays is refused as before.
+     assert(quiescentPipes(mapped,software,32,1,2,&why,true) && why==0);
+     assert(!quiescentPipes(live,software,32,1,2,&why,true) && why==3);
      assert(!quiescentPipes(mapped,state,33,1,7,&why) && why==3);
      auto buffered=mapped;buffered.r[0x64100]=Enable;assert(!quiescentPipes(buffered,state,32,1,2,&why) && why==6);
      assert(!quiescentPipes(pending,state,32,1,2,&why) && why==4);
