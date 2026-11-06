@@ -107,8 +107,13 @@ processors, including the laptop's internal (eDP) panel.
 >   active while the interrupt master was on; the refusal latched the fault the wake then inherited (restore NotReady,
 >   a dark panel, the script's clean restart). The current build lets a port-only release proceed when the hardware
 >   shows every affected pipe stopped, whatever the bookkeeping says, and turns the display interrupt master off at the
->   sleep override when it is still on with no handler running (`-wex-rplp-entryirq`, record `N97FBEntryIRQ`); round 58
->   runs the ladder (two system sleeps, the lid, a long sleep).
+>   sleep override when it is still on with no handler running (`-wex-rplp-entryirq`, record `N97FBEntryIRQ`). Round 58
+>   (2026-11-06): the first sleep of the boot passed again, the second got past that release and failed one step later,
+>   at the sleep override: the display buffer slices the plugin had requested again at the first wake (the power loss
+>   clears the firmware's requests) were still counted as the plugin's own, and the override suspends only with none
+>   owned. The current build gives those slices back their boot state after a cold resume (requested, not owned), as
+>   the other Display 13 fork does after a real sleep; round 59 runs the ladder (two system sleeps, the lid, a long
+>   sleep).
 >   Not validated yet: Metal workloads beyond the desktop, 144 Hz, external outputs.
 > - The read-only `-wex-rplp-observe` and the one-shot `-wex-rplp-gpu` self-test remain available.
 > - Raptor Lake-P support is experimental and tested on one machine.

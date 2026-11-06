@@ -9587,6 +9587,13 @@ void XE::wrapAlderLakeNEngineEnable(void *power) {
 		}
 		if(status==Display13DBUF::Status::Complete)status=Display13DBUF::tracker(io,c.dbuf);
 		if(cold && status==Display13DBUF::Status::Complete) {
+			// Round 58 (r346): the power loss cleared the firmware's slice requests and power() has just requested them
+			// again and marked them this owner's; at boot they were the predecessor's (requested, not owned), and the next
+			// sleep's engine stop keeps them requested either way while the override suspends only with none owned. Give
+			// them back their boot state, as the other Display 13 fork does after a real sleep. [29]: owned before | after
+			// << 8 | the firmware's initial requests << 16 | applied << 24.
+			coldRecord[29]=uint64_t(c.dbuf.owned&0xFFU)|uint64_t(c.dbuf.initialRequests&0xFFU)<<16|1ULL<<24;
+			c.dbuf.owned&=~c.dbuf.initialRequests;coldRecord[29]|=uint64_t(c.dbuf.owned&0xFFU)<<8;
 			// i915's display core init after MBUS, display version 13: Wa_14011508470 (CHICKEN_DCPR_2 bits 24 to 27) and
 			// Wa_14011503030 (the fatal error mask written all-ones). The bandwidth buddy registers are only read here.
 			const auto base=c.map->getVirtualAddress();
