@@ -49,6 +49,7 @@ mach_vm_address_t originalValidate;
 thread_call_t publisher;
 bool routed,routeAttempted;
 const char *osBuild;         // the kernel's OS build string storage; userspace fills it after the kernel has started
+bool buildAccepted();         // defined with the kernel admission below; used where a page is validated
 uint64_t kernelRecord[6] {1}; // RPLPPageKernel: schema, page size ok, kernel major ok, exact version string ok, build
                               // string storage resolved, its first eight bytes when this plugin was set up
 
