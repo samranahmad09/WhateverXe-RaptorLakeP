@@ -24,7 +24,8 @@ struct Target {const char *flag;uint64_t pageOffset;vnode_t vnode;unsigned gener
 Node glFile,vaFile,other;
 Target targets[2] {{"gl",0,&glFile,7,true,10,{}},{"va",RPLPVAVPP::PageOffset,&vaFile,7,true,10,{}}};
 RPLPGLURB::Plan glPlan;RPLPVAVPP::Plan vaPlan;
-unsigned calls,writes,enters,ends;int publisher=3;bool fail,restoreFail,allow;
+unsigned calls,writes,enters,ends;int publisher=3;bool fail,restoreFail,allow,buildOK=true;
+bool buildAccepted(){return buildOK;}
 int expectedV,expectedT,expectedN;vnode_t expectedNode;void *expectedPager;
 uint64_t expectedOffset;const void *expectedData;
 int *expectedVP,*expectedTP,*expectedNP;
@@ -57,7 +58,7 @@ int main(){
  vaPlan.original[RPLPVAVPP::ByteOffset]=RPLPVAVPP::ByteBefore;
  memcpy(vaPlan.corrected,vaPlan.original,PageSize);vaPlan.corrected[RPLPVAVPP::ByteOffset]=RPLPVAVPP::ByteAfter;
  uint8_t page[PageSize];int v,t,n,pager;
- for(unsigned k=0;k<2;++k)for(unsigned test=0;test<14;++test){
+ for(unsigned k=0;k<2;++k)for(unsigned test=0;test<15;++test){
   auto &tg=targets[k];Node &file=k?vaFile:glFile;
   const uint8_t *orig=k?vaPlan.original:glPlan.original,*corr=k?vaPlan.corrected:glPlan.corrected;
   calls=writes=enters=ends=0;memset(tg.counters,0,sizeof(tg.counters));
@@ -68,11 +69,12 @@ int main(){
   expectedData=page;expectedVP=&v;expectedTP=&t;expectedNP=&n;
   if(test==4)file.generation=8;
   if(test==8)file.readonly=false;
+  buildOK=test!=14;
   memcpy(page,test==10?corr:orig,PageSize);v=t=n=-1;
   bool panicked=false;try{validate(expectedNode,&pager,expectedOffset,page,&v,&t,&n);}catch(int){panicked=true;}
   assert(calls==1 && v==expectedV && t==expectedT && n==expectedN);
   if(test==0)assert(writes==1 && enters==1 && tg.counters[unsigned(RPLPGLURB::Result::Applied)]==1 && !memcmp(page,corr,PageSize));
-  else if(test<11 || test==13)assert(!writes && !memcmp(page,test==10?corr:orig,PageSize));
+  else if(test<11 || test==13 || test==14)assert(!writes && !memcmp(page,test==10?corr:orig,PageSize));
   else {assert(!tg.armed && tg.setup==11 && writes==2 && ends==1);
         if(test==11)assert(!memcmp(page,orig,PageSize));}
   assert(panicked==(test==12));
@@ -80,7 +82,7 @@ int main(){
   // The other target's state is never touched by this target's page.
   assert(targets[1-k].armed && !targets[1-k].counters[unsigned(RPLPGLURB::Result::Applied)]);
  }
- puts("PASS actual page-correction wrapper: seven arguments, original exactly once/first, unchanged verdict, identity/offset guards per target, the other target's page untouched, rollback and halt");
+ puts("PASS actual page-correction wrapper: seven arguments, original exactly once/first, unchanged verdict, identity/offset/build guards per target, the other target's page untouched, rollback and halt");
 }
 '''
 with tempfile.TemporaryDirectory() as tmp:

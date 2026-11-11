@@ -241,6 +241,10 @@ int main() {
     assert(latch(wrongTile,wrongTile.snapshot(yp)).status==Status::Conflict);
     assert(cursorMatches(0,256,true) && cursorMatches(35,256) && cursorMatches(34,128) && cursorMatches(39,64));
     assert(!cursorMatches(35,64) && !cursorMatches(0,256) && !cursorMatches(4,64) && !cursorMatches(UINT32_MAX,256,true));
+    // A resize in flight: enabled at one valid size while another valid size is requested.
+    assert(cursorResizing(39,128) && cursorResizing(7,256) && cursorResizing(34,64) && cursorResizing(35,128));
+    assert(!cursorResizing(39,64) && !cursorResizing(0,128) && !cursorResizing(UINT32_MAX,128) && !cursorResizing(39,100) && !cursorResizing(4,64));
+    assert(inFlight(Status::CursorSize) && !inFlight(Status::Conflict));
     auto c256=plan(256,2200,148500000,40,latency,true);
     assert(c256.status==Status::Complete && c256.sagv.enable && c256.normal[5].enable && c256.normal[5].minimum<=40);
     LatchIO cursor256(yp,&c256,true);cursor256.regs[0x70180]=0x94001008;cursor256.regs[0x70080]=35;
@@ -327,6 +331,20 @@ int main() {
     auto primaryOptional=primaryStuck.snapshot(p,&cursor);primaryOptional.cursorRequired=false;
     const auto primaryProof=latch(primaryStuck,primaryOptional);
     assert(primaryProof.status==Status::Readback && primaryProof.lastReg==0x701AC && !primaryProof.cursorLag);
+    // -wex-rplp-cursorsize: the plan is for a 128-pixel cursor while the control still shows 64. A conflict by default; in
+    // flight (no wait, both sizes named) when a resize is allowed; the control at the plan's size completes.
+    auto cursor128=plan(128,2200,148500000,36,latency,true);
+    assert(cursor128.status==Status::Complete && cursor128.width==128);
+    LatchIO resize(p,&cursor128);
+    auto resizeSnapshot=resize.snapshot(p,&cursor128);
+    const auto refusedSize=latch(resize,resizeSnapshot);
+    assert(refusedSize.status==Status::Conflict && refusedSize.lastReg==0x70080 && !resize.elapsed);
+    resizeSnapshot.cursorResizeAllowed=true;
+    const auto resizingProof=latch(resize,resizeSnapshot);
+    assert(resizingProof.status==Status::CursorSize && resizingProof.lastReg==0x70080 && resizingProof.expected==128 &&
+           resizingProof.observed==64 && !resize.elapsed);
+    resize.regs[0x70080]=34;
+    assert(latch(resize,resizeSnapshot).status==Status::Complete);
     LatchIO oldLive(p);oldLive.surface=finalFlip.primary;oldLive.regs[0x7019C]=oldLive.surface;
     oldLive.oldSurface=true;
     assert(latch(oldLive,oldLive.snapshot(p)).status==Status::Readback);

@@ -25,10 +25,11 @@ enum class Status : uint32_t {Unavailable,Complete,Input,WM0,SAGV,MailboxBusy,Ma
     Intent,   // Wrapper side: the arm carried no valid trigger intent (never a latch() result).
     Queue,    // Wrapper side: the native path still counts queued packets; observed = that count.
     Binding,  // Wrapper side: path binding, scaler or framebuffer state refused; observed = condition bits.
-    Stalled}; // No new frame and a scanline that never moved for the whole budget: the pipe is not running (in flight).
+    Stalled,  // No new frame and a scanline that never moved for the whole budget: the pipe is not running (in flight).
+    CursorSize}; // The cursor is still shown at its previous size while the plan is for its new one: a resize in flight.
 // A result that verified nothing and faulted nothing: the native mode change has not run the pipe
 // yet, and the next arm verifies again. Pending plans behind such a result are not conflicts.
-inline bool inFlight(Status s) {return s==Status::Unavailable || s==Status::Timing || s==Status::Inactive || s==Status::Stalled;}
+inline bool inFlight(Status s) {return s==Status::Unavailable || s==Status::Timing || s==Status::Inactive || s==Status::Stalled || s==Status::CursorSize;}
 // CPU certificates are prerequisites only. The caller still owns each active
 // FB mutex and validates hardware at current/target Hz before a shared crawl.
 template<class Pipe,unsigned N> bool clockConsumersReady(const Pipe (&pipes)[N],uint32_t active,uint64_t hz) {
@@ -173,6 +174,13 @@ inline bool cursorMatches(uint32_t control,uint32_t width,bool allowDisabled=fal
     if(control==UINT32_MAX || (width!=64 && width!=128 && width!=256))return false;
     return (!(control&0x27) && allowDisabled) || cursorWidth(control)==width;
 }
+// A resize in flight: the cursor is shown at one valid size while the native path prepares another (the plan is for
+// the new size; the control is rewritten before the update is armed).
+inline bool cursorResizing(uint32_t control,uint32_t width) {
+    if(control==UINT32_MAX || (width!=64 && width!=128 && width!=256))return false;
+    const auto live=cursorWidth(control);
+    return live && live!=width;
+}
 inline Level yTiledLevel(uint32_t width,uint32_t htotal,uint64_t pixelHz,uint32_t latencyUs,uint32_t allocation) {
     Level l;
     if(!latencyUs || !width || width>16384 || htotal<width || htotal>16384 ||
@@ -255,6 +263,7 @@ struct Snapshot {
     uint64_t pipePixelHz {};
     unsigned pipeIndex {}; // Display pipe, not physical HDMI DDI or framebuffer index.
     bool cursorRequired {true}; // The cursor's live surface must match: this update moved its allocation (or the relaxation is off).
+    bool cursorResizeAllowed {}; // A live cursor at another valid size than the plan's is a resize in flight, not a conflict.
 };
 // FlushTriggerPackets writes these native packets in append order. A flip
 // queued after WM enable may supersede the surface sampled at enable time.
@@ -377,6 +386,8 @@ template<class IO> Latch latch(IO &io,const Snapshot &s) {
         if((pipe&0xC0000000)!=0xC0000000)return refuse(Status::Inactive,0x70008+bank,0xC0000000,pipe);
         if(!(plane&Enabled))return refuse(Status::Inactive,0x70180+bank,Enabled,plane);
         if(!supportedRGBControl(plane) || (((plane>>10)&7)==4)!=s.primary->yTiled)return refuse(Status::Conflict,0x70180+bank,s.primary->yTiled,plane);
+        if(s.cursorResizeAllowed && s.cursorActive && cursorResizing(cursor,s.cursor->width))
+            return refuse(Status::CursorSize,0x70080+bank,s.cursor->width,cursorWidth(cursor));
         if(bool(cursor&0x27)!=s.cursorActive || (s.cursorActive && !cursorMatches(cursor,s.cursor->width)))
             return refuse(Status::Conflict,0x70080+bank,s.cursorActive,cursor);
         // No autonomous DSB writer is admitted by this direct-MMIO proof.

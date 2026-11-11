@@ -239,6 +239,11 @@ uint64_t rplpEntryIRQ[8] {1};
 // behind its base at the deadline (the cursor's allocation unchanged), latches refused for that mismatch (flag off, or the
 // allocation moved), the last one's uptime ns, its expected | observed << 32, its frames before | after << 32, its wait us.
 uint64_t rplpCursorLag[8] {1};
+// -wex-rplp-cursorsize (round 61): N97FBCursorSize = schema, flag, cursor watermark setups admitted during a resize (the
+// live cursor enabled at another valid size than the requested one), latches in flight for it, the last one's uptime ns,
+// the last setup's live control | requested width << 32, setups refused for it with the flag off, the last latch's live
+// width | plan width << 32.
+uint64_t rplpCursorSize[8] {1};
 void rplpForceWakeUnderflowCheck(void *owner,bool enable,unsigned domains,uint64_t kind,const uint32_t *before,const uint32_t *after,const uint64_t *event,const void *caller);
 void (*rplpGTForceWake)(void *,bool,unsigned);   // the accelerator's counted forcewake entry, once resolved
 bool rplpAuxLaneEnabled;           // -wex-rplp-auxlane, see Display13FBPowerIO::auxLane
@@ -583,6 +588,8 @@ static void rplpWakeLogArm() {
  IORegistryEntry::getRegistryRoot()->setProperty("N97FBEntryIRQ",rplpEntryIRQ,sizeof(rplpEntryIRQ));
  rplpCursorLag[1]=checkKernelArgument("-wex-rplp-cursorlag");
  IORegistryEntry::getRegistryRoot()->setProperty("N97FBCursorLag",rplpCursorLag,sizeof(rplpCursorLag));
+ rplpCursorSize[1]=checkKernelArgument("-wex-rplp-cursorsize");
+ IORegistryEntry::getRegistryRoot()->setProperty("N97FBCursorSize",rplpCursorSize,sizeof(rplpCursorSize));
  if(!checkKernelArgument("-wex-rplp-wakelog"))return;
  rplpWakeLogLock=IOLockAlloc();
  const bool thread=rplpWakeLogLock && kernel_thread_start(rplpWakeLogWriter,nullptr,&rplpWakeLogThread)==KERN_SUCCESS;
@@ -8901,7 +8908,7 @@ void XE::wrapAlderLakeNLatencyInit(IOService *controller) {
 
 void XE::adlnWMSetup(OSObject *plane,OSObject *path,bool cursor) {
 	auto &c=display13FBPower;if(!c.lock)return;
-	uint64_t record[32] {},inputs[24] {};IOLockLock(c.lock);
+	uint64_t record[32] {},inputs[24] {};bool sizeRecorded=false;IOLockLock(c.lock);
 	Display13WM::Plan p;
 	auto fb=plane && plane->getMetaClass()->getClassSize()>=0x1C8 ? Display13FBMemory::field<IOService *>(plane,0x68) : nullptr;
 	auto controller=static_cast<IOService *>(c.controller);
@@ -8949,8 +8956,15 @@ void XE::adlnWMSetup(OSObject *plane,OSObject *path,bool cursor) {
 		inputs[14]=wells;inputs[15]=rangeRaw;inputs[16]=ctl;inputs[17]=ipc;inputs[18]=cursorMode;
 		inputs[19]=width;inputs[20]=htotal;inputs[21]=rgbSupported;inputs[22]=powered;
 		inputs[23]=Display13FBMemory::field<uint32_t>(plane,0x10C);
+		// -wex-rplp-cursorsize: the cursor enabled at another valid size than the requested one is a resize in flight (the
+		// native path asks for the new size's watermarks before it rewrites the control); counted either way.
+		const bool resizing=cursor && powered && Display13WM::cursorResizing(cursorMode,width);
+		if(resizing) {
+			++rplpCursorSize[rplpCursorSize[1] ? 2 : 6];rplpCursorSize[4]=rplpUptimeNs();
+			rplpCursorSize[5]=uint64_t(cursorMode)|uint64_t(width)<<32;sizeRecorded=true;
+		}
 		if(powered && rangeRaw!=UINT32_MAX && Display13DBUF::valid(range) && rgbSupported && ipc!=UINT32_MAX &&
-			(!cursor || Display13WM::cursorMatches(cursorMode,width,true)) &&
+			(!cursor || Display13WM::cursorMatches(cursorMode,width,true) || (rplpCursorSize[1] && resizing)) &&
 			!(Display13DBUF::slices(range)&~Display13DBUF::allowed(c.dbuf,pipe)) &&
 			(cursor || !Display13DBUF::overlap(range,c.dbuf.pipe[pipe].cursor))) {
 			// Audited native pixel/scaling calculation is CPU-only. Preserve its
@@ -8984,6 +8998,7 @@ void XE::adlnWMSetup(OSObject *plane,OSObject *path,bool cursor) {
 	record[25]=pipe;record[26]=binding.framebuffer;record[27]=binding.ddi;
 	IOLockUnlock(c.lock);
 	IORegistryEntry::getRegistryRoot()->setProperty(cursor ? "N97FBCursorWM" : "N97FBPrimaryWM",record,sizeof(record));
+	if(sizeRecorded)IORegistryEntry::getRegistryRoot()->setProperty("N97FBCursorSize",rplpCursorSize,sizeof(rplpCursorSize));
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBBinding",bindingRecord,sizeof(bindingRecord));
 	auto root=IORegistryEntry::getRegistryRoot();
 	if(pipe<3) {
@@ -9239,7 +9254,7 @@ Display13WM::Latch XE::adlnVerifyWMLatch(IOService *fb,uint64_t nativeHz,uint64_
 	const Display13WM::Snapshot expected {
 		&c.pipe[pipe].wm[0],&c.pipe[pipe].wm[1],primaryRaw,cursorRaw,
 		c.pipe[pipe].wmSurface[0],c.pipe[pipe].wmSurface[1],readout.read(0x45004),nativeHz,c.pipe[pipe].wm0Only[0],cursor,
-		Display13WM::pipeLineTime(c.pipe[pipe].wm[0].htotal,pipePixel),pipePixel,pipe,!rplpCursorLag[1] || cursorMoved
+		Display13WM::pipeLineTime(c.pipe[pipe].wm[0].htotal,pipePixel),pipePixel,pipe,!rplpCursorLag[1] || cursorMoved,rplpCursorSize[1]!=0
 	};
 	if(!Display13WM::clockFits(expected,targetHz)) {result.status=Display13WM::Status::Input;return result;}
 	result=Display13WM::latch(io,expected);
@@ -9462,7 +9477,10 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	c.pipe[pipe].wmLatch=result;c.pipe[pipe].wmCommitting=false;
 	// Timing/Inactive: a mode change in flight; the update stays pending and nothing retires.
 	const bool inFlight=result.status==Display13WM::Status::Timing || result.status==Display13WM::Status::Inactive ||
-		result.status==Display13WM::Status::Stalled;
+		result.status==Display13WM::Status::Stalled || result.status==Display13WM::Status::CursorSize;
+	if(result.status==Display13WM::Status::CursorSize) {
+		++rplpCursorSize[3];rplpCursorSize[4]=rplpUptimeNs();rplpCursorSize[7]=uint64_t(result.observed)|uint64_t(result.expected)<<32;
+	}
 	if(result.status!=Display13WM::Status::Complete && result.status!=Display13WM::Status::Unavailable && !inFlight)adlnFault(c.watermarkFaulted,__LINE__);
 	record[0]=1;record[1]=static_cast<uint32_t>(result.status);record[2]=pending;record[3]=c.pipe[pipe].wmPending;
 	record[4]=result.frameBefore;record[5]=result.frameAfter;record[6]=result.waitUs;record[7]=result.budgetUs;
@@ -9480,6 +9498,7 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 		const char *first=result.status==Display13WM::Status::Timing ? "N97FBWMLatchTimingFirst" :
 			result.status==Display13WM::Status::Inactive ? "N97FBWMLatchInactiveFirst" :
 			result.status==Display13WM::Status::Stalled ? "N97FBWMLatchStalledFirst" :
+			result.status==Display13WM::Status::CursorSize ? "N97FBWMLatchCursorSizeFirst" :
 			result.status==Display13WM::Status::Unavailable ? "N97FBWMLatchUnavailableFirst" : "N97FBWMLatchConflictFirst";
 		if(!root->getProperty(first))root->setProperty(first,timing,sizeof(timing));
 	}
@@ -9517,6 +9536,8 @@ void XE::wrapDisplay13WMArmUpdate(IOService *fb) {
 	adlnPublishEDPRemap();
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBWMTriggerSurfaces",trigger,sizeof(trigger));
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBWMLatch",record,sizeof(record));
+	if(record[1]==static_cast<uint32_t>(Display13WM::Status::CursorSize))
+		IORegistryEntry::getRegistryRoot()->setProperty("N97FBCursorSize",rplpCursorSize,sizeof(rplpCursorSize));
 	auto root=IORegistryEntry::getRegistryRoot();char property[48];
 	snprintf(property,sizeof(property),"N97FBPipe%uWMTriggerSurfaces",pipe);root->setProperty(property,trigger,sizeof(trigger));
 	snprintf(property,sizeof(property),"N97FBPipe%uWMLatch",pipe);root->setProperty(property,record,sizeof(record));

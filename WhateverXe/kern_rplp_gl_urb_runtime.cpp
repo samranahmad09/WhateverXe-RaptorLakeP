@@ -48,10 +48,15 @@ RPLPVAVPP::Plan vaPlan;
 mach_vm_address_t originalValidate;
 thread_call_t publisher;
 bool routed,routeAttempted;
+const char *osBuild;         // the kernel's OS build string storage; userspace fills it after the kernel has started
+uint64_t kernelRecord[6] {1}; // RPLPPageKernel: schema, page size ok, kernel major ok, exact version string ok, build
+                              // string storage resolved, its first eight bytes when this plugin was set up
 
 void publish(thread_call_param_t,thread_call_param_t) {
     // May allocate here; never publish from inside the VM callback/write lock.
     auto root=IORegistryEntry::getRegistryRoot();
+    root->setProperty("RPLPPageKernel",kernelRecord,sizeof(kernelRecord));
+    root->setProperty("RPLPPageBuild",!osBuild ? "unresolved" : osBuild[0] ? osBuild : "empty");
     for(auto &t:targets) {
         if(!t.setup && !t.armed)continue;
         uint64_t record[10] {1,__atomic_load_n(&t.setup,__ATOMIC_ACQUIRE)};
@@ -88,7 +93,7 @@ void validate(vnode_t vp,memory_object_t pager,memory_object_offset_t offset,
         auto &t=targets[k];
         if(!__atomic_load_n(&t.armed,__ATOMIC_ACQUIRE) || vp!=t.vnode || offset!=t.pageOffset)continue;
         // A retained usecount prevents vnode reuse. These accessors do not do I/O.
-        const bool identity=vnode_vid(vp)==t.generation && vfs_isrdonly(vnode_mount(vp));
+        const bool identity=vnode_vid(vp)==t.generation && vfs_isrdonly(vnode_mount(vp)) && buildAccepted();
         WritePage io {vp,t.generation,&t.armed};
         auto page=const_cast<uint8_t *>(static_cast<const uint8_t *>(data));
         const unsigned result=k==unsigned(Kind::GL)
@@ -163,15 +168,23 @@ bool routeable(mach_vm_address_t address) {
     return span<=32;
 }
 
-// Whether the kernel is the one the images, offsets and the validation entry were established on.
+// Whether the kernel is the one the images, offsets and the validation entry were established on. The kernel build is
+// pinned by its exact version string. The OS build string is not available this early (userspace sets it after the
+// kernel has started; round 61 found it empty here and nothing armed), so it is compared where a page is validated.
 bool kernelAccepted(KernelPatcher &p) {
     auto version=reinterpret_cast<const char *>(p.solveSymbol(KernelPatcher::KernelID,"_version"));
     p.clearError();
-    auto build=reinterpret_cast<const char *>(p.solveSymbol(KernelPatcher::KernelID,"_osversion"));
+    osBuild=reinterpret_cast<const char *>(p.solveSymbol(KernelPatcher::KernelID,"_osversion"));
     p.clearError();
-    return page_size==PageSize && getKernelVersion()==KernelVersion::BigSur &&
-        XELP::kernelOS(version)==XELP::OS::BigSur && build && !memcmp(build,"20G1443",8);
+    const bool pageOK=page_size==PageSize,majorOK=getKernelVersion()==KernelVersion::BigSur,
+        versionOK=XELP::kernelOS(version)==XELP::OS::BigSur;
+    kernelRecord[1]=pageOK;kernelRecord[2]=majorOK;kernelRecord[3]=versionOK;kernelRecord[4]=osBuild!=nullptr;
+    if(osBuild)lilu_os_memcpy(kernelRecord+5,osBuild,sizeof(uint64_t));
+    return pageOK && majorOK && versionOK;
 }
+// At validation time userspace has long set the build string. An unresolvable symbol leaves the exact kernel
+// version and the image and page digests as the identity; a resolved string must read the expected build.
+bool buildAccepted() { return !osBuild || !memcmp(osBuild,"20G1443",8); }
 
 // Prepare one target: its own admission, its file, and the shared route once.
 void arm(KernelPatcher &p,Kind kind,bool requested,bool physicalReady,bool kernelOK) {
